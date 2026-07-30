@@ -76,3 +76,6 @@ jobs:
 
       - name: Run verdict-decision fixture tests
         run: bash tests/test-verdict-decision.sh
+
+      - name: Run install.sh fixture tests
+        run: bash tests/test-install.sh

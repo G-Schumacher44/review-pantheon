@@ -113,6 +113,41 @@ Prompts are built identically for every lane: persona file + a generated context
 range, base branch, house-rules file, output-contract reminder). No lane gets a private fork
 of a persona.
 
+## Generated per-tool projections (interactive/editor lanes)
+
+The provider lanes above run the gate agents (Artemis, Apollo) headless, in CI or from
+`review-gate`. The counsel agents (Socrates, Diogenes, Plato) live earlier — in the human loop,
+during planning and design — which means they need to be invocable *inside* a coding-agent
+session, in whatever convention that tool's editor or CLI actually supports. `install.sh`'s
+`--claude`/`--cursor`/`--codex`/`--gemini` flags generate that per-tool artifact at install
+time.
+
+This looks, on its face, like the thing rule 4 forbids — a persona's content ending up in more
+than one file. It isn't the same failure, because it isn't the same axis: rule 4 exists to stop
+*hand-maintained* copies from drifting apart, one edited and the other forgotten. Every file
+these flags write is mechanically derived from `agents/*.md` by `install.sh` at install time —
+frontmatter stripped or reshaped to the target tool's schema, the persona body embedded
+verbatim or referenced, and a `GENERATED — do not edit, re-run install` header stamped on top.
+There is exactly one place a human edits persona content — `agents/<name>.md` — and every
+projection is regenerated from it, never hand-edited independently. That's generation, not
+duplication, and it's the same shape as the CLI/Action split for the verdict-decision rule (see
+"Two runtimes, one rule" below): the artifact repeats, the source of truth doesn't.
+
+Per-tool support is tiered honestly, not uniformly:
+
+- **Claude Code (`--claude`)** — first-class. The persona files are already valid Claude Code
+  subagent format (YAML frontmatter + body), so they're copied verbatim into
+  `.claude/agents/`. A generated `/counsel` command (`.claude/commands/counsel.md`) wraps
+  Socrates, Diogenes, and Plato into one invocation that runs Socrates first on an open
+  decision, the other two on a proposed shape, and synthesizes their verdicts.
+- **Cursor, Codex, Gemini (`--cursor`/`--codex`/`--gemini`)** — best-effort, same posture the
+  provider lanes already take with unverified CLIs: each tool's repo-level custom-command (or
+  closest equivalent) convention was checked against that tool's own current official docs
+  before implementing, not assumed from Claude Code parity. Where a tool has no repo-level
+  command convention at all, `install.sh` says so and skips it rather than inventing one — see
+  the flag's own comment block in `install.sh` and the README's "Using the agents in your
+  editor/CLI" section for what was verified vs. best-effort, and against which source, per tool.
+
 ## Two runtimes, one rule
 
 The CLI runner and the GitHub Action are separate processes on separate runtimes — bash+jq for
@@ -213,8 +248,11 @@ action/review.yml          GitHub Actions twin gate — one matrix job (artemis,
 action/decide_verdict.py   the Action's verdict-decision rule (Python twin of
                            cli/lib/verdict.sh — see "Two runtimes, one rule"); installed into
                            the target repo, not embedded in the workflow YAML
-tests/                     tests/test-verdict-decision.sh — cross-runner fixture test
+tests/                     tests/test-verdict-decision.sh — cross-runner fixture test;
+                           tests/test-install.sh — install.sh editor/CLI lane fixture test
 install.sh                 idempotent installer into a target repo (refuses to clobber
-                           customized files); does not install gate.conf
+                           customized files); does not install gate.conf; --claude/--cursor/
+                           --codex/--gemini generate per-tool projections of agents/*.md for
+                           in-session use (see "Generated per-tool projections" above)
 docs/                      anything that doesn't fit above
 ```

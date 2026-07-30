@@ -108,6 +108,38 @@ provider_run() {
 No other file changes — the runner sources it, calls `provider_run "$model" "$prompt_file"` under
 a timeout, and treats its stdout exactly like every other lane's.
 
+## Using the agents in your editor/CLI
+
+The gate agents (Artemis, Apollo) run headless, from CI or `review-gate` — you don't invoke them
+directly. The **counsel agents** (Socrates, Diogenes, Plato) are different: they belong in the
+planning and design conversation itself, so you need to be able to call them by name inside
+whatever coding-agent session you're already in. `install.sh` can generate that for you, per tool:
+
+```
+install.sh /path/to/your-repo --claude --cursor --codex --gemini
+```
+
+In Claude Code, that gets you either `@socrates` (mention the subagent directly — good for a
+single quick opinion) or `/counsel path/to/design.md` (runs the whole tier and synthesizes the
+verdicts — good before committing to a direction).
+
+Flags are combinable and additive to the default gate-only install; add only the ones for tools
+you use. Every file they write is *generated* from `agents/*.md` at install time — never a
+hand-maintained copy — and carries a `GENERATED — do not edit, re-run install` header. Edit a
+persona in `agents/<name>.md` and re-run the flag to refresh its projections everywhere.
+
+| Tool | What's generated | Status |
+|---|---|---|
+| **Claude Code** (`--claude`) | All five personas copied verbatim into `.claude/agents/` (already valid Claude Code subagent format), plus a generated `/counsel` command (`.claude/commands/counsel.md`) that runs Socrates first on an open decision, Diogenes + Plato on a proposed shape, and synthesizes their verdicts. | **Verified, first-class.** The personas are already this format; `/counsel` follows the documented [slash-command](https://docs.claude.com/en/docs/claude-code/slash-commands) convention. |
+| **Cursor** (`--cursor`) | All five personas as native subagents, `.cursor/agents/*.md` (frontmatter adapted to Cursor's schema: `name`, `description`, `model`, `readonly: true`). | **Verified against current official docs** ([cursor.com/docs/subagents](https://cursor.com/docs/subagents), Cursor 2.4+). Cursor's older `.cursor/commands/*.md` feature is deprecated as of the same release and folded into a separate Skills feature with no documented argument-passing — Subagents is the closer match to an invokable named persona. Best-effort: not integration-tested against a live Cursor install in this repo's CI. |
+| **Codex CLI** (`--codex`) | All five personas as Codex Skills, `.agents/skills/<name>/SKILL.md` (frontmatter `name` + `description`). | **Verified against current official docs** ([developers.openai.com/codex/skills](https://developers.openai.com/codex/skills)). Codex has **no** repo-level "custom command" convention — its custom-prompts feature (`~/.codex/prompts/*.md`) is user-level only and itself deprecated per OpenAI's docs. Skills is the documented, git-shareable, repo-level mechanism, so that's what's generated instead of inventing a command convention Codex doesn't have. Best-effort: not integration-tested against a live Codex install in this repo's CI. |
+| **Gemini CLI** (`--gemini`) | All five personas as custom commands, `.gemini/commands/<name>.toml` (`description` + `prompt` fields, `{{args}}` as the argument placeholder). | **Verified against official docs** ([github.com/google-gemini/gemini-cli/blob/main/docs/cli/custom-commands.md](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/custom-commands.md)). Project-level `.gemini/commands/` is officially supported and takes priority over the user-level `~/.gemini/commands/` equivalent. Best-effort: not integration-tested against a live Gemini CLI install in this repo's CI. |
+
+Claude's `/counsel` is the only generated synthesis command — for the other tools, invoke the
+counsel personas individually (`/socrates` in Cursor and Gemini CLI; `$socrates` or the `/skills`
+menu in Codex CLI) and reason across their verdicts yourself; wiring a synthesis wrapper for each
+tool's own command format is a plausible future addition, not done here.
+
 ## CLI usage
 
 ```
@@ -165,8 +197,11 @@ cli/lib/verdict.sh         extraction + verdict-decision, including the blocker 
 cli/providers/             provider lanes (claude, codex, gemini, cursor)
 action/review.yml          GitHub Actions twin gate — one matrix job, fail-closed decision step
 action/decide_verdict.py   the Action's verdict-decision rule (Python twin of cli/lib/verdict.sh)
-tests/                     tests/test-verdict-decision.sh — cross-runner fixture test
-install.sh                 idempotent installer into a target repo
+tests/                     test-verdict-decision.sh (cross-runner fixture test) and
+                            test-install.sh (install.sh's editor/CLI-lane fixture test)
+install.sh                 idempotent installer into a target repo; --claude/--cursor/--codex/
+                            --gemini additionally generate per-tool editor/CLI projections of
+                            the personas (see "Using the agents in your editor/CLI" above)
 docs/                      anything that doesn't fit above
 ```
 
