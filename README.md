@@ -1,6 +1,7 @@
-<!-- banner: docs/assets/banner.png — to be added -->
-
 <div align="center">
+
+<img src="docs/assets/banner.png" alt="review-pantheon — a fail-closed AI review gate and counsel panel for spec-driven development" width="100%"/>
+
 
 [![CI](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml/badge.svg)](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
