@@ -1,11 +1,12 @@
 # Design — review-pantheon
 
-Five read-only agents, split by when they run: two gate agents (Artemis, Apollo) in a
-fail-closed PR gate against finished work, and three counsel agents (Socrates, Diogenes, Plato)
-for the design phase — planning documents, specs, proposals, and the codebase someone is about
-to build on, before it's built. Agent-CLI-agnostic: Claude-first, with pluggable provider lanes
-(Codex, Gemini, Cursor). This document is the contract — the personas, runners, and workflow are
-all implementations of what's written here.
+Five read-only agents, split by what their verdict does: two gate agents (Artemis, Apollo) whose
+verdicts **enforce** — wired into a fail-closed PR gate that can block a merge — and three
+counsel agents (Socrates, Diogenes, Plato) whose verdicts **inform** a human's decision and never
+gate or block, regardless of what they're pointed at: a spec, a design doc, a proposal, existing
+code, or a diff. Agent-CLI-agnostic: Claude-first, with pluggable provider lanes (Codex, Gemini,
+Cursor). This document is the contract — the personas, runners, and workflow are all
+implementations of what's written here.
 
 ## The idea
 
@@ -21,17 +22,20 @@ They are twins, not duplicates — different questions, different failure modes 
 they're the **gate agents**: machinery that runs on every PR, in CI and the CLI, against
 finished work.
 
-A second tier — **counsel agents** — lives earlier, in the planning and design phase, in the
-human loop. They're invoked when deciding, not when merging:
+A second tier — **counsel agents** — exists to inform, not enforce: their verdict is counsel a
+human weighs in a decision, never a mechanism that gates a merge. That's a property of what
+they're for, not of what they're allowed to read — they read a spec, a design doc, a proposal,
+existing code, or a diff alike, the same lens applied to whichever one they're handed. Their
+natural home leans early — before building, while the decision is still open — but nothing
+about them is scoped to design documents only:
 
-- **Socrates** — options analyst: run BEFORE building, maps distinct approaches and go/no-go.
+- **Socrates** — options analyst: usually runs earliest, maps distinct approaches and go/no-go.
 - **Diogenes** — simplicity auditor: is this MORE than it needs to be?
 - **Plato** — coherence auditor: does this have a coherent shape, or is it ad-hoc sprawl?
 
-Diogenes and Plato apply as much to a proposed design or spec as to a landed diff — "is this
-shape coherent" and "is this more than the job needs" are design-review questions first. They
-can still be added to a CLI gate run via `--agents` or `gate.conf`, but that's the exception:
-their home is the design conversation, not the merge queue.
+They can be added to a CLI gate run via `--agents` or `gate.conf` for a shape check alongside the
+twins, but that wiring is the exception: their design purpose is a human reading their counsel
+and deciding, not a pipeline deciding for them.
 
 ## Hard rules (non-negotiable, all agents, all providers)
 

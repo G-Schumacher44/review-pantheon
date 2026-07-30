@@ -38,16 +38,18 @@ with a `gh`-authenticated remote — see [CLI usage](#cli-usage) below.
 
 ## The panel
 
-**Gate agents (the twins)** — machinery. Run on every PR, in CI and the CLI, against finished
-work; only these two run automatically in CI.
+**Gate agents (the twins)** — enforce. Run on every PR, in CI and the CLI, against finished
+work; only these two run automatically in CI, and only these two verdicts can block a merge.
 
 | Agent | Lens | Verdict vocabulary (green / yellow / red) |
 |---|---|---|
 | **Artemis** | Hunts bugs in the diff — correctness, untested failure paths, shortcuts, house-rule violations. Assumes nothing works until shown. | `SHIP` / `FIX_FIRST` / `STOP` |
 | **Apollo** | Verifies the claim — re-runs stated checks, diffs claimed scope against git reality, checks required records exist. Skipped loudly on docs-only diffs. | `ACCEPT` / `ACCEPT_WITH_NOTES` / `RETURN` |
 
-**Counsel agents (the philosophers)** — planning and design, in the human loop. Invoked when
-deciding, not when merging; can be added to a CLI gate run via `--agents`/`gate.conf`, but that's
+**Counsel agents (the philosophers)** — inform, never enforce. Their verdict is counsel a human
+weighs in a decision, not a mechanism that gates a merge — true whatever they're pointed at (a
+spec, a design doc, a proposal, existing code, or a diff). Natural home leans early, in the
+human loop, before merging; can be added to a CLI gate run via `--agents`/`gate.conf`, but that's
 the exception, not their home.
 
 | Agent | Lens | Verdict vocabulary (green / yellow / red) |
@@ -59,8 +61,8 @@ the exception, not their home.
 Artemis and Apollo are twins, not duplicates: she reviews the code, he reviews the story about
 the code, and a PR can pass one and fail the other. Diogenes and Plato are foils: Diogenes attacks
 over-structure, Plato attacks under-structure, so between them a design gets pushed toward exactly
-as much shape as the job needs. Socrates runs earliest of all — before there's a diff for the
-twins or a design for Diogenes and Plato to weigh in on.
+as much shape as the job needs. Socrates typically runs earliest of all — before there's
+anything else in the room yet for the rest of the panel to weigh in on.
 
 ## How the gate stays honest
 
