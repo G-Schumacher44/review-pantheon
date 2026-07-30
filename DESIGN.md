@@ -1,8 +1,11 @@
 # Design — review-pantheon
 
-Five read-only review agents and a fail-closed PR gate that runs them. Agent-CLI-agnostic:
-Claude-first, with pluggable provider lanes (Codex, Gemini, Cursor). This document is the
-contract — the personas, runners, and workflow are all implementations of what's written here.
+Five read-only agents, split by when they run: two gate agents (Artemis, Apollo) in a
+fail-closed PR gate against finished work, and three counsel agents (Socrates, Diogenes, Plato)
+for the design phase — planning documents, specs, proposals, and the codebase someone is about
+to build on, before it's built. Agent-CLI-agnostic: Claude-first, with pluggable provider lanes
+(Codex, Gemini, Cursor). This document is the contract — the personas, runners, and workflow are
+all implementations of what's written here.
 
 ## The idea
 
