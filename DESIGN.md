@@ -6,7 +6,7 @@ counsel agents (Socrates, Diogenes, Plato) whose verdicts **inform** a human's d
 gate or block, regardless of what they're pointed at: a spec, a design doc, a proposal, existing
 code, or a diff. Agent-CLI-agnostic: Claude-first, with pluggable provider lanes (Codex, Gemini,
 Cursor). This document is the contract — the personas, runners, and workflow are all
-implementations of what's written here.
+implementations of what's written here. See `docs/README.md` for a full doc index.
 
 ## The idea
 
