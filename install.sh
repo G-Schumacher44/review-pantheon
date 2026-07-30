@@ -3,11 +3,16 @@
 #
 # Usage: install.sh /abs/path/to/target-repo
 #
-# Copies the review personas and GitHub Action into the target repo so its own CI checkout
-# can see them (the CLI runner reads agents/*.md from this repo directly; the Action runs
-# inside the target repo's checkout and needs its own copy — see DESIGN.md rule 4). Never
+# Copies the review personas, the verdict-decision script, and the GitHub Action into the
+# target repo so its own CI checkout can see them (the CLI runner reads agents/*.md and
+# cli/lib/verdict.sh from this repo directly; the Action runs inside the target repo's
+# checkout and needs its own copy of everything it uses — see DESIGN.md rule 4). Never
 # overwrites a file that's been customized: a file that differs from the shipped version is
 # left alone and reported as skipped.
+#
+# Does NOT install gate.conf — that file only matters to the CLI lane, and copying it into
+# every repo by default meant most installs got a config file they never look at. CLI-lane
+# users copy gate.conf.example themselves (README documents this under CLI usage).
 set -euo pipefail
 
 die() { echo "install.sh: $*" >&2; exit 1; }
@@ -22,14 +27,14 @@ TARGET="$(cd "$TARGET" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 AGENTS_SRC="$SCRIPT_DIR/agents"
+DECIDE_SRC="$SCRIPT_DIR/action/decide_verdict.py"
 ACTION_SRC="$SCRIPT_DIR/action/review.yml"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
-GATE_CONF_SRC="$SCRIPT_DIR/gate.conf.example"
 
 AGENTS_DEST="$TARGET/.github/review-agents"
+DECIDE_DEST="$TARGET/.github/review-agents/decide_verdict.py"
 WORKFLOW_DEST="$TARGET/.github/workflows/review.yml"
 RULES_DEST="$TARGET/REVIEW_RULES.md"
-GATE_CONF_DEST="$TARGET/gate.conf"
 GITIGNORE_DEST="$TARGET/.gitignore"
 
 SKIPPED=()
@@ -52,18 +57,18 @@ install_file() {
 }
 
 [[ -d "$AGENTS_SRC" ]] || die "missing $AGENTS_SRC — run this from a review-pantheon checkout"
+[[ -f "$DECIDE_SRC" ]] || die "missing $DECIDE_SRC"
 [[ -f "$ACTION_SRC" ]] || die "missing $ACTION_SRC"
 [[ -f "$RULES_SRC" ]] || die "missing $RULES_SRC"
-[[ -f "$GATE_CONF_SRC" ]] || die "missing $GATE_CONF_SRC"
 
 mkdir -p "$AGENTS_DEST"
 for persona in "$AGENTS_SRC"/*.md; do
   install_file "$persona" "$AGENTS_DEST/$(basename "$persona")"
 done
 
+install_file "$DECIDE_SRC" "$DECIDE_DEST"
 install_file "$ACTION_SRC" "$WORKFLOW_DEST"
 install_file "$RULES_SRC" "$RULES_DEST"
-install_file "$GATE_CONF_SRC" "$GATE_CONF_DEST"
 
 # .gitignore: append the state-file entry if not already present.
 if [[ -f "$GITIGNORE_DEST" ]]; then
@@ -94,8 +99,14 @@ Post-install checklist:
   3. Pin the action in .github/workflows/review.yml: it ships with a placeholder
      PIN-ME-TO-A-FULL-COMMIT-SHA in place of a real anthropics/claude-code-action commit SHA.
      Replace it with a real full 40-character commit SHA before relying on this gate.
-  4. Open a test PR with a deliberately planted blocker (a secret in a diff, an unguarded
+  4. Verify the action's input/output names (claude_code_oauth_token, prompt, allowed_tools,
+     the "result" output the decide step reads) against the release you just pinned — they
+     are unverified guesses, written without network access to the action's docs. This is
+     the same warning that's in review.yml's own header comment.
+  5. Open a test PR with a deliberately planted blocker (a secret in a diff, an unguarded
      rm, whatever your REVIEW_RULES.md forbids) and confirm the gate goes RED before you
      trust a green result on a real PR.
-  5. Only after step 4 passes, consider adding this workflow as a required status check.
+  6. Only after step 5 passes, consider adding this workflow as a required status check.
+  7. Using the CLI lane too? Copy gate.conf.example to gate.conf at your repo root and edit
+     it — it isn't installed automatically (see README's CLI usage section).
 EOF

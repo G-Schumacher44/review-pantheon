@@ -1,17 +1,21 @@
 # review-pantheon — GitHub Actions twin gate (Claude lane).
 #
-# Runs Artemis and Apollo in parallel on every pull_request, then a third job posts one
-# combined PR comment. Gated on the `REVIEW_GATE_ENABLED` repo variable so installing this
-# file never silently starts gating PRs.
+# Runs Artemis and Apollo as two legs of one matrix job, then a third job posts one combined
+# PR comment. Gated on the `REVIEW_GATE_ENABLED` repo variable so installing this file never
+# silently starts gating PRs. Also skips draft PRs outright (GitHub fires `opened` for drafts
+# too, so this isn't automatic — see the job `if:` below) to match the CLI lane's draft
+# behavior: no review run, nothing posted.
 #
 # INSTALL NOTE (read before relying on this): `anthropics/claude-code-action` is pinned below
 # to a placeholder, `PIN-ME-TO-A-FULL-COMMIT-SHA` — this file was authored without network
 # access to look up a real current release SHA. Replace it with a full 40-character commit
-# SHA before this workflow does anything. While you're in there, verify the `with:` inputs
-# on the action step (`claude_code_oauth_token`, `prompt`, `allowed_tools`) and the output
-# this workflow reads the agent's raw text from (`steps.run-agent.outputs.result`) against
-# the docs for whatever SHA you pin — the action's interface can change between releases.
-# See install.sh's post-install checklist.
+# SHA before this workflow does anything useful (an unpinned `uses:` fails at job
+# parse/resolve time with an obvious error — it doesn't silently no-op). While you're in
+# there, verify the `with:` inputs on the action step (`claude_code_oauth_token`, `prompt`,
+# `allowed_tools`) and the output this workflow reads the agent's raw text from
+# (`steps.run-agent.outputs.result`) against the docs for whatever SHA you pin — the action's
+# interface can change between releases, and these names are unverified guesses. See
+# install.sh's post-install checklist.
 name: review-pantheon
 
 on:
@@ -21,174 +25,17 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  id-token: write
+  # No id-token: write — this workflow doesn't need OIDC token exchange for anything it
+  # currently does. Some anthropics/claude-code-action releases may require it; re-add only
+  # if the release you pin documents that requirement, and scope it to the job that needs it.
 
 jobs:
-  artemis:
-    if: ${{ vars.REVIEW_GATE_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Assert CLAUDE_CODE_OAUTH_TOKEN secret is present
-        run: |
-          set -euo pipefail
-          if [ -z "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" ]; then
-            echo "::error::CLAUDE_CODE_OAUTH_TOKEN secret is not set — the gate fails loud, it does not skip."
-            exit 1
-          fi
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      - name: Build Artemis prompt
-        id: build-prompt
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          REPO_NAME: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          PERSONA="$GITHUB_WORKSPACE/.github/review-agents/artemis.md"
-          if [ ! -f "$PERSONA" ]; then
-            echo "::error::missing $PERSONA — run install.sh (review-pantheon) in this repo first."
-            exit 1
-          fi
-          PROMPT_FILE="$RUNNER_TEMP/artemis-prompt.md"
-          awk '
-            /^---[[:space:]]*$/ { fence++; next }
-            fence >= 2 { print }
-          ' "$PERSONA" > "$PROMPT_FILE"
-          {
-            echo
-            echo "---"
-            echo "## Run context"
-            echo "- Repo: $REPO_NAME"
-            printf -- "- PR: #%s - %s\n" "$PR_NUMBER" "$PR_TITLE"
-            echo "- Diff range: ${BASE_SHA}...${HEAD_SHA}"
-            echo "- Base branch: $BASE_REF"
-            if [ -f "$GITHUB_WORKSPACE/REVIEW_RULES.md" ]; then
-              echo "- House rules file: REVIEW_RULES.md (present - treat each rule as a blocker-class check)"
-            else
-              echo "- House rules file: REVIEW_RULES.md (not present - skip house-rule checks, note it)"
-            fi
-            echo
-            echo "Use \`git diff ${BASE_SHA}...${HEAD_SHA}\`, \`git show <ref>:path\`, and \`git log\` to inspect the change."
-            echo
-            echo "## Output contract"
-            echo "End your response with exactly one JSON verdict object, per your persona instructions above, and nothing after it. No prose after the JSON."
-          } >> "$PROMPT_FILE"
-          delim="pantheon_$(openssl rand -hex 16)"
-          {
-            echo "prompt<<$delim"
-            cat "$PROMPT_FILE"
-            echo "$delim"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Run Artemis review
-        id: run-agent
-        uses: anthropics/claude-code-action@PIN-ME-TO-A-FULL-COMMIT-SHA
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: ${{ steps.build-prompt.outputs.prompt }}
-          allowed_tools: "Read,Grep,Glob,Bash"
-
-      - name: Save raw agent output
-        if: always()
-        env:
-          RAW_OUTPUT: ${{ steps.run-agent.outputs.result }}
-        run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/artemis-raw.txt"
-
-      - name: Decide Artemis verdict
-        id: decide
-        if: always()
-        env:
-          RAW_FILE: ${{ runner.temp }}/artemis-raw.txt
-        run: |
-          python3 - <<'PYEOF'
-          import json, os, secrets, sys
-
-          def emit(color, verdict, summary, top, findings_json):
-              delim = "pantheon_" + secrets.token_hex(16)
-              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-                  out.write(f"color={color}\n")
-                  out.write(f"verdict={verdict}\n")
-                  out.write(f"summary<<{delim}\n{summary}\n{delim}\n")
-                  out.write(f"top_finding<<{delim}\n{top}\n{delim}\n")
-                  out.write(f"findings_json<<{delim}\n{findings_json}\n{delim}\n")
-
-          def fail(reason):
-              emit("unverified", "UNVERIFIED", reason, reason, "{}")
-              print(f"::error::artemis verdict UNVERIFIED - {reason}")
-              sys.exit(1)
-
-          VOCAB = {"SHIP": "green", "FIX_FIRST": "yellow", "STOP": "red"}
-
-          try:
-              with open(os.environ["RAW_FILE"], "r", errors="replace") as fh:
-                  raw = fh.read()
-          except OSError as e:
-              fail(f"could not read agent output: {e}")
-
-          lines = raw.splitlines()
-          start = None
-          for i, line in enumerate(lines):
-              if line.startswith("{"):
-                  start = i
-          candidate = "\n".join(lines[start:]) if start is not None else ""
-          if not candidate:
-              fail("no trailing JSON object found in agent output")
-
-          try:
-              verdict_obj = json.loads(candidate)
-          except json.JSONDecodeError as e:
-              fail(f"trailing JSON did not parse: {e}")
-
-          required = {"agent", "verdict", "has_blocker", "findings", "summary"}
-          if not isinstance(verdict_obj, dict) or not required.issubset(verdict_obj.keys()):
-              fail("verdict JSON missing required keys")
-
-          agent = verdict_obj.get("agent")
-          verdict = verdict_obj.get("verdict")
-          color = VOCAB.get(verdict)
-          if agent != "artemis" or color is None:
-              fail(f"verdict '{verdict}' from agent field '{agent}' is outside the allowed vocabulary")
-
-          findings = verdict_obj.get("findings") or []
-          top = (f"{findings[0]['severity']}: {findings[0]['issue']} ({findings[0]['file']}:{findings[0]['line']})"
-                 if findings else "no findings")
-          emit(color, verdict, verdict_obj.get("summary", ""), top, json.dumps(verdict_obj))
-
-          if color == "red":
-              print("::error::artemis verdict is STOP")
-              sys.exit(1)
-          PYEOF
-
-      - name: Save verdict artifact
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/verdicts"
-          cat > "$RUNNER_TEMP/verdicts/artemis.json" <<EOF
-          {"agent":"artemis","color":"${{ steps.decide.outputs.color || 'unverified' }}","verdict":"${{ steps.decide.outputs.verdict || 'UNVERIFIED' }}"}
-          EOF
-          printf '%s' '${{ steps.decide.outputs.findings_json || "{}" }}' > "$RUNNER_TEMP/verdicts/artemis-findings.json"
-          printf '%s' '${{ steps.decide.outputs.top_finding || "decision step did not run" }}' > "$RUNNER_TEMP/verdicts/artemis-top.txt"
-
-      - name: Upload verdict artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: verdict-artemis
-          path: ${{ runner.temp }}/verdicts/
-          retention-days: 14
-
-  apollo:
-    if: ${{ vars.REVIEW_GATE_ENABLED == 'true' }}
+  review:
+    if: ${{ vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [artemis, apollo]
     runs-on: ubuntu-latest
     steps:
       - name: Assert CLAUDE_CODE_OAUTH_TOKEN secret is present
@@ -226,14 +73,20 @@ jobs:
             done <<< "$changed"
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          if [ "$docs_only" = "true" ]; then
-            echo "::notice::docs-only diff — skipping Apollo loudly (nothing but docs changed)."
-          fi
 
-      - name: Build Apollo prompt
+      # Apollo's docs-only skip is a per-leg condition, not a separate job: on a docs-only
+      # diff, Apollo (matrix.agent == 'apollo') skips every remaining step below and the
+      # "Save verdict artifact" step at the bottom synthesizes its SKIPPED result directly.
+      # Artemis always runs.
+      - name: Log docs-only skip
+        if: matrix.agent == 'apollo' && steps.docs-check.outputs.docs_only == 'true'
+        run: echo "::notice::docs-only diff — skipping Apollo loudly (nothing but docs changed)."
+
+      - name: Build prompt
         id: build-prompt
-        if: steps.docs-check.outputs.docs_only != 'true'
+        if: matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true'
         env:
+          AGENT_NAME: ${{ matrix.agent }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -242,12 +95,12 @@ jobs:
           REPO_NAME: ${{ github.repository }}
         run: |
           set -euo pipefail
-          PERSONA="$GITHUB_WORKSPACE/.github/review-agents/apollo.md"
+          PERSONA="$GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md"
           if [ ! -f "$PERSONA" ]; then
             echo "::error::missing $PERSONA — run install.sh (review-pantheon) in this repo first."
             exit 1
           fi
-          PROMPT_FILE="$RUNNER_TEMP/apollo-prompt.md"
+          PROMPT_FILE="$RUNNER_TEMP/${AGENT_NAME}-prompt.md"
           awk '
             /^---[[:space:]]*$/ { fence++; next }
             fence >= 2 { print }
@@ -278,9 +131,9 @@ jobs:
             echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Run Apollo review
+      - name: Run review agent
         id: run-agent
-        if: steps.docs-check.outputs.docs_only != 'true'
+        if: matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true'
         uses: anthropics/claude-code-action@PIN-ME-TO-A-FULL-COMMIT-SHA
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -288,105 +141,67 @@ jobs:
           allowed_tools: "Read,Grep,Glob,Bash"
 
       - name: Save raw agent output
-        if: always() && steps.docs-check.outputs.docs_only != 'true'
+        if: always() && (matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true')
         env:
+          AGENT_NAME: ${{ matrix.agent }}
           RAW_OUTPUT: ${{ steps.run-agent.outputs.result }}
-        run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/apollo-raw.txt"
+        run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"
 
-      - name: Decide Apollo verdict
+      # Same decision rule as the CLI lane's cli/lib/verdict.sh (extract trailing JSON,
+      # validate the schema, map verdict->color, enforce the blocker invariant) — this runs
+      # the installed copy of action/decide_verdict.py so there is exactly one Python
+      # implementation of the rule, not a copy embedded in this YAML that can drift from it.
+      - name: Decide verdict
         id: decide
-        if: always() && steps.docs-check.outputs.docs_only != 'true'
+        if: always() && (matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true')
         env:
-          RAW_FILE: ${{ runner.temp }}/apollo-raw.txt
+          AGENT_NAME: ${{ matrix.agent }}
         run: |
-          python3 - <<'PYEOF'
-          import json, os, secrets, sys
-
-          def emit(color, verdict, summary, top, findings_json):
-              delim = "pantheon_" + secrets.token_hex(16)
-              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-                  out.write(f"color={color}\n")
-                  out.write(f"verdict={verdict}\n")
-                  out.write(f"summary<<{delim}\n{summary}\n{delim}\n")
-                  out.write(f"top_finding<<{delim}\n{top}\n{delim}\n")
-                  out.write(f"findings_json<<{delim}\n{findings_json}\n{delim}\n")
-
-          def fail(reason):
-              emit("unverified", "UNVERIFIED", reason, reason, "{}")
-              print(f"::error::apollo verdict UNVERIFIED - {reason}")
-              sys.exit(1)
-
-          VOCAB = {"ACCEPT": "green", "ACCEPT_WITH_NOTES": "yellow", "RETURN": "red"}
-
-          try:
-              with open(os.environ["RAW_FILE"], "r", errors="replace") as fh:
-                  raw = fh.read()
-          except OSError as e:
-              fail(f"could not read agent output: {e}")
-
-          lines = raw.splitlines()
-          start = None
-          for i, line in enumerate(lines):
-              if line.startswith("{"):
-                  start = i
-          candidate = "\n".join(lines[start:]) if start is not None else ""
-          if not candidate:
-              fail("no trailing JSON object found in agent output")
-
-          try:
-              verdict_obj = json.loads(candidate)
-          except json.JSONDecodeError as e:
-              fail(f"trailing JSON did not parse: {e}")
-
-          required = {"agent", "verdict", "has_blocker", "findings", "summary"}
-          if not isinstance(verdict_obj, dict) or not required.issubset(verdict_obj.keys()):
-              fail("verdict JSON missing required keys")
-
-          agent = verdict_obj.get("agent")
-          verdict = verdict_obj.get("verdict")
-          color = VOCAB.get(verdict)
-          if agent != "apollo" or color is None:
-              fail(f"verdict '{verdict}' from agent field '{agent}' is outside the allowed vocabulary")
-
-          findings = verdict_obj.get("findings") or []
-          top = (f"{findings[0]['severity']}: {findings[0]['issue']} ({findings[0]['file']}:{findings[0]['line']})"
-                 if findings else "no findings")
-          emit(color, verdict, verdict_obj.get("summary", ""), top, json.dumps(verdict_obj))
-
-          if color == "red":
-              print("::error::apollo verdict is RETURN")
-              sys.exit(1)
-          PYEOF
+          set -euo pipefail
+          SCRIPT="$GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::missing $SCRIPT — run install.sh (review-pantheon) in this repo first."
+            exit 1
+          fi
+          python3 "$SCRIPT" "$AGENT_NAME" "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"
 
       - name: Save verdict artifact
         if: always()
+        env:
+          AGENT_NAME: ${{ matrix.agent }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/verdicts"
-          if [ "${{ steps.docs-check.outputs.docs_only }}" = "true" ]; then
+          if [ "$AGENT_NAME" = "apollo" ] && [ "${{ steps.docs-check.outputs.docs_only }}" = "true" ]; then
             color="yellow"; verdict="SKIPPED"; top="docs-only diff: apollo skipped by design"
+            findings='{"agent":"apollo","verdict":"SKIPPED","has_blocker":false,"findings":[],"summary":"docs-only diff: apollo skipped by design"}'
           else
             color="${{ steps.decide.outputs.color || 'unverified' }}"
             verdict="${{ steps.decide.outputs.verdict || 'UNVERIFIED' }}"
-            top='${{ steps.decide.outputs.top_finding || "decision step did not run" }}'
+            top='${{ steps.decide.outputs.top_finding || "decide step did not run" }}'
+            findings='${{ steps.decide.outputs.findings_json || "{}" }}'
           fi
-          cat > "$RUNNER_TEMP/verdicts/apollo.json" <<EOF
-          {"agent":"apollo","color":"$color","verdict":"$verdict"}
+          cat > "$RUNNER_TEMP/verdicts/${AGENT_NAME}.json" <<EOF
+          {"agent":"${AGENT_NAME}","color":"$color","verdict":"$verdict"}
           EOF
-          printf '%s' '${{ steps.decide.outputs.findings_json || "{}" }}' > "$RUNNER_TEMP/verdicts/apollo-findings.json"
-          printf '%s' "$top" > "$RUNNER_TEMP/verdicts/apollo-top.txt"
+          printf '%s' "$findings" > "$RUNNER_TEMP/verdicts/${AGENT_NAME}-findings.json"
+          printf '%s' "$top" > "$RUNNER_TEMP/verdicts/${AGENT_NAME}-top.txt"
 
+      # Matrix legs each get their own job-output namespace and cannot expose distinct static
+      # `jobs.<id>.outputs` back to a downstream job (the last leg to finish would silently
+      # clobber the others) — that's why results travel via a per-leg artifact instead. Do
+      # not "simplify" this into job outputs; it will collide.
       - name: Upload verdict artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: verdict-apollo
+          name: verdict-${{ matrix.agent }}
           path: ${{ runner.temp }}/verdicts/
           retention-days: 14
 
   post-comment:
-    needs: [artemis, apollo]
-    if: ${{ always() && vars.REVIEW_GATE_ENABLED == 'true' }}
+    needs: [review]
+    if: ${{ always() && vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -408,7 +223,9 @@ jobs:
           overall="green"
           rows=""
           details=""
+          any_findings=false
 
+          # The standard gate is the hardcoded twin panel (artemis, apollo) — see DESIGN.md.
           for agent in artemis apollo; do
             dir="$VERDICTS_DIR/verdict-$agent"
             color="unverified"; verdict="UNVERIFIED"; top="job did not report a result"
@@ -426,7 +243,15 @@ jobs:
               unverified) [ "$overall" = "red" ] || overall="unverified" ;;
               yellow) [ "$overall" = "green" ] && overall="yellow" || true ;;
             esac
-            if [ "$color" != "green" ] && [ -f "$dir/$agent-findings.json" ]; then
+
+            has_findings=false
+            if [ -f "$dir/$agent-findings.json" ]; then
+              has_findings="$(python3 -c "import json; d=json.load(open('$dir/$agent-findings.json')); print('true' if d.get('findings') else 'false')" 2>/dev/null || echo false)"
+            fi
+            if [ "$has_findings" = "true" ]; then
+              any_findings=true
+            fi
+            if { [ "$color" != "green" ] || [ "$has_findings" = "true" ]; } && [ -f "$dir/$agent-findings.json" ]; then
               details="${details}
           **${agent}**
 
@@ -451,7 +276,10 @@ jobs:
             echo "| Agent | Verdict | Top finding |"
             echo "|---|---|---|"
             printf '%s' "$rows"
-            if [ "$overall" != "green" ]; then
+            # Fold findings in whenever ANY agent actually reported some — not only when the
+            # overall signal isn't green (an agent can find should_fix/note items and still
+            # land on a green-mapped verdict).
+            if [ "$overall" != "green" ] || [ "$any_findings" = "true" ]; then
               echo
               echo "<details>"
               echo "<summary>Full findings</summary>"

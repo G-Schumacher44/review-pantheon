@@ -1,0 +1,78 @@
+# CI for review-pantheon itself — "the review tool must survive its own review" (see
+# tests/test-verdict-decision.sh's header). Syntax-checks and lints every shell script, byte-
+# compiles the Python decision script, and runs the verdict-decision fixture test.
+#
+# This does NOT run the review.yml gate against itself — that requires CLAUDE_CODE_OAUTH_TOKEN
+# and REVIEW_GATE_ENABLED, which this repo doesn't set for its own CI. It only checks that the
+# repo's own tooling is internally consistent.
+name: ci
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+
+      - name: bash -n on every shell script
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' f; do
+            echo "bash -n $f"
+            bash -n "$f" || status=1
+          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          exit "$status"
+
+      - name: shellcheck on every shell script
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' f; do
+            echo "shellcheck $f"
+            shellcheck "$f" || status=1
+          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          exit "$status"
+
+      - name: py_compile every Python file
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' f; do
+            echo "py_compile $f"
+            python3 -m py_compile "$f" || status=1
+          done < <(find . -type f -name '*.py' -not -path './.git/*' -print0)
+          exit "$status"
+
+      - name: YAML-parse the workflows
+        run: |
+          pip install --quiet pyyaml
+          python3 -c "
+          import yaml
+          for f in ('action/review.yml', '.github/workflows/ci.yml'):
+              with open(f) as fh:
+                  yaml.safe_load(fh)
+              print(f + ': OK')
+          "
+
+      - name: Run verdict-decision fixture tests
+        run: bash tests/test-verdict-decision.sh
