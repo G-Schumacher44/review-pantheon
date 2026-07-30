@@ -18,16 +18,19 @@ git clone <this repo> review-pantheon
 ./review-pantheon/install.sh /path/to/your-repo
 ```
 
-That copies the five personas and a GitHub Actions workflow into your repo. Then, before you
-trust it:
+That copies the five personas, the verdict-decision script, and a GitHub Actions workflow into
+your repo. Then, before you trust it:
 
 1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN`.
 2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
 3. Open `.github/workflows/review.yml` and replace `PIN-ME-TO-A-FULL-COMMIT-SHA` with a real,
    full 40-character commit SHA for `anthropics/claude-code-action`.
-4. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** before
+4. Verify the action's input/output names (`claude_code_oauth_token`, `prompt`,
+   `allowed_tools`, the `result` output) against the release you just pinned — they're
+   unverified guesses, written without network access to the action's docs.
+5. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** before
    you trust a green result on a real one.
-5. Only after step 4 passes, consider making the check required.
+6. Only after step 5 passes, consider making the check required.
 
 Prefer the CLI? `cli/review-gate --pr <number>` runs the same panel locally against any repo
 with a `gh`-authenticated remote — see [CLI usage](#cli-usage) below.
@@ -101,14 +104,29 @@ review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"] [--dry
 
 Run it from inside the target repo (it resolves the repo root via `git rev-parse
 --show-toplevel`). Requires `gh` and `jq`. Reads defaults from `gate.conf` at the target repo's
-root (see `gate.conf.example`); `--provider` and `--agents` override the config for a single run.
-`--dry-run` builds the prompts and prints the would-be comment without calling any provider or
-posting anything.
+root — copy `gate.conf.example` to `gate.conf` there yourself and edit it; `install.sh` does not
+install it for you (`gate.conf` only matters to the CLI lane, so it isn't part of the default
+install). `--provider` and `--agents` override the config for a single run. `--dry-run` builds
+the prompts and prints the would-be comment without calling any provider or posting anything.
 
 Re-running against a PR that's already been reviewed at its current head SHA is a no-op; new
-commits trigger a follow-up pass that reviews only what changed and tells the agent to read its
-own prior comment first. State lives in `.review-gate-state.json` at the target repo's root
-(git-ignored, bootstraps itself empty).
+commits trigger a **follow-up pass** that reviews only what changed and tells the agent to read
+its own prior comment first. State lives in `.review-gate-state.json` at the target repo's root
+(git-ignored, bootstraps itself empty). Follow-up mode is CLI-only — see "Lane differences"
+below for why the Action doesn't have it.
+
+**Draft PRs:** the CLI exits 0 and posts nothing, and prints an unmistakable
+`DRAFT — not reviewed, nothing posted` line to stdout so a caller scripting around this can't
+mistake silence for a skip. See `DESIGN.md`'s lane-differences table for how the Action handles
+the same case.
+
+## Lane differences
+
+The CLI and the GitHub Action share personas and the verdict-decision rule, but they aren't the
+same tool — see `DESIGN.md`'s "Lane differences" section for the full table (follow-up mode,
+config, provider choice, draft handling). Short version: the CLI is the configurable, scriptable,
+provider-agnostic lane; the Action is the fixed, zero-config, Claude-only lane that runs
+automatically on every PR.
 
 ## What it deliberately doesn't do
 
@@ -118,8 +136,9 @@ own prior comment first. State lives in `.review-gate-state.json` at the target 
   review bots — that's a plausible extension point, not something this repo takes on.
 - **No auto-merge, no auto-approve.** Covered above, worth repeating: this posts a verdict, it
   never acts on one.
-- **No write access beyond one PR comment.** The GitHub Action's permissions are `contents: read`,
-  `pull-requests: write`, `id-token: write` — nothing broader.
+- **No write access beyond one PR comment.** The GitHub Action's permissions are `contents: read`
+  and `pull-requests: write` — nothing broader (no `id-token: write`; it isn't needed for
+  anything this workflow currently does).
 - **No pretending an unverified result is safe.** If you see 🟠, something about the run itself
   failed — a malformed verdict, an unreachable ref, a provider crash. It carries no opinion about
   the PR either way; treat it as "review didn't happen," not as a pass.
@@ -127,13 +146,16 @@ own prior comment first. State lives in `.review-gate-state.json` at the target 
 ## Layout
 
 ```
-agents/            five canonical personas — the single source of truth
-cli/review-gate     the runner: builds prompts, calls a provider lane, validates verdicts,
-                    posts one combined PR comment
-cli/providers/      provider lanes (claude, codex, gemini, cursor)
-action/review.yml   GitHub Actions twin gate — same personas, fail-closed decision step
-install.sh          idempotent installer into a target repo
-docs/               anything that doesn't fit above
+agents/                    five canonical personas — the single source of truth
+cli/review-gate            the runner: builds prompts, calls a provider lane, validates
+                            verdicts, posts one combined PR comment
+cli/lib/verdict.sh         extraction + verdict-decision, including the blocker invariant
+cli/providers/             provider lanes (claude, codex, gemini, cursor)
+action/review.yml          GitHub Actions twin gate — one matrix job, fail-closed decision step
+action/decide_verdict.py   the Action's verdict-decision rule (Python twin of cli/lib/verdict.sh)
+tests/                     tests/test-verdict-decision.sh — cross-runner fixture test
+install.sh                 idempotent installer into a target repo
+docs/                      anything that doesn't fit above
 ```
 
 See `DESIGN.md` for the full contract — verdict schema, security posture, configuration keys,

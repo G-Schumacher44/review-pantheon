@@ -74,6 +74,13 @@ Every agent run must end with a single JSON object (and nothing after it):
 
 - Gate signal precedence (worst wins): any red → 🔴 blocked; any unparseable/missing verdict →
   🟠 NOT GATED (fail); any yellow or loud skip → 🟡 review notes; all green → 🟢.
+- **The blocker invariant is enforced, not just documented.** Both deciders (the CLI's
+  `cli/lib/verdict.sh` and the Action's `action/decide_verdict.py`) check it after schema
+  validation: if any finding has `severity: "blocker"` OR `has_blocker: true`, the signal is
+  forced to red regardless of the stated `verdict` field, and the gate logs that the
+  invariant fired. An object where the verdict and the findings disagree is treated as red,
+  not trusted at face value — see "Two runtimes, one rule" below for how both deciders stay
+  in sync on this.
 - A docs-only diff (only `*.md` / `docs/**` changed) may skip Apollo with a loud 🟡 skip note.
 
 ## Provider lanes
@@ -97,6 +104,22 @@ Prompts are built identically for every lane: persona file + a generated context
 range, base branch, house-rules file, output-contract reminder). No lane gets a private fork
 of a persona.
 
+## Two runtimes, one rule
+
+The CLI runner and the GitHub Action are separate processes on separate runtimes — bash+jq for
+the CLI (`cli/lib/verdict.sh`), Python for the Action (`action/decide_verdict.py`, installed
+into the target repo and run from there, not embedded in the workflow YAML). That split is
+accepted deliberately: the Action can't cleanly `source` a bash file across its step
+boundaries, and the CLI shouldn't require a Python interpreter just to run `review-gate`. Two
+implementations of the same rule is normally the kind of drift rule 4 warns against for
+personas — the mitigation here is the same shape as that rule's, applied to code instead of
+prose: both files carry a comment pointing at the other, and
+`tests/test-verdict-decision.sh` runs the same fixture set through both and fails if they
+disagree with each other or with the expected result. They must implement identically:
+- the same per-agent verdict vocabulary → color map,
+- the same fail-closed rule (missing/unparseable/out-of-vocabulary verdict → unverified),
+- the same blocker invariant (see the verdict contract above).
+
 ## House rules are pluggable
 
 Artemis and Apollo check "house rules" as blockers — but every team's rules differ. The gate
@@ -106,7 +129,9 @@ treat each listed rule as a blocker-class check. Ships with `REVIEW_RULES.exampl
 
 ## Configuration
 
-`gate.conf` in the target repo root (simple `key=value`, all optional):
+`gate.conf` in the target repo root (simple `key=value`, all optional) — **CLI lane only**; the
+Action doesn't read it (see "Lane differences" below). `install.sh` does not install it —
+CLI-lane users copy `gate.conf.example` themselves (README documents this under CLI usage).
 
 ```
 provider=claude          # lane in cli/providers/
@@ -123,14 +148,37 @@ agents=artemis apollo    # panel for the standard gate
   or a shell command. Unsafe metadata → UNVERIFIED, not a crash.
 - Model output is never interpolated into shell (`run:`) directly — it travels via files and
   env vars.
-- The GitHub Action pins `anthropics/claude-code-action` to a full commit SHA, checks out with
-  `persist-credentials: false`, and fails loud (not skip) when its token secret is absent.
+- The GitHub Action checks out with `persist-credentials: false` and fails loud (not skip)
+  when its token secret is absent. It does **not** yet pin `anthropics/claude-code-action` to
+  a commit SHA — it ships with a loud placeholder, `PIN-ME-TO-A-FULL-COMMIT-SHA`, that refuses
+  to run until you replace it (an unpinned `uses:` fails at job parse/resolve time with an
+  obvious error, it doesn't silently no-op or run unpinned). Pinning it is step one of the
+  install checklist (`install.sh`'s printed output and the README quickstart), not optional
+  follow-up.
 
-## Follow-up mode
+## Follow-up mode (CLI lane only)
 
 Re-reviewing a PR after new commits reviews `last_reviewed_sha..head`, and the prompt tells the
 agent to read its own prior PR comment instead of re-auditing from scratch. Reviewed SHAs are
-tracked in `.review-gate-state.json` (git-ignored; bootstraps empty).
+tracked in `.review-gate-state.json` (git-ignored; bootstraps empty). This is a CLI-only
+feature, kept deliberately: the Action re-reviews the full diff on every push already (a fresh
+runner, no persisted state between runs, and GitHub's own UI shows the diff since your last
+review anyway), but a human running `review-gate` repeatedly against the same long-lived PR
+would otherwise burn a full review's worth of tokens on every incremental commit. A reviewer
+recommended cutting follow-up mode for simplicity; we kept it — the token-cost problem it
+solves is real for the CLI lane and doesn't exist for the Action.
+
+## Lane differences
+
+The CLI and the Action share personas and the verdict-decision rule, but they are not
+identical tools. Differences are intentional, not oversights:
+
+| | CLI (`cli/review-gate`) | GitHub Action (`action/review.yml`) |
+|---|---|---|
+| Follow-up mode | Yes — incremental diff since last reviewed SHA (see above). | No — re-reviews the full diff on every push; no state persisted between runs. |
+| Configuration | `gate.conf` (provider, model, base branch, rules file, agent list). | None — twin panel (artemis, apollo) and `REVIEW_RULES.md` are hardcoded in the workflow. |
+| Provider choice | Pluggable lane (`--provider`, `cli/providers/*.sh`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
+| Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
 
 ## Deliberately absent
 
@@ -138,16 +186,26 @@ tracked in `.review-gate-state.json` (git-ignored; bootstraps empty).
 - No third-party reviewer integration (e.g. bot-review aggregation) — extension point, not core.
 - No auto-merge, ever. The gate posts a verdict; a human merges.
 - No write access needed beyond posting one PR comment.
+- No review of draft PRs, on either lane — see "Lane differences" above for how each lane
+  enforces that.
 
 ## Layout
 
 ```
-agents/            five canonical personas (the single source of truth)
-cli/review-gate    the runner: builds prompts, calls a provider lane, validates verdicts,
-                   posts ONE combined PR comment (signal headline + verdict table + folded findings)
-cli/providers/     provider lanes (claude, codex, gemini, cursor)
-action/review.yml  GitHub Actions twin gate — same personas, structured output, fail-closed
-                   decision step with `if: always()`
-install.sh         idempotent installer into a target repo (refuses to clobber customized files)
-docs/              anything that doesn't fit above
+agents/                    five canonical personas (the single source of truth)
+cli/review-gate            the runner: builds prompts, calls a provider lane, validates
+                           verdicts, posts ONE combined PR comment (signal headline +
+                           verdict table + folded findings)
+cli/lib/verdict.sh         extraction + verdict-decision (blocker invariant included) —
+                           sourced by cli/review-gate AND tests/test-verdict-decision.sh
+cli/providers/             provider lanes (claude, codex, gemini, cursor)
+action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
+                           artifact-based result passing, fail-closed decision step
+action/decide_verdict.py   the Action's verdict-decision rule (Python twin of
+                           cli/lib/verdict.sh — see "Two runtimes, one rule"); installed into
+                           the target repo, not embedded in the workflow YAML
+tests/                     tests/test-verdict-decision.sh — cross-runner fixture test
+install.sh                 idempotent installer into a target repo (refuses to clobber
+                           customized files); does not install gate.conf
+docs/                      anything that doesn't fit above
 ```
