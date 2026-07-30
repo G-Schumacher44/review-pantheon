@@ -19,6 +19,9 @@ PANTHEON_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENTS_DIR="$PANTHEON_ROOT/agents"
 PROVIDERS_DIR="$PANTHEON_ROOT/cli/providers"
 
+# shellcheck disable=SC1091
+source "$PANTHEON_ROOT/cli/lib/verdict.sh"
+
 AGENT_TIMEOUT_SECS="${REVIEW_GATE_TIMEOUT:-600}"
 
 die() { echo "review-gate: $*" >&2; exit 1; }
@@ -40,7 +43,10 @@ require_bin() {
   command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found on PATH"
 }
 
-# Portable timeout wrapper — GNU coreutils `timeout` isn't on stock macOS.
+# Portable timeout wrapper — GNU coreutils `timeout` isn't on stock macOS. The manual
+# fallback below TERMs the child (and any children of its own — a provider CLI can spawn
+# subprocesses), gives it ~5s to exit clean, then KILLs whatever's left. Every signal is
+# best-effort: a process that already exited between our check and our kill is not an error.
 run_with_timeout() {
   local secs="$1"; shift
   if command -v timeout >/dev/null 2>&1; then
@@ -50,7 +56,14 @@ run_with_timeout() {
   else
     "$@" &
     local pid=$!
-    ( sleep "$secs" && kill -TERM "$pid" ) 2>/dev/null &
+    (
+      sleep "$secs"
+      kill -TERM "$pid" 2>/dev/null || true
+      pkill -TERM -P "$pid" 2>/dev/null || true
+      sleep 5
+      kill -KILL "$pid" 2>/dev/null || true
+      pkill -KILL -P "$pid" 2>/dev/null || true
+    ) 2>/dev/null &
     local watcher=$!
     local status=0
     wait "$pid" || status=$?
@@ -137,7 +150,7 @@ done
 # ---------------------------------------------------------------------------
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || die "unsafe PR number '$PR_NUMBER' (must be digits only) — UNVERIFIED, posting nothing"
 
-PR_JSON="$(gh pr view "$PR_NUMBER" --json number,title,headRefName,baseRefName,headRefOid,isDraft,files 2>/dev/null)" \
+PR_JSON="$(gh pr view "$PR_NUMBER" --json number,title,headRefName,baseRefName,headRefOid,isDraft 2>/dev/null)" \
   || die "gh pr view $PR_NUMBER failed — UNVERIFIED, posting nothing"
 
 PR_TITLE="$(jq -r '.title' <<<"$PR_JSON")"
@@ -155,6 +168,7 @@ SHA_RE='^[0-9a-f]{7,40}$'
 
 if [[ "$IS_DRAFT" == "true" ]]; then
   note "PR #$PR_NUMBER is a draft — skipping loudly. No review run, no comment posted."
+  echo "DRAFT — not reviewed, nothing posted"
   exit 0
 fi
 
@@ -177,9 +191,11 @@ FETCHED_HEAD_SHA="$(git rev-parse "$GATE_HEAD_REF")"
 DIFF_RANGE="${GATE_BASE_REF}...${GATE_HEAD_REF}"
 
 # ---------------------------------------------------------------------------
-# Docs-only detection
+# Docs-only detection — via `git diff --name-only` over the refs we just fetched, not
+# `gh pr view --json files` (that list is capped on huge PRs, silently under-reporting files
+# and mis-classifying a real diff as docs-only). Same approach the Action uses.
 # ---------------------------------------------------------------------------
-CHANGED_FILES="$(jq -r '.files[].path' <<<"$PR_JSON")"
+CHANGED_FILES="$(git diff --name-only "${GATE_BASE_REF}...${GATE_HEAD_REF}")"
 DOCS_ONLY=true
 if [[ -z "$CHANGED_FILES" ]]; then
   DOCS_ONLY=false
@@ -205,11 +221,16 @@ if [[ -n "$SEEN_SHA" ]]; then
     note "PR #$PR_NUMBER already reviewed at $HEAD_SHA — nothing new to gate."
     exit 0
   fi
-  if git cat-file -e "${SEEN_SHA}^{commit}" 2>/dev/null; then
+  # An existence check (`git cat-file -e`) isn't enough: after a force-push the old SHA can
+  # still be a valid, fetchable commit object — just not an ancestor of the new head anymore
+  # — and an existence-only check would wrongly treat it as a valid incremental base, handing
+  # the agent a nonsensical or empty diff. Ancestry is the actual invariant an incremental
+  # review needs.
+  if git merge-base --is-ancestor "$SEEN_SHA" "$GATE_HEAD_REF" 2>/dev/null; then
     DIFF_RANGE="${SEEN_SHA}..${GATE_HEAD_REF}"
     FOLLOWUP_NOTE="Follow-up review: new commits since your last pass at ${SEEN_SHA}. Read your prior PR comment first, then focus on ${SEEN_SHA}..${HEAD_SHA} rather than re-auditing the whole PR."
   else
-    FOLLOWUP_NOTE="Follow-up review: a prior pass at ${SEEN_SHA} exists but that commit is no longer reachable locally (force-push?). Reviewing the full PR diff again."
+    FOLLOWUP_NOTE="Follow-up review: a prior pass at ${SEEN_SHA} exists but it is not an ancestor of the current head (force-push, rebase, or history rewrite). Reviewing the full PR diff again."
   fi
 fi
 
@@ -265,35 +286,16 @@ build_prompt() {
   echo "$prompt_file"
 }
 
-# ---------------------------------------------------------------------------
-# Per-agent verdict vocabulary -> gate color (worst-wins aggregation input)
-# ---------------------------------------------------------------------------
-agent_color() {
-  local agent="$1" verdict="$2"
-  case "${agent}:${verdict}" in
-    artemis:SHIP|apollo:ACCEPT|diogenes:LEAN|plato:COHERENT|socrates:GO) echo green ;;
-    artemis:FIX_FIRST|apollo:ACCEPT_WITH_NOTES|diogenes:TRIM|plato:DRIFTING|socrates:GO_WITH_GUARDRAILS) echo yellow ;;
-    artemis:STOP|apollo:RETURN|diogenes:GUT|plato:FRACTURED|socrates:NO_GO) echo red ;;
-    *) echo unverified ;;
-  esac
-}
-
-# Last `^{`-anchored block in the output through EOF — resets on every match,
-# so it ends up holding only the final JSON object (or garbage, which the
-# jq validation step below correctly rejects as UNVERIFIED).
-extract_last_json() {
-  awk '
-    /^\{/ { buf = "" }
-    { buf = buf $0 "\n" }
-    END { printf "%s", buf }
-  '
-}
+# Per-agent verdict vocabulary -> gate color, and the trailing-JSON extraction +
+# blocker-invariant decision (agent_color, extract_last_json, decide_verdict) live in
+# cli/lib/verdict.sh, sourced above — factored out so tests/test-verdict-decision.sh exercises
+# the exact same code path this runner uses, not a reimplementation of it.
 
 declare -a RESULT_AGENT RESULT_COLOR RESULT_VERDICT RESULT_TOP RESULT_JSON
 
 run_agent() {
   local agent="$1"
-  local prompt_file raw_output candidate verdict_json verdict agent_field color top_finding provider_status
+  local prompt_file raw_output candidate decision_json color verdict top_finding reason invariant_fired verdict_json_out provider_status
 
   if [[ "$agent" == "apollo" && "$DOCS_ONLY" == "true" ]]; then
     note "docs-only diff — skipping apollo loudly (nothing but docs changed)."
@@ -331,46 +333,27 @@ run_agent() {
 
   candidate="$(printf '%s\n' "$raw_output" | extract_last_json)"
 
-  if ! verdict_json="$(jq -e '.' <<<"$candidate" 2>/dev/null)"; then
-    note "$agent: could not parse a trailing JSON object from provider output — UNVERIFIED"
-    RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
-    RESULT_VERDICT+=("UNVERIFIED"); RESULT_TOP+=("malformed or missing JSON verdict")
-    RESULT_JSON+=('{}')
-    return
+  # decide_verdict (cli/lib/verdict.sh) does extraction-validation AND the blocker invariant:
+  # a finding with severity=="blocker" or has_blocker==true forces color=red regardless of
+  # the stated verdict, and reports invariant_fired so we can log it — this is the load-
+  # bearing enforcement DESIGN.md's verdict contract requires, not just documentation.
+  decision_json="$(decide_verdict "$agent" "$candidate")"
+  color="$(jq -r '.color' <<<"$decision_json")"
+  verdict="$(jq -r '.verdict' <<<"$decision_json")"
+  top_finding="$(jq -r '.top_finding' <<<"$decision_json")"
+  reason="$(jq -r '.reason' <<<"$decision_json")"
+  invariant_fired="$(jq -r '.invariant_fired' <<<"$decision_json")"
+  verdict_json_out="$(jq -c '.verdict_json' <<<"$decision_json")"
+
+  if [[ "$invariant_fired" == "true" ]]; then
+    note "$agent: blocker invariant fired — $reason"
+  elif [[ "$color" == "unverified" ]]; then
+    note "$agent: $reason — UNVERIFIED"
   fi
-
-  if ! jq -e 'has("agent") and has("verdict") and has("has_blocker") and has("findings") and has("summary")' \
-        <<<"$verdict_json" >/dev/null 2>&1; then
-    note "$agent: JSON verdict is missing required keys — UNVERIFIED"
-    RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
-    RESULT_VERDICT+=("UNVERIFIED"); RESULT_TOP+=("verdict JSON missing required keys")
-    RESULT_JSON+=("$verdict_json")
-    return
-  fi
-
-  agent_field="$(jq -r '.agent' <<<"$verdict_json")"
-  verdict="$(jq -r '.verdict' <<<"$verdict_json")"
-  color="$(agent_color "$agent_field" "$verdict")"
-
-  if [[ "$agent_field" != "$agent" || "$color" == "unverified" ]]; then
-    note "$agent: verdict '$verdict' (agent field '$agent_field') is outside the allowed vocabulary — UNVERIFIED"
-    RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
-    RESULT_VERDICT+=("UNVERIFIED"); RESULT_TOP+=("verdict outside allowed vocabulary for this agent")
-    RESULT_JSON+=("$verdict_json")
-    return
-  fi
-
-  top_finding="$(jq -r '
-      (.findings // [])[0] as $f
-      | if $f == null then "no findings"
-        else "\($f.severity): \($f.issue) (\($f.file):\($f.line))"
-        end
-    ' <<<"$verdict_json" 2>/dev/null || true)"
-  [[ -n "$top_finding" ]] || top_finding="no findings"
 
   RESULT_AGENT+=("$agent"); RESULT_COLOR+=("$color")
   RESULT_VERDICT+=("$verdict"); RESULT_TOP+=("$top_finding")
-  RESULT_JSON+=("$verdict_json")
+  RESULT_JSON+=("$verdict_json_out")
 }
 
 for agent in $AGENTS_LIST; do
@@ -399,6 +382,18 @@ esac
 # ---------------------------------------------------------------------------
 # Combined PR comment — one per gate run.
 # ---------------------------------------------------------------------------
+# Fold the full-findings block in whenever ANY agent actually reported findings — not only
+# when the overall signal isn't green. An agent can find should_fix/note items and still land
+# on a green-mapped verdict; those findings would otherwise be silently dropped from the
+# comment even though they're right there in the JSON.
+ANY_FINDINGS=false
+for j in "${RESULT_JSON[@]}"; do
+  if jq -e '((.findings // []) | length) > 0' <<<"$j" >/dev/null 2>&1; then
+    ANY_FINDINGS=true
+    break
+  fi
+done
+
 COMMENT_FILE="$WORKDIR/comment.md"
 {
   echo "### $HEADLINE"
@@ -409,7 +404,7 @@ COMMENT_FILE="$WORKDIR/comment.md"
     echo "| ${RESULT_AGENT[$i]} | ${RESULT_VERDICT[$i]} | ${RESULT_TOP[$i]} |"
   done
 
-  if [[ "$OVERALL" != "green" ]]; then
+  if [[ "$OVERALL" != "green" || "$ANY_FINDINGS" == "true" ]]; then
     echo
     echo "<details>"
     echo "<summary>Full findings</summary>"
