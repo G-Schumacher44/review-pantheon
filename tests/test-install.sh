@@ -154,6 +154,119 @@ fi
 rm -rf "$T3"
 
 # ---------------------------------------------------------------------------
+# 6. Adversarial escaping fixture — a persona whose description AND body
+#    contain a backslash, an embedded double quote, and a literal triple-
+#    quote ("""). This is the exact input class an audit proved broke the
+#    --gemini generator: persona_body was written into a TOML basic
+#    multi-line """ string unescaped, so a backslash (e.g. a Windows path
+#    like C:\Users\name) or an embedded """ produced invalid TOML that
+#    install.sh still reported as installed, exit 0. The --cursor/--codex
+#    YAML frontmatter `description:` had the same gap. Both lanes must now
+#    emit content that parses AND round-trips the source value byte-for-byte.
+#
+#    install.sh always globs $SCRIPT_DIR/agents/*.md, so to exercise the
+#    generators against a synthetic persona (not one of the shipped five)
+#    without touching this repo's real agents/ dir, this builds a throwaway
+#    sibling "repo" — a copy of install.sh next to an agents/ dir holding the
+#    five real personas plus the fixture — and runs that copy.
+# ---------------------------------------------------------------------------
+FIXTURE_ROOT="$(mktemp -d)"
+mkdir -p "$FIXTURE_ROOT/agents"
+cp "$INSTALL" "$FIXTURE_ROOT/install.sh"
+ln -s "$ROOT/action" "$FIXTURE_ROOT/action"
+cp "$ROOT/REVIEW_RULES.example.md" "$FIXTURE_ROOT/REVIEW_RULES.example.md"
+cp "$ROOT"/agents/*.md "$FIXTURE_ROOT/agents/"
+
+FIXTURE_PERSONA="$FIXTURE_ROOT/agents/fixture-escape.md"
+FIXTURE_DESC='fixture desc: has a colon, a backslash \ and "quotes" and a triple """ end'
+cat > "$FIXTURE_PERSONA" <<EOF
+---
+name: fixture-escape
+description: $FIXTURE_DESC
+model: sonnet
+---
+
+Windows path example: C:\Users\name
+A line with a quote: she said "hi" to him.
+A raw triple-quote marker: """ should not break the wrapping string.
+EOF
+
+T6="$(mktemp -d)"
+"$FIXTURE_ROOT/install.sh" "$T6" --gemini --cursor --codex >/dev/null 2>&1
+
+assert_file "fixture: gemini toml generated" "$T6/.gemini/commands/fixture-escape.toml"
+assert_file "fixture: cursor md generated" "$T6/.cursor/agents/fixture-escape.md"
+assert_file "fixture: codex SKILL.md generated" "$T6/.agents/skills/fixture-escape/SKILL.md"
+
+if python3 -c 'import tomllib' 2>/dev/null; then
+  if FIXTURE_TARGET="$T6" FIXTURE_DESC="$FIXTURE_DESC" python3 - <<'PYEOF'
+import os
+import sys
+import tomllib
+
+target = os.environ["FIXTURE_TARGET"]
+expected_desc = os.environ["FIXTURE_DESC"]
+expected_body = (
+    "\n"
+    "Windows path example: C:\\Users\\name\n"
+    "A line with a quote: she said \"hi\" to him.\n"
+    "A raw triple-quote marker: \"\"\" should not break the wrapping string.\n"
+)
+expected_prompt = expected_body + "\nReference under review: {{args}}\n"
+
+try:
+    with open(f"{target}/.gemini/commands/fixture-escape.toml", "rb") as f:
+        data = tomllib.load(f)
+    assert data["description"] == expected_desc
+    assert data["prompt"] == expected_prompt
+except Exception as exc:  # noqa: BLE001
+    print(f"FIXTURE_TOML_FAIL {exc}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+  then
+    pass "fixture: gemini toml parses AND description+prompt round-trip byte-identical"
+  else
+    fail "fixture: gemini toml failed to parse or round-trip"
+  fi
+else
+  echo "note: python3 tomllib unavailable (needs 3.11+) — skipping fixture TOML check, non-fatal"
+fi
+
+if python3 -c 'import yaml' 2>/dev/null; then
+  if FIXTURE_TARGET="$T6" FIXTURE_DESC="$FIXTURE_DESC" python3 - <<'PYEOF'
+import os
+import sys
+import yaml
+
+target = os.environ["FIXTURE_TARGET"]
+expected_desc = os.environ["FIXTURE_DESC"]
+
+paths = [
+    f"{target}/.cursor/agents/fixture-escape.md",
+    f"{target}/.agents/skills/fixture-escape/SKILL.md",
+]
+try:
+    for path in paths:
+        text = open(path).read()
+        frontmatter = text.split("---\n", 2)[1]
+        data = yaml.safe_load(frontmatter)
+        assert data["description"] == expected_desc, (path, data["description"])
+except Exception as exc:  # noqa: BLE001
+    print(f"FIXTURE_YAML_FAIL {exc}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+  then
+    pass "fixture: cursor+codex YAML frontmatter parses AND description round-trips byte-identical"
+  else
+    fail "fixture: cursor+codex YAML frontmatter failed to parse or round-trip"
+  fi
+else
+  echo "note: python3 yaml (PyYAML) unavailable — skipping fixture YAML check, non-fatal"
+fi
+
+rm -rf "$FIXTURE_ROOT" "$T6"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo
