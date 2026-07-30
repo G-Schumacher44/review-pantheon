@@ -14,12 +14,21 @@ Most AI code review collapses two different jobs into one pass. This system spli
   diffs what was claimed against what git actually shows, checks required records were written.
   He assumes nothing was done until evidence shows it was.
 
-They are twins, not duplicates — different questions, different failure modes caught. Three
-optional specialists extend the panel for judgment calls rather than every PR:
+They are twins, not duplicates — different questions, different failure modes caught. Together
+they're the **gate agents**: machinery that runs on every PR, in CI and the CLI, against
+finished work.
 
+A second tier — **counsel agents** — lives earlier, in the planning and design phase, in the
+human loop. They're invoked when deciding, not when merging:
+
+- **Socrates** — options analyst: run BEFORE building, maps distinct approaches and go/no-go.
 - **Diogenes** — simplicity auditor: is this MORE than it needs to be?
 - **Plato** — coherence auditor: does this have a coherent shape, or is it ad-hoc sprawl?
-- **Socrates** — options analyst: run BEFORE building, maps distinct approaches and go/no-go.
+
+Diogenes and Plato apply as much to a proposed design or spec as to a landed diff — "is this
+shape coherent" and "is this more than the job needs" are design-review questions first. They
+can still be added to a CLI gate run via `--agents` or `gate.conf`, but that's the exception:
+their home is the design conversation, not the merge queue.
 
 ## Hard rules (non-negotiable, all agents, all providers)
 

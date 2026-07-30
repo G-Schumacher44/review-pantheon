@@ -7,9 +7,10 @@ on faith. review-pantheon splits the jobs into two agents that never talk each o
 agreement: **Artemis** hunts bugs in the diff itself, assuming nothing works until the code shows
 it does; **Apollo** audits the claim of completed work, assuming nothing was done until the
 evidence shows it was. Different questions, different failure modes caught, run in parallel on
-every pull request — plus three optional specialists (simplicity, coherence, pre-build options
-analysis) for the judgment calls that don't belong on every PR. The gate that runs them fails
-closed: a missing or malformed verdict is a loud orange "not gated," never a quiet green.
+every pull request as the **gate**. Three more agents — Socrates, Diogenes, Plato — form a
+**counsel** tier for planning and design decisions: invoked when deciding, not when merging.
+The gate that runs Artemis and Apollo fails closed: a missing or malformed verdict is a loud
+orange "not gated," never a quiet green.
 
 ## 60-second quickstart
 
@@ -37,18 +38,29 @@ with a `gh`-authenticated remote — see [CLI usage](#cli-usage) below.
 
 ## The panel
 
-| Agent | Lens | When | Verdict vocabulary (green / yellow / red) |
-|---|---|---|---|
-| **Artemis** | Hunts bugs in the diff — correctness, untested failure paths, shortcuts, house-rule violations. Assumes nothing works until shown. | Every PR (standard gate). | `SHIP` / `FIX_FIRST` / `STOP` |
-| **Apollo** | Verifies the claim — re-runs stated checks, diffs claimed scope against git reality, checks required records exist. Assumes nothing was done until shown. | Every PR (standard gate); skipped loudly on docs-only diffs. | `ACCEPT` / `ACCEPT_WITH_NOTES` / `RETURN` |
-| **Diogenes** | Simplicity — assumes it works, asks only if it's more than it needs to be. | Judgment calls: a diff that smells over-built. | `LEAN` / `TRIM` / `GUT` |
-| **Plato** | Coherence — assumes it works, asks if it has one consistent shape or drifting sprawl. | Judgment calls: ad-hoc duplication, reinvented seams. | `COHERENT` / `DRIFTING` / `FRACTURED` |
-| **Socrates** | Options and go/no-go — maps distinct approaches against the real codebase before anything is built. | Before building, not after. | `GO` / `GO_WITH_GUARDRAILS` / `NO_GO` |
+**Gate agents (the twins)** — machinery. Run on every PR, in CI and the CLI, against finished
+work; only these two run automatically in CI.
+
+| Agent | Lens | Verdict vocabulary (green / yellow / red) |
+|---|---|---|
+| **Artemis** | Hunts bugs in the diff — correctness, untested failure paths, shortcuts, house-rule violations. Assumes nothing works until shown. | `SHIP` / `FIX_FIRST` / `STOP` |
+| **Apollo** | Verifies the claim — re-runs stated checks, diffs claimed scope against git reality, checks required records exist. Skipped loudly on docs-only diffs. | `ACCEPT` / `ACCEPT_WITH_NOTES` / `RETURN` |
+
+**Counsel agents (the philosophers)** — planning and design, in the human loop. Invoked when
+deciding, not when merging; can be added to a CLI gate run via `--agents`/`gate.conf`, but that's
+the exception, not their home.
+
+| Agent | Lens | Verdict vocabulary (green / yellow / red) |
+|---|---|---|
+| **Socrates** | Options and go/no-go — maps distinct approaches against the real codebase before anything is built. | `GO` / `GO_WITH_GUARDRAILS` / `NO_GO` |
+| **Diogenes** | Simplicity — assumes it works, asks only if it's more than it needs to be. Applies to a proposed design as much as a landed diff. | `LEAN` / `TRIM` / `GUT` |
+| **Plato** | Coherence — assumes it works, asks if it has one consistent shape or drifting sprawl. Applies to a proposed design as much as a landed diff. | `COHERENT` / `DRIFTING` / `FRACTURED` |
 
 Artemis and Apollo are twins, not duplicates: she reviews the code, he reviews the story about
 the code, and a PR can pass one and fail the other. Diogenes and Plato are foils: Diogenes attacks
 over-structure, Plato attacks under-structure, so between them a design gets pushed toward exactly
-as much shape as the job needs. Socrates runs before either twin has anything to review.
+as much shape as the job needs. Socrates runs earliest of all — before there's a diff for the
+twins or a design for Diogenes and Plato to weigh in on.
 
 ## How the gate stays honest
 
