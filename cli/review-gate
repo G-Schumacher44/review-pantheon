@@ -1,0 +1,451 @@
+#!/usr/bin/env bash
+# review-gate — provider-agnostic PR review runner for review-pantheon.
+#
+# Usage:
+#   review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"] [--dry-run]
+#
+# Run from inside the target repo (the repo whose PR you're gating) — it locates that repo
+# via `git rev-parse --show-toplevel`. Requires `gh` and `jq`. See ../DESIGN.md for the
+# contract this implements (verdict schema, security posture, fail-closed rules).
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Paths — agents/ and cli/providers/ live in THIS repo (review-pantheon), not
+# the target repo. gate.conf, REVIEW_RULES.md, and .review-gate-state.json
+# live in the target repo, found below via git.
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PANTHEON_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+AGENTS_DIR="$PANTHEON_ROOT/agents"
+PROVIDERS_DIR="$PANTHEON_ROOT/cli/providers"
+
+AGENT_TIMEOUT_SECS="${REVIEW_GATE_TIMEOUT:-600}"
+
+die() { echo "review-gate: $*" >&2; exit 1; }
+note() { echo "review-gate: $*" >&2; }
+
+usage() {
+  cat <<'EOF'
+Usage: review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"] [--dry-run]
+
+  --pr <number>       PR number to review (required).
+  --provider <lane>   Provider lane in cli/providers/ (default: gate.conf, else claude).
+  --agents "a b c"    Space-separated agent list (default: gate.conf, else "artemis apollo").
+  --dry-run           Build prompts and print the would-be comment; call no provider.
+  -h, --help          Show this help.
+EOF
+}
+
+require_bin() {
+  command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found on PATH"
+}
+
+# Portable timeout wrapper — GNU coreutils `timeout` isn't on stock macOS.
+run_with_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    "$@" &
+    local pid=$!
+    ( sleep "$secs" && kill -TERM "$pid" ) 2>/dev/null &
+    local watcher=$!
+    local status=0
+    wait "$pid" || status=$?
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    return "$status"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Args
+# ---------------------------------------------------------------------------
+PR_NUMBER=""
+OPT_PROVIDER=""
+OPT_AGENTS=""
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pr) PR_NUMBER="${2:-}"; shift 2 ;;
+    --provider) OPT_PROVIDER="${2:-}"; shift 2 ;;
+    --agents) OPT_AGENTS="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage; die "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$PR_NUMBER" ]] || { usage; die "--pr <number> is required"; }
+
+require_bin gh
+require_bin jq
+require_bin git
+
+# ---------------------------------------------------------------------------
+# Target repo
+# ---------------------------------------------------------------------------
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repository"
+cd "$REPO_ROOT"
+STATE_FILE="$REPO_ROOT/.review-gate-state.json"
+
+# ---------------------------------------------------------------------------
+# gate.conf — safe key=value parse, no `source`.
+# ---------------------------------------------------------------------------
+CFG_PROVIDER="claude"
+CFG_MODEL=""
+CFG_BASE_BRANCH="main"
+CFG_RULES_FILE="REVIEW_RULES.md"
+CFG_AGENTS="artemis apollo"
+
+if [[ -f "$REPO_ROOT/gate.conf" ]]; then
+  while IFS= read -r cfg_line; do
+    [[ "$cfg_line" =~ ^[a-z_]+= ]] || continue
+    cfg_key="${cfg_line%%=*}"
+    cfg_val="${cfg_line#*=}"
+    case "$cfg_key" in
+      provider) CFG_PROVIDER="$cfg_val" ;;
+      model) CFG_MODEL="$cfg_val" ;;
+      base_branch) CFG_BASE_BRANCH="$cfg_val" ;;
+      rules_file) CFG_RULES_FILE="$cfg_val" ;;
+      agents) CFG_AGENTS="$cfg_val" ;;
+    esac
+  done < "$REPO_ROOT/gate.conf"
+fi
+
+PROVIDER="${OPT_PROVIDER:-$CFG_PROVIDER}"
+MODEL="$CFG_MODEL"
+AGENTS_LIST="${OPT_AGENTS:-$CFG_AGENTS}"
+[[ -n "$AGENTS_LIST" ]] || die "no agents to run (empty --agents / agents= in gate.conf)"
+
+[[ -f "$PROVIDERS_DIR/$PROVIDER.sh" ]] || die "unknown provider lane '$PROVIDER' (no $PROVIDERS_DIR/$PROVIDER.sh)"
+
+for agent in $AGENTS_LIST; do
+  case "$agent" in
+    artemis|apollo|diogenes|plato|socrates) ;;
+    *) die "unknown agent '$agent' (known: artemis apollo diogenes plato socrates)" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# PR number validation — untrusted input starts here (PR metadata is
+# attacker-controlled on forks). Any failure below is UNVERIFIED: print the
+# reason, post nothing, exit nonzero.
+# ---------------------------------------------------------------------------
+[[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || die "unsafe PR number '$PR_NUMBER' (must be digits only) — UNVERIFIED, posting nothing"
+
+PR_JSON="$(gh pr view "$PR_NUMBER" --json number,title,headRefName,baseRefName,headRefOid,isDraft,files 2>/dev/null)" \
+  || die "gh pr view $PR_NUMBER failed — UNVERIFIED, posting nothing"
+
+PR_TITLE="$(jq -r '.title' <<<"$PR_JSON")"
+HEAD_REF="$(jq -r '.headRefName' <<<"$PR_JSON")"
+BASE_REF="$(jq -r '.baseRefName' <<<"$PR_JSON")"
+[[ -n "$BASE_REF" && "$BASE_REF" != "null" ]] || BASE_REF="$CFG_BASE_BRANCH"
+HEAD_SHA="$(jq -r '.headRefOid' <<<"$PR_JSON")"
+IS_DRAFT="$(jq -r '.isDraft' <<<"$PR_JSON")"
+
+BRANCH_RE='^[A-Za-z0-9._/-]+$'
+SHA_RE='^[0-9a-f]{7,40}$'
+[[ "$HEAD_REF" =~ $BRANCH_RE ]] || die "unsafe head branch name '$HEAD_REF' — UNVERIFIED, posting nothing"
+[[ "$BASE_REF" =~ $BRANCH_RE ]] || die "unsafe base branch name '$BASE_REF' — UNVERIFIED, posting nothing"
+[[ "$HEAD_SHA" =~ $SHA_RE ]] || die "unsafe head SHA '$HEAD_SHA' — UNVERIFIED, posting nothing"
+
+if [[ "$IS_DRAFT" == "true" ]]; then
+  note "PR #$PR_NUMBER is a draft — skipping loudly. No review run, no comment posted."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Fetch the exact refs we need. Never trust a local branch of the same name
+# to exist or be current; use GitHub's pull/<n>/head so forked-repo PRs work.
+# ---------------------------------------------------------------------------
+GATE_BASE_REF="refs/review-gate/base"
+GATE_HEAD_REF="refs/review-gate/head"
+
+git fetch --quiet origin \
+  "+refs/heads/${BASE_REF}:${GATE_BASE_REF}" \
+  "+refs/pull/${PR_NUMBER}/head:${GATE_HEAD_REF}" \
+  || die "could not fetch base/head refs from origin — UNVERIFIED, posting nothing"
+
+FETCHED_HEAD_SHA="$(git rev-parse "$GATE_HEAD_REF")"
+[[ "$FETCHED_HEAD_SHA" == "$HEAD_SHA" ]] \
+  || die "fetched head ($FETCHED_HEAD_SHA) != gh-reported head ($HEAD_SHA) — UNVERIFIED, posting nothing"
+
+DIFF_RANGE="${GATE_BASE_REF}...${GATE_HEAD_REF}"
+
+# ---------------------------------------------------------------------------
+# Docs-only detection
+# ---------------------------------------------------------------------------
+CHANGED_FILES="$(jq -r '.files[].path' <<<"$PR_JSON")"
+DOCS_ONLY=true
+if [[ -z "$CHANGED_FILES" ]]; then
+  DOCS_ONLY=false
+else
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    case "$f" in
+      *.md|docs/*) ;;
+      *) DOCS_ONLY=false ;;
+    esac
+  done <<<"$CHANGED_FILES"
+fi
+
+# ---------------------------------------------------------------------------
+# Follow-up mode
+# ---------------------------------------------------------------------------
+[[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"
+SEEN_SHA="$(jq -r --arg pr "$PR_NUMBER" '.[$pr].reviewed_sha // empty' "$STATE_FILE")"
+
+FOLLOWUP_NOTE=""
+if [[ -n "$SEEN_SHA" ]]; then
+  if [[ "$SEEN_SHA" == "$HEAD_SHA" ]]; then
+    note "PR #$PR_NUMBER already reviewed at $HEAD_SHA — nothing new to gate."
+    exit 0
+  fi
+  if git cat-file -e "${SEEN_SHA}^{commit}" 2>/dev/null; then
+    DIFF_RANGE="${SEEN_SHA}..${GATE_HEAD_REF}"
+    FOLLOWUP_NOTE="Follow-up review: new commits since your last pass at ${SEEN_SHA}. Read your prior PR comment first, then focus on ${SEEN_SHA}..${HEAD_SHA} rather than re-auditing the whole PR."
+  else
+    FOLLOWUP_NOTE="Follow-up review: a prior pass at ${SEEN_SHA} exists but that commit is no longer reachable locally (force-push?). Reviewing the full PR diff again."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Prompt assembly
+# ---------------------------------------------------------------------------
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+strip_frontmatter() {
+  awk '
+    /^---[[:space:]]*$/ { fence++; next }
+    fence >= 2 { print }
+  ' "$1"
+}
+
+build_prompt() {
+  local agent="$1"
+  local persona_file="$AGENTS_DIR/${agent}.md"
+  local prompt_file="$WORKDIR/${agent}.prompt.md"
+  local rules_path="$REPO_ROOT/$CFG_RULES_FILE"
+
+  [[ -f "$persona_file" ]] || die "no persona file for agent '$agent' ($persona_file)"
+
+  strip_frontmatter "$persona_file" > "$prompt_file"
+
+  {
+    echo
+    echo "---"
+    echo "## Run context"
+    echo "- Repo: $(basename "$REPO_ROOT")"
+    echo "- PR: #$PR_NUMBER — $PR_TITLE"
+    echo "- Diff range (read-only git refs, already fetched): $DIFF_RANGE"
+    echo "- Base branch: $BASE_REF"
+    if [[ -f "$rules_path" ]]; then
+      echo "- House rules file: $CFG_RULES_FILE (present — treat each rule as a blocker-class check)"
+    else
+      echo "- House rules file: $CFG_RULES_FILE (not present in this repo — skip house-rule checks, note it)"
+    fi
+    if [[ -n "$FOLLOWUP_NOTE" ]]; then
+      echo "- $FOLLOWUP_NOTE"
+    fi
+    echo
+    echo "You are running inside the target repo's working tree. Use \`git diff $DIFF_RANGE\`,"
+    echo "\`git show <ref>:path\`, and \`git log\` to inspect the change — those two ref names are"
+    echo "fetched specifically for this review; don't treat them as ordinary branch names."
+    echo
+    echo "## Output contract"
+    echo "End your response with exactly one JSON verdict object, per your persona instructions"
+    echo "above, and nothing after it. No prose after the JSON."
+  } >> "$prompt_file"
+
+  echo "$prompt_file"
+}
+
+# ---------------------------------------------------------------------------
+# Per-agent verdict vocabulary -> gate color (worst-wins aggregation input)
+# ---------------------------------------------------------------------------
+agent_color() {
+  local agent="$1" verdict="$2"
+  case "${agent}:${verdict}" in
+    artemis:SHIP|apollo:ACCEPT|diogenes:LEAN|plato:COHERENT|socrates:GO) echo green ;;
+    artemis:FIX_FIRST|apollo:ACCEPT_WITH_NOTES|diogenes:TRIM|plato:DRIFTING|socrates:GO_WITH_GUARDRAILS) echo yellow ;;
+    artemis:STOP|apollo:RETURN|diogenes:GUT|plato:FRACTURED|socrates:NO_GO) echo red ;;
+    *) echo unverified ;;
+  esac
+}
+
+# Last `^{`-anchored block in the output through EOF — resets on every match,
+# so it ends up holding only the final JSON object (or garbage, which the
+# jq validation step below correctly rejects as UNVERIFIED).
+extract_last_json() {
+  awk '
+    /^\{/ { buf = "" }
+    { buf = buf $0 "\n" }
+    END { printf "%s", buf }
+  '
+}
+
+declare -a RESULT_AGENT RESULT_COLOR RESULT_VERDICT RESULT_TOP RESULT_JSON
+
+run_agent() {
+  local agent="$1"
+  local prompt_file raw_output candidate verdict_json verdict agent_field color top_finding provider_status
+
+  if [[ "$agent" == "apollo" && "$DOCS_ONLY" == "true" ]]; then
+    note "docs-only diff — skipping apollo loudly (nothing but docs changed)."
+    RESULT_AGENT+=("apollo"); RESULT_COLOR+=("yellow")
+    RESULT_VERDICT+=("SKIPPED"); RESULT_TOP+=("docs-only diff: apollo skipped by design")
+    RESULT_JSON+=('{"agent":"apollo","verdict":"SKIPPED","has_blocker":false,"findings":[],"summary":"docs-only diff: apollo skipped by design"}')
+    return
+  fi
+
+  prompt_file="$(build_prompt "$agent")"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    note "[dry-run] would run: cli/providers/${PROVIDER}.sh provider_run \"$MODEL\" \"$prompt_file\""
+    RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
+    RESULT_VERDICT+=("DRY_RUN"); RESULT_TOP+=("dry-run: provider not called")
+    RESULT_JSON+=('{}')
+    return
+  fi
+
+  # shellcheck disable=SC1090
+  source "$PROVIDERS_DIR/${PROVIDER}.sh"
+
+  set +e
+  raw_output="$(run_with_timeout "$AGENT_TIMEOUT_SECS" provider_run "$MODEL" "$prompt_file" 2>&1)"
+  provider_status=$?
+  set -e
+
+  if [[ $provider_status -ne 0 ]]; then
+    note "provider lane '$PROVIDER' failed for $agent (exit $provider_status) — UNVERIFIED"
+    RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
+    RESULT_VERDICT+=("UNVERIFIED"); RESULT_TOP+=("provider lane failed — see runner logs")
+    RESULT_JSON+=('{}')
+    return
+  fi
+
+  candidate="$(printf '%s\n' "$raw_output" | extract_last_json)"
+
+  if ! verdict_json="$(jq -e '.' <<<"$candidate" 2>/dev/null)"; then
+    note "$agent: could not parse a trailing JSON object from provider output — UNVERIFIED"
+    RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
+    RESULT_VERDICT+=("UNVERIFIED"); RESULT_TOP+=("malformed or missing JSON verdict")
+    RESULT_JSON+=('{}')
+    return
+  fi
+
+  if ! jq -e 'has("agent") and has("verdict") and has("has_blocker") and has("findings") and has("summary")' \
+        <<<"$verdict_json" >/dev/null 2>&1; then
+    note "$agent: JSON verdict is missing required keys — UNVERIFIED"
+    RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
+    RESULT_VERDICT+=("UNVERIFIED"); RESULT_TOP+=("verdict JSON missing required keys")
+    RESULT_JSON+=("$verdict_json")
+    return
+  fi
+
+  agent_field="$(jq -r '.agent' <<<"$verdict_json")"
+  verdict="$(jq -r '.verdict' <<<"$verdict_json")"
+  color="$(agent_color "$agent_field" "$verdict")"
+
+  if [[ "$agent_field" != "$agent" || "$color" == "unverified" ]]; then
+    note "$agent: verdict '$verdict' (agent field '$agent_field') is outside the allowed vocabulary — UNVERIFIED"
+    RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
+    RESULT_VERDICT+=("UNVERIFIED"); RESULT_TOP+=("verdict outside allowed vocabulary for this agent")
+    RESULT_JSON+=("$verdict_json")
+    return
+  fi
+
+  top_finding="$(jq -r '
+      (.findings // [])[0] as $f
+      | if $f == null then "no findings"
+        else "\($f.severity): \($f.issue) (\($f.file):\($f.line))"
+        end
+    ' <<<"$verdict_json" 2>/dev/null || true)"
+  [[ -n "$top_finding" ]] || top_finding="no findings"
+
+  RESULT_AGENT+=("$agent"); RESULT_COLOR+=("$color")
+  RESULT_VERDICT+=("$verdict"); RESULT_TOP+=("$top_finding")
+  RESULT_JSON+=("$verdict_json")
+}
+
+for agent in $AGENTS_LIST; do
+  run_agent "$agent"
+done
+
+# ---------------------------------------------------------------------------
+# Aggregate signal — worst wins.
+# ---------------------------------------------------------------------------
+OVERALL="green"
+for c in "${RESULT_COLOR[@]}"; do
+  case "$c" in
+    red) OVERALL="red" ;;
+    unverified) if [[ "$OVERALL" != "red" ]]; then OVERALL="unverified"; fi ;;
+    yellow) if [[ "$OVERALL" == "green" ]]; then OVERALL="yellow"; fi ;;
+  esac
+done
+
+case "$OVERALL" in
+  green) HEADLINE="🟢 review-pantheon: all clear" ;;
+  yellow) HEADLINE="🟡 review-pantheon: review notes" ;;
+  unverified) HEADLINE="🟠 review-pantheon: NOT GATED (unverified result)" ;;
+  red) HEADLINE="🔴 review-pantheon: blocked" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Combined PR comment — one per gate run.
+# ---------------------------------------------------------------------------
+COMMENT_FILE="$WORKDIR/comment.md"
+{
+  echo "### $HEADLINE"
+  echo
+  echo "| Agent | Verdict | Top finding |"
+  echo "|---|---|---|"
+  for i in "${!RESULT_AGENT[@]}"; do
+    echo "| ${RESULT_AGENT[$i]} | ${RESULT_VERDICT[$i]} | ${RESULT_TOP[$i]} |"
+  done
+
+  if [[ "$OVERALL" != "green" ]]; then
+    echo
+    echo "<details>"
+    echo "<summary>Full findings</summary>"
+    echo
+    for i in "${!RESULT_AGENT[@]}"; do
+      echo "**${RESULT_AGENT[$i]}**"
+      echo
+      echo '```json'
+      jq '.' <<<"${RESULT_JSON[$i]}" 2>/dev/null || echo "${RESULT_JSON[$i]}"
+      echo '```'
+      echo
+    done
+    echo "</details>"
+  fi
+} > "$COMMENT_FILE"
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  note "[dry-run] would post this comment to PR #$PR_NUMBER:"
+  cat "$COMMENT_FILE"
+  exit 0
+fi
+
+gh pr comment "$PR_NUMBER" --body-file "$COMMENT_FILE" \
+  || die "gh pr comment failed — verdict computed but NOT posted, state not updated"
+
+# ---------------------------------------------------------------------------
+# Update state only after a successful post.
+# ---------------------------------------------------------------------------
+TMP_STATE="$WORKDIR/state.json"
+if jq --arg pr "$PR_NUMBER" --arg sha "$HEAD_SHA" '.[$pr] = {"reviewed_sha": $sha}' "$STATE_FILE" > "$TMP_STATE"; then
+  mv "$TMP_STATE" "$STATE_FILE"
+else
+  note "warning: comment posted but failed to update $STATE_FILE"
+fi
+
+case "$OVERALL" in
+  green|yellow) exit 0 ;;
+  *) exit 1 ;;
+esac

@@ -1,0 +1,19 @@
+# review-pantheon gate config — copy to gate.conf at your repo root and edit.
+# Simple key=value, one per line. Blank lines and lines starting with # are ignored.
+# Every key is optional; the runner falls back to the defaults shown here.
+
+# Provider lane — one of the files in cli/providers/ (without the .sh extension).
+provider=claude
+
+# Lane-specific model id. Empty means "let the lane pick its own default".
+model=
+
+# Branch the review diff is computed against.
+base_branch=main
+
+# Path (relative to the target repo root) to the house-rules file agents treat as
+# blocker-class checks. See REVIEW_RULES.example.md for the shipped starting point.
+rules_file=REVIEW_RULES.md
+
+# Space-separated list of agents to run for the standard gate.
+agents=artemis apollo
