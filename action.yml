@@ -105,6 +105,12 @@ inputs:
       Anthropic API key (alternative to claude_code_oauth_token). Set exactly one of the two
       auth inputs — this action fails loud if both or neither are set.
     required: false
+  github_token:
+    description: >-
+      GitHub token claude-code-action uses for its GitHub API access; defaults to the workflow
+      token, which avoids any need for id-token: write permissions.
+    required: false
+    default: ${{ github.token }}
   agents:
     description: >-
       Space-separated personas to run, drawn from: artemis apollo socrates diogenes plato
@@ -268,6 +274,7 @@ runs:
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        github_token: ${{ inputs.github_token }}
         prompt: ${{ steps.build-prompt-artemis.outputs.prompt }}
         claude_args: ${{ steps.resolve.outputs.claude_args }}
 
@@ -327,6 +334,7 @@ runs:
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        github_token: ${{ inputs.github_token }}
         prompt: ${{ steps.build-prompt-apollo.outputs.prompt }}
         claude_args: ${{ steps.resolve.outputs.claude_args }}
 
@@ -383,6 +391,7 @@ runs:
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        github_token: ${{ inputs.github_token }}
         prompt: ${{ steps.build-prompt-socrates.outputs.prompt }}
         claude_args: ${{ steps.resolve.outputs.claude_args }}
 
@@ -434,6 +443,7 @@ runs:
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        github_token: ${{ inputs.github_token }}
         prompt: ${{ steps.build-prompt-diogenes.outputs.prompt }}
         claude_args: ${{ steps.resolve.outputs.claude_args }}
 
@@ -485,6 +495,7 @@ runs:
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        github_token: ${{ inputs.github_token }}
         prompt: ${{ steps.build-prompt-plato.outputs.prompt }}
         claude_args: ${{ steps.resolve.outputs.claude_args }}
 

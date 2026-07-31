@@ -94,6 +94,35 @@ else
   pass "every anthropics/claude-code-action@ reference is a full commit SHA"
 fi
 
+# action.yml must declare the github_token input — passing the workflow token to
+# claude-code-action explicitly is what lets consumers skip granting id-token: write (see
+# DESIGN.md's "Security posture" and action/review.yml's header comment for why: claude-code-
+# action's token.ts checks github_token FIRST and only falls back to its internal OIDC-token-
+# exchange bootstrap when it's unset).
+if grep -qE '^  github_token:' "$ACTION_YML"; then
+  pass "action.yml declares a github_token input"
+else
+  fail "action.yml MISSING a github_token input declaration"
+fi
+
+# Every one of the five run-agent (claude-code-action) steps in action.yml must wire
+# github_token through to the underlying action — one per agent (artemis, apollo, socrates,
+# diogenes, plato), same count as the claude_code_oauth_token / anthropic_api_key wiring above.
+action_github_token_wires="$(grep -cE 'github_token: \$\{\{ inputs\.github_token \}\}' "$ACTION_YML")"
+if [[ "$action_github_token_wires" -eq 5 ]]; then
+  pass "action.yml wires github_token into all 5 run-agent steps"
+else
+  fail "action.yml wires github_token into $action_github_token_wires run-agent step(s), expected 5"
+fi
+
+# action/review.yml (the vendored workflow) must also pass github_token through to
+# claude-code-action, for the same id-token-avoidance reason.
+if grep -qE 'github_token: \$\{\{ github\.token \}\}' "$REVIEW_YML"; then
+  pass "action/review.yml wires github_token into its claude-code-action step"
+else
+  fail "action/review.yml MISSING github_token wiring on its claude-code-action step"
+fi
+
 echo
 echo "PASS: $PASS, FAIL: $FAIL"
 [[ "$FAIL" -eq 0 ]]
