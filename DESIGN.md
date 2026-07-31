@@ -16,7 +16,9 @@ Most AI code review collapses two different jobs into one pass. This system spli
   paths, shortcuts, rule violations. She assumes nothing works until the code shows it does.
 - **The verifier (Apollo)** audits the *claim* of completed work: re-runs stated verification,
   diffs what was claimed against what git actually shows, checks required records were written.
-  He assumes nothing was done until evidence shows it was.
+  He assumes nothing was done until evidence shows it was. When a governing spec file is named
+  in his run context, he also checks the delivered change against the sections of it relevant
+  to what changed — a contradiction there is rule 5 below, enforced per-PR, not just documented.
 
 They are twins, not duplicates — different questions, different failure modes caught. Together
 they're the **gate agents**: machinery that runs on every PR, in CI and the CLI, against
@@ -189,6 +191,7 @@ provider=claude          # lane in cli/providers/
 model=                   # lane-specific model id; empty = lane default
 base_branch=main         # merge base for the review diff
 rules_file=REVIEW_RULES.md
+spec_file=DESIGN.md      # governing spec, Apollo-only context; only-if-exists; empty disables
 agents=artemis apollo    # panel for the standard gate
 ```
 

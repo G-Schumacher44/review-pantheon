@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # tests/test-action-refs.sh — asserts every file action.yml (the published composite action)
-# references under `${{ github.action_path }}/...` actually exists in this repo, and that the
+# references under `${{ github.action_path }}/...` actually exists in this repo, that the
 # `anthropics/claude-code-action` pin is consistent between action.yml and the vendored
-# action/review.yml. Both are things that would otherwise only surface at real-workflow-run
-# time — action.yml can't be integration-tested until this repo is public (see DESIGN.md's
-# "Published action" section), so this is the mechanical half of that verification that CAN
-# run in CI today.
+# action/review.yml, and that the `spec_file` input (spec-aware Apollo) is declared and wired
+# ONLY into apollo's build-prompt step, not the other four agents'. All of that is things that
+# would otherwise only surface at real-workflow-run time — action.yml can't be
+# integration-tested until this repo is public (see DESIGN.md's "Published action" section), so
+# this is the mechanical half of that verification that CAN run in CI today.
 #
 # No test framework — plain bash, `bash tests/test-action-refs.sh` is the whole invocation
 # (also wired into .github/workflows/ci.yml).
@@ -93,6 +94,46 @@ if grep -oE 'anthropics/claude-code-action@[A-Za-z0-9._-]+' "$ACTION_YML" "$REVI
 else
   pass "every anthropics/claude-code-action@ reference is a full commit SHA"
 fi
+
+# spec-aware Apollo (review-gate: "verify delivery against the governing spec") — action.yml
+# must declare the `spec_file` input, and apollo's (only apollo's) build-prompt step must wire
+# it through to build_prompt.sh via SPEC_FILE/SPEC_PRESENT env vars.
+if grep -qE '^  spec_file:' "$ACTION_YML"; then
+  pass "action.yml declares a spec_file input"
+else
+  fail "action.yml is missing a spec_file input"
+fi
+
+# Isolate apollo's "Build prompt (apollo)" step body (up to the next "- name:") and check it
+# references SPEC_FILE/SPEC_PRESENT — scoped to that one step so a false pass can't come from a
+# match anywhere else in the file (e.g. the resolve step, which computes but doesn't consume
+# them the same way).
+apollo_build_step="$(awk '
+  /- name: Build prompt \(apollo\)/ { grab=1 }
+  grab && /- name:/ && !/Build prompt \(apollo\)/ { exit }
+  grab { print }
+' "$ACTION_YML")"
+
+if [[ -n "$apollo_build_step" ]] && grep -q 'SPEC_FILE:' <<<"$apollo_build_step" && grep -q 'SPEC_PRESENT:' <<<"$apollo_build_step"; then
+  pass "action.yml's apollo build-prompt step references SPEC_FILE and SPEC_PRESENT"
+else
+  fail "action.yml's apollo build-prompt step does NOT reference SPEC_FILE/SPEC_PRESENT"
+fi
+
+# The non-apollo build-prompt steps must NOT set SPEC_FILE/SPEC_PRESENT — this feature is
+# apollo-only by design (DESIGN.md, this feature's own rationale).
+for other_agent in artemis socrates diogenes plato; do
+  other_build_step="$(awk -v agent="$other_agent" '
+    $0 ~ ("- name: Build prompt \\(" agent "\\)") { grab=1 }
+    grab && /- name:/ && $0 !~ ("Build prompt \\(" agent "\\)") { exit }
+    grab { print }
+  ' "$ACTION_YML")"
+  if [[ -n "$other_build_step" ]] && ! grep -q 'SPEC_FILE:' <<<"$other_build_step" && ! grep -q 'SPEC_PRESENT:' <<<"$other_build_step"; then
+    pass "action.yml's $other_agent build-prompt step does NOT reference SPEC_FILE/SPEC_PRESENT (apollo-only)"
+  else
+    fail "action.yml's $other_agent build-prompt step unexpectedly references SPEC_FILE/SPEC_PRESENT, or the step could not be isolated"
+  fi
+done
 
 echo
 echo "PASS: $PASS, FAIL: $FAIL"

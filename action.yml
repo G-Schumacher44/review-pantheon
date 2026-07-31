@@ -127,6 +127,15 @@ inputs:
       present there — a target repo that never created one just doesn't get house-rule checks.
     required: false
     default: "REVIEW_RULES.md"
+  spec_file:
+    description: >-
+      Governing design/spec doc, relative to the checked-out target repo. Only used if it's
+      actually present there (same only-if-exists semantics as rules_file). When present, only
+      Apollo's prompt gets a pointer to it plus an instruction to check the delivered change
+      against it — every other agent's prompt is unaffected. A repo with no spec file gets
+      today's behavior unchanged.
+    required: false
+    default: "DESIGN.md"
   model:
     description: >-
       Optional Claude model id, passed through to every agent invocation as claude_args'
@@ -167,6 +176,7 @@ runs:
       env:
         PERSONAS_PATH: ${{ inputs.personas_path }}
         RULES_FILE: ${{ inputs.rules_file }}
+        SPEC_FILE: ${{ inputs.spec_file }}
         MODEL: ${{ inputs.model }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
@@ -186,6 +196,13 @@ runs:
           echo "rules_present=false" >> "$GITHUB_OUTPUT"
         fi
         echo "rules_file=$RULES_FILE" >> "$GITHUB_OUTPUT"
+
+        if [ -n "$SPEC_FILE" ] && [ -f "$GITHUB_WORKSPACE/$SPEC_FILE" ]; then
+          echo "spec_present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "spec_present=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "spec_file=$SPEC_FILE" >> "$GITHUB_OUTPUT"
 
         # The verdict-contract JSON schema (DESIGN.md's "Verdict contract") — structural only,
         # deliberately NOT enforcing each agent's own verdict vocabulary here (that would be a
@@ -308,6 +325,8 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        SPEC_FILE: ${{ steps.resolve.outputs.spec_file }}
+        SPEC_PRESENT: ${{ steps.resolve.outputs.spec_present }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/apollo-prompt.md"

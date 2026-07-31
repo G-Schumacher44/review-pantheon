@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/test-setup-smoke.sh — clean-machine smoke test for the setup story: required
-# binaries, both existing fixture suites, install.sh into a fresh scratch repo, bootstrap.sh
+# binaries, the existing fixture suites, install.sh into a fresh scratch repo, bootstrap.sh
 # into a fresh scratch prefix (and that review-gate resolves its lib/providers from there), and
 # — only when a token and network are actually available — one full tokened `review-gate --pr
 # <n> --dry-run` against a real public PR.
@@ -44,7 +44,7 @@ for bin in bash git jq gh python3 curl tar shellcheck; do
 done
 
 # ---------------------------------------------------------------------------
-# Stage 2 — the two existing fixture suites, unmodified.
+# Stage 2 — the existing fixture suites, unmodified.
 # ---------------------------------------------------------------------------
 section "Stage 2: existing fixture suites"
 if bash "$ROOT/tests/test-verdict-decision.sh"; then
@@ -57,6 +57,12 @@ if bash "$ROOT/tests/test-install.sh"; then
   pass "tests/test-install.sh"
 else
   fail "tests/test-install.sh"
+fi
+
+if bash "$ROOT/tests/test-prompt-assembly.sh"; then
+  pass "tests/test-prompt-assembly.sh"
+else
+  fail "tests/test-prompt-assembly.sh"
 fi
 
 # ---------------------------------------------------------------------------
