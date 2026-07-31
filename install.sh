@@ -18,8 +18,8 @@
 # Claude, all five personas) as in-editor/in-CLI commands so they're usable interactively during
 # planning and design, not just from the CI gate. agents/*.md stays the single canonical source
 # (DESIGN.md rule 4) — every file these flags write is GENERATED from it at install time, never
-# a hand-maintained duplicate. See README's "Using the agents in your editor/CLI" section and
-# DESIGN.md's "Generated per-tool projections" subsection for the design.
+# a hand-maintained duplicate. See README's "Provider lanes" section and DESIGN.md's "Generated
+# per-tool projections" subsection for the design.
 set -euo pipefail
 
 die() { echo "install.sh: $*" >&2; exit 1; }

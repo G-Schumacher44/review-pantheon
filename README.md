@@ -6,7 +6,7 @@
 [![CI](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml/badge.svg)](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![fail-closed by design](https://img.shields.io/badge/fail--closed-by%20design-brightgreen)](#how-the-gate-stays-honest)
-[![providers](https://img.shields.io/badge/providers-claude%20%7C%20codex%20%7C%20gemini%20%7C%20cursor-blue)](#provider-lanes)
+[![providers](https://img.shields.io/badge/providers-claude%20%28verified%29%20%C2%B7%20codex%20%7C%20gemini%20%7C%20cursor%20%28best--effort%29-blue)](#provider-lanes)
 
 </div>
 
@@ -29,12 +29,19 @@ Diogenes, Plato) whose verdicts inform a human decision and never gate.
 
 The verdict-decision rule — trailing-JSON extraction, schema validation, the blocker invariant —
 is implemented **twice, once per runtime** (`cli/lib/verdict.sh` in bash, `action/decide_verdict.py`
-in Python) and kept in sync by **9 cross-runner fixtures** in `tests/test-verdict-decision.sh`.
-**4 provider lanes** (`cli/providers/{claude,codex,gemini,cursor}.sh`) plug into the same CLI —
-Claude is the only one integration-tested. `tests/test-install.sh` runs **68 assertions** against
-the installer's gate-only path and its per-tool flags (`install.sh fixtures: 68 passed, 0 failed`
-is its own summary line). The GitHub Action's permissions are `contents: read` and
+in Python); a cross-runner fixture test in CI keeps the two in sync. **4 provider lanes**
+(`cli/providers/{claude,codex,gemini,cursor}.sh`) plug into the same CLI. Claude is the
+integration-tested lane; Codex, Gemini, and Cursor are best-effort by design and fail closed the
+same way an unparseable verdict does — see [Provider lanes](#provider-lanes) for the
+verified-vs-best-effort matrix. The GitHub Action's permissions are `contents: read` and
 `pull-requests: write` — no write access beyond posting one PR comment.
+
+review-pantheon is built for teams where a written spec is the contract, not a suggestion someone
+skims once and stops checking: `DESIGN.md` in this repo is itself that contract — its rule 5 says
+a disagreement between the design doc and the implementation is a bug in one of them, not a
+documentation nit. `REVIEW_RULES.example.md` is a template for an executable house-spec: rules
+the gate treats as blocker-class checks on every PR, not guidelines read once. Apollo's job —
+verifying delivery against claim — is the verification half of spec-driven development.
 
 ## Quick start
 
@@ -45,8 +52,11 @@ git clone <this repo> review-pantheon
 
 That copies the five personas, the verdict-decision script, and a GitHub Actions workflow into
 your repo (`--claude --cursor --codex --gemini` additionally generates in-editor/CLI projections
-of the counsel agents — see [Provider lanes](#provider-lanes)). Then, before trusting it, work
-through the **post-install checklist** `install.sh` prints:
+of the counsel agents — see [Provider lanes](#provider-lanes)). `install.sh` prints a post-install
+checklist when it finishes — the same steps below — work through it before trusting the gate.
+
+<details>
+<summary>Post-install checklist</summary>
 
 1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN`.
 2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
@@ -56,6 +66,8 @@ through the **post-install checklist** `install.sh` prints:
    the `result` output) against the release you pinned — written without network access, unverified.
 5. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
 6. Only after step 5 passes, consider making the check required.
+
+</details>
 
 Prefer the CLI? `cli/review-gate --pr <number>` runs the same panel locally against any repo with
 a `gh`-authenticated remote — see [CLI usage](#cli-usage).
@@ -86,6 +98,9 @@ code, and a PR can pass one and fail the other. Diogenes and Plato are foils: Di
 over-structure, Plato attacks under-structure. Socrates typically runs earliest — before there's
 anything else in the room for the rest of the panel to weigh in on.
 
+<details>
+<summary>Gate flow at a glance</summary>
+
 ```
 GATE — enforce, every PR                    COUNSEL — inform, before merging
 ------------------------------              ------------------------------
@@ -104,21 +119,7 @@ PR opened                                   spec / design doc / proposal
      (signal + table + folded findings)        human decides
 ```
 
-## Spec-driven development
-
-review-pantheon is built for teams where a written spec is the contract, not a suggestion someone
-skims once and stops checking.
-
-- `DESIGN.md` in this repo is itself that contract — its rule 5 states it plainly: if the design
-  doc and the implementation disagree, that's a bug in one of them, not a documentation nit.
-- `REVIEW_RULES.example.md` is a template for an executable house-spec: rules the gate passes into
-  every prompt and treats as blocker-class checks on every PR, not guidelines someone reads once.
-- Apollo's entire job is verifying delivery against claim — checking that what a PR says happened
-  is what git actually shows happened. That's the verification half of spec-driven development.
-
-A spec says what should be true; without a tier that checks it stayed true, it drifts quietly.
-review-pantheon is that tier — not a replacement for writing the spec, the check that it didn't
-silently diverge from the code.
+</details>
 
 ## How the gate stays honest
 
@@ -237,16 +238,9 @@ differences](#lane-differences) for why.
 ## Lane differences
 
 The CLI and the GitHub Action share personas and the verdict-decision rule, but they aren't the
-same tool.
-
-| | CLI (`cli/review-gate`) | GitHub Action (`action/review.yml`) |
-|---|---|---|
-| Follow-up mode | Yes — incremental diff since last reviewed SHA. | No — re-reviews the full diff on every push; no persisted state. |
-| Configuration | `gate.conf` (provider, model, base branch, rules file, agent list). | None — twin panel (artemis, apollo) hardcoded in the workflow. |
-| Provider choice | Pluggable lane; Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
-| Draft handling | Detects `isDraft` via `gh pr view`; exits 0, posts nothing. | Job-level `if:` skips the run entirely; nothing posted. Same outcome, different mechanism. |
-
-See `DESIGN.md`'s "Lane differences" section for the full rationale.
+same tool — they differ in follow-up mode, configuration, provider choice, and draft handling.
+See `DESIGN.md`'s ["Lane differences"](DESIGN.md#lane-differences) section for the full table and
+rationale.
 
 ## Works with Conductor
 
@@ -257,18 +251,15 @@ gate) and pressure-tests the plan before it's built (the counsel).
 
 ## What it deliberately doesn't do
 
-- **No fleet or multi-repo sweep.** The gate runs on one repo, on one PR, from inside that repo.
-- **No third-party review aggregation.** It doesn't collect or reconcile verdicts from other
-  review bots — a plausible extension point, not something this repo takes on.
-- **No auto-merge, no auto-approve.** This posts a verdict, it never acts on one.
-- **No write access beyond one PR comment.** `contents: read` + `pull-requests: write` only.
-- **No pretending an unverified result is safe.** Orange means the run itself failed, not that
-  the PR is fine — "review didn't happen," never a pass.
+No fleet/multi-repo sweep, no third-party reviewer aggregation, no auto-merge or auto-approve, no
+write access beyond one PR comment, no pretending an unverified result is safe. See `DESIGN.md`'s
+["Deliberately absent"](DESIGN.md#deliberately-absent) section for the full list and rationale.
 
 ## Docs
 
-Full doc index, including a per-persona table with each agent's lens and verdict vocabulary:
-[docs/README.md](docs/README.md). Start with `DESIGN.md` for the binding contract.
+Full doc index, including a per-persona table with each agent's role and link:
+[docs/README.md](docs/README.md). Start with `DESIGN.md` for the binding contract, including the
+verdict vocabulary table.
 
 ---
 

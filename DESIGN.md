@@ -152,8 +152,8 @@ Per-tool support is tiered honestly, not uniformly:
   closest equivalent) convention was checked against that tool's own current official docs
   before implementing, not assumed from Claude Code parity. Where a tool has no repo-level
   command convention at all, `install.sh` says so and skips it rather than inventing one — see
-  the flag's own comment block in `install.sh` and the README's "Using the agents in your
-  editor/CLI" section for what was verified vs. best-effort, and against which source, per tool.
+  the flag's own comment block in `install.sh` and the README's "Provider lanes" section for
+  what was verified vs. best-effort, and against which source, per tool.
 
 ## Two runtimes, one rule
 
