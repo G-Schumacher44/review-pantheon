@@ -43,6 +43,42 @@ from the target repo — Way A's `install.sh` doesn't touch the CLI at all, only
 </details>
 
 <details>
+<summary><strong>User-level install (<code>install.sh --user</code>): personas follow you across every repo</strong></summary>
+
+```bash
+./review-pantheon/install.sh --user --claude --cursor --codex --gemini
+```
+
+Same generators as Way A's `--claude`/`--cursor`/`--codex`/`--gemini`, run at **user level**
+(`$HOME`) instead of into a target repo, so the counsel personas are available in every project
+on the machine without re-installing per-repo. No target-repo argument — `--user` errors if one
+is given — and at least one tool flag is required. The gate files (workflow, `decide_verdict.py`,
+`REVIEW_RULES.md`) are **not** installed under `--user`: a PR gate belongs to one repo's CI, so
+run plain `install.sh /path/to/repo` (Way A) per repo for those.
+
+Verified per tool against each tool's current official docs (see `install.sh`'s own
+`install_claude`/`install_cursor`/`install_codex`/`install_gemini` comment blocks for the exact
+sources) — all four have a documented user-level location, the same relative layout as the
+repo-level one:
+
+| Tool | User-level destination |
+|---|---|
+| **Claude Code** | `$HOME/.claude/agents/*.md` (personas verbatim) + `$HOME/.claude/commands/counsel.md` |
+| **Cursor** | `$HOME/.cursor/agents/*.md` |
+| **Codex CLI** | `$HOME/.agents/skills/<name>/SKILL.md` |
+| **Gemini CLI** | `$HOME/.gemini/commands/*.toml` |
+
+Gemini CLI note: a project-level `.gemini/commands/<name>.toml` always wins over the user-level
+copy when a name collides — so if you also run Way A's `--gemini` in a given repo, that repo's
+own personas take priority over the ones installed by `--user`, per Gemini CLI's own documented
+precedence rule.
+
+Same idempotency contract as Way A — `install.sh` reuses the identical generator functions,
+parameterized by destination root, not a duplicated code path.
+
+</details>
+
+<details>
 <summary><strong>Way B — user-level install (<code>bootstrap.sh</code>): zero repo footprint</strong></summary>
 
 ```bash

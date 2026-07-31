@@ -20,6 +20,16 @@
 # (DESIGN.md rule 4) — every file these flags write is GENERATED from it at install time, never
 # a hand-maintained duplicate. See README's "Provider lanes" section and DESIGN.md's "Generated
 # per-tool projections" subsection for the design.
+#
+# --user (combined with one or more of the above): installs the SAME generated projections at
+# USER level ($HOME) instead of into a target repo, so the personas follow you across every
+# project instead of being installed per-repo. No target-repo argument is accepted with --user —
+# it always writes under $HOME. The gate files (workflow, decide_verdict.py, REVIEW_RULES) are
+# NOT installed under --user: they're repo concepts (a PR gate belongs to one repo's CI), so
+# --user installs only the per-tool agent/command projections, and requires at least one tool
+# flag. Each tool's user-level destination is the same relative path as its repo-level one, just
+# rooted at $HOME instead of the target repo — verified per tool against current official docs
+# (see each generator's comment block below for the source).
 set -euo pipefail
 
 die() { echo "install.sh: $*" >&2; exit 1; }
@@ -28,14 +38,19 @@ note() { echo "install.sh: $*"; }
 usage() {
   cat <<'EOF'
 Usage: install.sh /abs/path/to/target-repo [--claude] [--cursor] [--codex] [--gemini]
+       install.sh --user [--claude] [--cursor] [--codex] [--gemini]
 
   (no flags)   Gate-only install: personas + verdict script + GitHub Action (default, unchanged).
   --claude     Also install personas as Claude Code subagents + a /counsel command.
   --cursor     Also generate Cursor subagents, .cursor/agents/*.md (best-effort — see README).
   --codex      Also generate Codex Skills, .agents/skills/*/SKILL.md (best-effort — see README).
   --gemini     Also generate Gemini CLI commands, .gemini/commands/*.toml (best-effort — see README).
+  --user       Install the per-tool agent projections at USER level ($HOME) instead of into a
+               target repo — no target-repo argument, requires at least one of the flags above,
+               and does NOT install the gate files (those are repo concepts).
 
 Flags are combinable: install.sh /path/to/repo --claude --cursor
+User-level:            install.sh --user --claude --cursor --codex --gemini
 EOF
 }
 
@@ -46,6 +61,7 @@ DO_CLAUDE=false
 DO_CURSOR=false
 DO_CODEX=false
 DO_GEMINI=false
+DO_USER=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -53,6 +69,7 @@ for arg in "$@"; do
     --cursor) DO_CURSOR=true ;;
     --codex) DO_CODEX=true ;;
     --gemini) DO_GEMINI=true ;;
+    --user) DO_USER=true ;;
     -h|--help) usage; exit 0 ;;
     -*) usage; die "unknown flag: $arg" ;;
     *)
@@ -62,9 +79,21 @@ for arg in "$@"; do
   esac
 done
 
-[[ -n "$TARGET" ]] || { usage; die "target repo path is required"; }
-[[ -d "$TARGET" ]] || die "target repo does not exist: $TARGET"
-TARGET="$(cd "$TARGET" && pwd)"
+# --user installs at $HOME instead of into a target repo: no path argument, and at least one
+# tool flag is required (a bare --user with nothing to generate would do nothing silently).
+if [[ "$DO_USER" == "true" ]]; then
+  [[ -z "$TARGET" ]] || die "--user installs at \$HOME, not a target repo — unexpected argument: '$TARGET'. Usage: install.sh --user [--claude] [--cursor] [--codex] [--gemini]"
+  if [[ "$DO_CLAUDE" != "true" && "$DO_CURSOR" != "true" && "$DO_CODEX" != "true" && "$DO_GEMINI" != "true" ]]; then
+    die "--user requires at least one tool flag: --claude, --cursor, --codex, --gemini"
+  fi
+  [[ -n "${HOME:-}" ]] || die "--user requires \$HOME to be set"
+  DEST_ROOT="$HOME"
+else
+  [[ -n "$TARGET" ]] || { usage; die "target repo path is required"; }
+  [[ -d "$TARGET" ]] || die "target repo does not exist: $TARGET"
+  TARGET="$(cd "$TARGET" && pwd)"
+  DEST_ROOT="$TARGET"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -72,12 +101,6 @@ AGENTS_SRC="$SCRIPT_DIR/agents"
 DECIDE_SRC="$SCRIPT_DIR/action/decide_verdict.py"
 ACTION_SRC="$SCRIPT_DIR/action/review.yml"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
-
-AGENTS_DEST="$TARGET/.github/review-agents"
-DECIDE_DEST="$TARGET/.github/review-agents/decide_verdict.py"
-WORKFLOW_DEST="$TARGET/.github/workflows/review.yml"
-RULES_DEST="$TARGET/REVIEW_RULES.md"
-GITIGNORE_DEST="$TARGET/.gitignore"
 
 SKIPPED=()
 
@@ -99,28 +122,40 @@ install_file() {
 }
 
 [[ -d "$AGENTS_SRC" ]] || die "missing $AGENTS_SRC — run this from a review-pantheon checkout"
-[[ -f "$DECIDE_SRC" ]] || die "missing $DECIDE_SRC"
-[[ -f "$ACTION_SRC" ]] || die "missing $ACTION_SRC"
-[[ -f "$RULES_SRC" ]] || die "missing $RULES_SRC"
 
-mkdir -p "$AGENTS_DEST"
-for persona in "$AGENTS_SRC"/*.md; do
-  install_file "$persona" "$AGENTS_DEST/$(basename "$persona")"
-done
+# Gate files (personas into .github/review-agents, decide_verdict.py, the workflow, the house
+# rules template, .gitignore) are a repo concept — a PR gate belongs to one repo's CI — so
+# --user skips this whole section and installs only the per-tool projections below.
+if [[ "$DO_USER" != "true" ]]; then
+  [[ -f "$DECIDE_SRC" ]] || die "missing $DECIDE_SRC"
+  [[ -f "$ACTION_SRC" ]] || die "missing $ACTION_SRC"
+  [[ -f "$RULES_SRC" ]] || die "missing $RULES_SRC"
 
-install_file "$DECIDE_SRC" "$DECIDE_DEST"
-install_file "$ACTION_SRC" "$WORKFLOW_DEST"
-install_file "$RULES_SRC" "$RULES_DEST"
+  AGENTS_DEST="$TARGET/.github/review-agents"
+  DECIDE_DEST="$TARGET/.github/review-agents/decide_verdict.py"
+  WORKFLOW_DEST="$TARGET/.github/workflows/review.yml"
+  RULES_DEST="$TARGET/REVIEW_RULES.md"
+  GITIGNORE_DEST="$TARGET/.gitignore"
 
-# .gitignore: append the state-file entry if not already present.
-if [[ -f "$GITIGNORE_DEST" ]]; then
-  if ! grep -qxF '.review-gate-state.json' "$GITIGNORE_DEST"; then
-    printf '%s\n' '.review-gate-state.json' >> "$GITIGNORE_DEST"
-    note "appended .review-gate-state.json to $GITIGNORE_DEST"
+  mkdir -p "$AGENTS_DEST"
+  for persona in "$AGENTS_SRC"/*.md; do
+    install_file "$persona" "$AGENTS_DEST/$(basename "$persona")"
+  done
+
+  install_file "$DECIDE_SRC" "$DECIDE_DEST"
+  install_file "$ACTION_SRC" "$WORKFLOW_DEST"
+  install_file "$RULES_SRC" "$RULES_DEST"
+
+  # .gitignore: append the state-file entry if not already present.
+  if [[ -f "$GITIGNORE_DEST" ]]; then
+    if ! grep -qxF '.review-gate-state.json' "$GITIGNORE_DEST"; then
+      printf '%s\n' '.review-gate-state.json' >> "$GITIGNORE_DEST"
+      note "appended .review-gate-state.json to $GITIGNORE_DEST"
+    fi
+  else
+    printf '%s\n' '.review-gate-state.json' > "$GITIGNORE_DEST"
+    note "created $GITIGNORE_DEST"
   fi
-else
-  printf '%s\n' '.review-gate-state.json' > "$GITIGNORE_DEST"
-  note "created $GITIGNORE_DEST"
 fi
 
 # ---------------------------------------------------------------------------
@@ -163,15 +198,32 @@ escape_bs_quote() {
   sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-if [[ "$DO_CLAUDE" == "true" ]]; then
-  CLAUDE_AGENTS_DEST="$TARGET/.claude/agents"
-  mkdir -p "$CLAUDE_AGENTS_DEST"
+# Each generator below is parameterized by <dest_root> so the SAME generated-file logic runs
+# for both a repo install (dest_root=$TARGET, e.g. .claude/agents/) and a --user install
+# (dest_root=$HOME, e.g. ~/.claude/agents/) — one function, two roots, never two copies of the
+# generation logic. generator_field/generator_body/escape_bs_quote above are already dest-root-
+# agnostic (they only read from $AGENTS_SRC).
+
+# install_claude <dest_root> — personas verbatim into <dest_root>/.claude/agents/, plus a
+# generated /counsel command at <dest_root>/.claude/commands/counsel.md. VERIFIED at both project
+# and user scope against current official docs (code.claude.com/docs/en/sub-agents,
+# code.claude.com/docs/en/slash-commands, fetched 2026-07-30): subagents load from both
+# `.claude/agents/` (project) and `~/.claude/agents/` (user — "available in every project on your
+# machine"). Slash commands are documented as merged into Skills going forward, but the docs
+# explicitly say ".claude/commands/ files keep working" — that mechanism is symmetric across
+# scopes (Claude Code scans a `commands/` dir wherever it finds one under `.claude/`), so
+# `~/.claude/commands/counsel.md` works the same way `.claude/commands/counsel.md` does today.
+install_claude() {
+  local dest_root="$1"
+  local claude_agents_dest="$dest_root/.claude/agents"
+  mkdir -p "$claude_agents_dest"
   for persona in "$AGENTS_SRC"/*.md; do
-    install_file "$persona" "$CLAUDE_AGENTS_DEST/$(basename "$persona")"
+    install_file "$persona" "$claude_agents_dest/$(basename "$persona")"
   done
 
-  COUNSEL_TMP="$(mktemp)"
-  cat > "$COUNSEL_TMP" <<'COUNSEL_EOF'
+  local counsel_tmp
+  counsel_tmp="$(mktemp)"
+  cat > "$counsel_tmp" <<'COUNSEL_EOF'
 ---
 description: Run the review-pantheon counsel tier (Socrates, then Diogenes + Plato) against a design, spec, or diff, and synthesize their verdicts.
 argument-hint: [design/spec/diff reference — a file, a PR, a paragraph describing the proposal]
@@ -211,25 +263,29 @@ invoked agent has reported:
   resolve the blocker(s) first.
 COUNSEL_EOF
 
-  install_file "$COUNSEL_TMP" "$TARGET/.claude/commands/counsel.md"
-  rm -f "$COUNSEL_TMP"
-fi
+  install_file "$counsel_tmp" "$dest_root/.claude/commands/counsel.md"
+  rm -f "$counsel_tmp"
+}
 
-# --cursor: Cursor's native subagent convention. VERIFIED against current official docs
-# (cursor.com/docs/subagents, introduced Cursor 2.4) — project-level agents live at
-# .cursor/agents/*.md, frontmatter is name/description/model/readonly/is_background. Cursor's
-# older "Commands" feature (.cursor/commands/*.md) is deprecated as of the same release and
-# folded into a separate "Skills" feature that has no documented argument-passing mechanism —
-# Subagents is the closer match to a named, invokable persona and is what's generated here.
-if [[ "$DO_CURSOR" == "true" ]]; then
-  CURSOR_AGENTS_DEST="$TARGET/.cursor/agents"
-  mkdir -p "$CURSOR_AGENTS_DEST"
+# install_cursor <dest_root> — Cursor's native subagent convention. VERIFIED against current
+# official docs (cursor.com/docs/subagents, fetched 2026-07-30) at both scopes: project agents
+# at `.cursor/agents/*.md`, user agents at `~/.cursor/agents/*.md` ("All projects for current
+# user" — the doc's own scope table). Frontmatter is name/description/model/readonly/
+# is_background. Cursor's older "Commands" feature (.cursor/commands/*.md) is deprecated as of
+# the same release and folded into a separate "Skills" feature that has no documented
+# argument-passing mechanism — Subagents is the closer match to a named, invokable persona and
+# is what's generated here, at both scopes.
+install_cursor() {
+  local dest_root="$1"
+  local cursor_agents_dest="$dest_root/.cursor/agents"
+  mkdir -p "$cursor_agents_dest"
   for persona in "$AGENTS_SRC"/*.md; do
+    local persona_name persona_desc persona_model persona_desc_esc cursor_tmp
     persona_name="$(basename "$persona" .md)"
     persona_desc="$(persona_field "$persona" description)"
     persona_model="$(persona_field "$persona" model)"
     persona_desc_esc="$(printf '%s' "$persona_desc" | escape_bs_quote)"
-    CURSOR_TMP="$(mktemp)"
+    cursor_tmp="$(mktemp)"
     {
       echo "---"
       echo "name: $persona_name"
@@ -244,26 +300,32 @@ if [[ "$DO_CURSOR" == "true" ]]; then
       echo "     lane, not integration-tested against a live Cursor install in this repo's CI. -->"
       echo
       persona_body "$persona"
-    } > "$CURSOR_TMP"
-    install_file "$CURSOR_TMP" "$CURSOR_AGENTS_DEST/$persona_name.md"
-    rm -f "$CURSOR_TMP"
+    } > "$cursor_tmp"
+    install_file "$cursor_tmp" "$cursor_agents_dest/$persona_name.md"
+    rm -f "$cursor_tmp"
   done
-fi
+}
 
-# --codex: Codex CLI has NO documented repo-level custom-command/prompt convention — its
-# custom-prompts feature (~/.codex/prompts/*.md) is user-level only and itself deprecated per
-# OpenAI's own docs (learn.chatgpt.com/docs/custom-prompts). The documented, git-shareable,
-# repo-level mechanism is Skills: .agents/skills/<name>/SKILL.md, frontmatter name+description
-# (developers.openai.com/codex/skills). That's what's generated here — not an invented
-# per-repo "command" convention Codex doesn't actually have.
-if [[ "$DO_CODEX" == "true" ]]; then
-  CODEX_SKILLS_DEST="$TARGET/.agents/skills"
+# install_codex <dest_root> — Codex CLI has NO documented repo-level custom-command/prompt
+# convention — its custom-prompts feature (~/.codex/prompts/*.md) is user-level only and itself
+# deprecated per OpenAI's own docs (learn.chatgpt.com/docs/custom-prompts). The documented,
+# git-shareable, repo-level mechanism is Skills: `.agents/skills/<name>/SKILL.md`. Skills also
+# has a documented USER scope — VERIFIED against current official docs
+# (developers.openai.com/codex/skills -> learn.chatgpt.com/docs/build-skills, fetched
+# 2026-07-30): its discovery-scope table lists `USER` at `$HOME/.agents/skills` ("curate skills
+# relevant to a user that apply to any repository"), the same relative layout as the repo scope
+# — that's what's generated here at both roots, not an invented "command" convention Codex
+# doesn't actually have.
+install_codex() {
+  local dest_root="$1"
+  local codex_skills_dest="$dest_root/.agents/skills"
   for persona in "$AGENTS_SRC"/*.md; do
+    local persona_name persona_desc persona_desc_esc codex_tmp
     persona_name="$(basename "$persona" .md)"
     persona_desc="$(persona_field "$persona" description)"
     persona_desc_esc="$(printf '%s' "$persona_desc" | escape_bs_quote)"
-    mkdir -p "$CODEX_SKILLS_DEST/$persona_name"
-    CODEX_TMP="$(mktemp)"
+    mkdir -p "$codex_skills_dest/$persona_name"
+    codex_tmp="$(mktemp)"
     {
       echo "---"
       echo "name: $persona_name"
@@ -276,25 +338,29 @@ if [[ "$DO_CODEX" == "true" ]]; then
       echo "     integration-tested against a live Codex install in this repo's CI. -->"
       echo
       persona_body "$persona"
-    } > "$CODEX_TMP"
-    install_file "$CODEX_TMP" "$CODEX_SKILLS_DEST/$persona_name/SKILL.md"
-    rm -f "$CODEX_TMP"
+    } > "$codex_tmp"
+    install_file "$codex_tmp" "$codex_skills_dest/$persona_name/SKILL.md"
+    rm -f "$codex_tmp"
   done
-fi
+}
 
-# --gemini: Gemini CLI's native custom-command convention. VERIFIED against the official docs
-# (github.com/google-gemini/gemini-cli/blob/main/docs/cli/custom-commands.md) — project-level
-# commands at .gemini/commands/*.toml ARE officially supported (and take priority over the
-# user-level ~/.gemini/commands/ equivalent), TOML fields are `description` and `prompt`, and
-# `{{args}}` is the argument placeholder.
-if [[ "$DO_GEMINI" == "true" ]]; then
-  GEMINI_COMMANDS_DEST="$TARGET/.gemini/commands"
-  mkdir -p "$GEMINI_COMMANDS_DEST"
+# install_gemini <dest_root> — Gemini CLI's native custom-command convention. VERIFIED against
+# the official docs (github.com/google-gemini/gemini-cli/blob/main/docs/cli/custom-commands.md,
+# fetched 2026-07-30) at both scopes — project-level commands at `.gemini/commands/*.toml` ARE
+# officially supported and take priority over the user-level `~/.gemini/commands/*.toml`
+# equivalent when a name collides ("the project command will always be used"); both scopes use
+# the same TOML fields (`description`, `prompt`) and the `{{args}}` placeholder, so the same
+# generator runs for both — --user just writes the lower-priority copy at $HOME instead.
+install_gemini() {
+  local dest_root="$1"
+  local gemini_commands_dest="$dest_root/.gemini/commands"
+  mkdir -p "$gemini_commands_dest"
   for persona in "$AGENTS_SRC"/*.md; do
+    local persona_name persona_desc gemini_tmp
     persona_name="$(basename "$persona" .md)"
     persona_desc="$(persona_field "$persona" description)"
     persona_desc="$(printf '%s' "$persona_desc" | escape_bs_quote)"
-    GEMINI_TMP="$(mktemp)"
+    gemini_tmp="$(mktemp)"
     {
       echo "# GENERATED by install.sh --gemini from review-pantheon's agents/$persona_name.md —"
       echo "# do not edit by hand; re-run install.sh --gemini to refresh it. Gemini CLI custom-"
@@ -313,17 +379,45 @@ if [[ "$DO_GEMINI" == "true" ]]; then
       echo
       echo "Reference under review: {{args}}"
       echo '"""'
-    } > "$GEMINI_TMP"
-    install_file "$GEMINI_TMP" "$GEMINI_COMMANDS_DEST/$persona_name.toml"
-    rm -f "$GEMINI_TMP"
+    } > "$gemini_tmp"
+    install_file "$gemini_tmp" "$gemini_commands_dest/$persona_name.toml"
+    rm -f "$gemini_tmp"
   done
-fi
+}
+
+[[ "$DO_CLAUDE" == "true" ]] && install_claude "$DEST_ROOT"
+[[ "$DO_CURSOR" == "true" ]] && install_cursor "$DEST_ROOT"
+[[ "$DO_CODEX" == "true" ]] && install_codex "$DEST_ROOT"
+[[ "$DO_GEMINI" == "true" ]] && install_gemini "$DEST_ROOT"
 
 if [[ ${#SKIPPED[@]} -gt 0 ]]; then
   note "left unchanged (differs from shipped version — looks customized):"
   for f in "${SKIPPED[@]}"; do
     note "  - $f"
   done
+fi
+
+if [[ "$DO_USER" == "true" ]]; then
+  INSTALLED_TOOLS=()
+  [[ "$DO_CLAUDE" == "true" ]] && INSTALLED_TOOLS+=("claude ($DEST_ROOT/.claude/agents/, $DEST_ROOT/.claude/commands/counsel.md)")
+  [[ "$DO_CURSOR" == "true" ]] && INSTALLED_TOOLS+=("cursor ($DEST_ROOT/.cursor/agents/)")
+  [[ "$DO_CODEX" == "true" ]] && INSTALLED_TOOLS+=("codex ($DEST_ROOT/.agents/skills/)")
+  [[ "$DO_GEMINI" == "true" ]] && INSTALLED_TOOLS+=("gemini ($DEST_ROOT/.gemini/commands/)")
+
+  cat <<EOF
+
+review-pantheon user-level install complete — projections follow you across every project on
+this machine:
+EOF
+  for t in "${INSTALLED_TOOLS[@]}"; do
+    note "  - $t"
+  done
+  cat <<EOF
+
+No gate files were installed (workflow, decide_verdict.py, REVIEW_RULES.md) — those are repo
+concepts. Run install.sh (without --user) inside each repo you want the CI gate in.
+EOF
+  exit 0
 fi
 
 cat <<EOF

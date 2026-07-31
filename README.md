@@ -82,7 +82,9 @@ repo instead of referencing this one (`--claude --cursor --codex --gemini` addit
 in-editor/CLI projections of the counsel agents — see [Provider lanes](#provider-lanes)). Choose
 this over Option A if you want the gate's own files reviewable in your repo's history, or you're
 not ready to depend on this repo being public. `install.sh` prints a post-install checklist when
-it finishes — the same steps below — work through it before trusting the gate.
+it finishes — the same steps below — work through it before trusting the gate. Want the same
+projections available in every repo instead of one at a time? `install.sh --user --claude
+--cursor --codex --gemini` installs them at `$HOME` instead — see [docs/SETUP.md](docs/SETUP.md#way-a--vendored-install-installsh-files-land-in-your-repo).
 
 <details>
 <summary>Post-install checklist (Option B)</summary>
