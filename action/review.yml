@@ -30,9 +30,14 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  # No id-token: write — this workflow doesn't need OIDC token exchange for anything it
-  # currently does. Some anthropics/claude-code-action releases may require it; re-add only
-  # if the release you pin documents that requirement, and scope it to the job that needs it.
+  # No id-token: write — not needed because we pass github_token: ${{ github.token }} to
+  # claude-code-action explicitly below. anthropics/claude-code-action's token.ts checks the
+  # github_token input FIRST and skips its internal OIDC-token-exchange bootstrap entirely when
+  # one is supplied; only when github_token is unset does it fall back to exchanging an OIDC
+  # token for a GitHub App token, which requires this permission. See run 30663863514 for what
+  # it looks like when that bootstrap dies without it: "Could not fetch an OIDC token", every
+  # per-agent step's continue-on-error swallows the failure, structured_output comes back
+  # empty, and the gate correctly fails closed as NOT GATED.
 
 jobs:
   review:
@@ -150,6 +155,7 @@ jobs:
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
           prompt: ${{ steps.build-prompt.outputs.prompt }}
           # v1 has no `allowed_tools` input (that was v0.x, removed — see this file's header
           # comment) — the tool allowlist travels inside `claude_args` as `--allowedTools`
