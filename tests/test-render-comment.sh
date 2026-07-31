@@ -156,6 +156,23 @@ assert_contains "unverified" "top-finding cell falls back to explanatory text" "
 assert_contains "unverified" "fold forced open on unverified/orange" "$out" "<details open>"
 
 # ---------------------------------------------------------------------------
+# Fixture: malformed findings shape (a string instead of an array) — regression coverage for
+# a gap this repo's own gate found on itself (PR #3, artemis's FIX_FIRST finding): upstream
+# validation (cli/lib/verdict.sh, decide_verdict.py) only checks that the `findings` KEY is
+# present, never that it's an array, so `"findings": "none"` (a plausible LLM slip) reaches
+# this renderer unfiltered. Must degrade to "no findings" (count 0), never a bogus length.
+# ---------------------------------------------------------------------------
+reset_agent_env
+ARTEMIS_COLOR=green ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="no findings"
+ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":"none","summary":"malformed findings shape"}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+
+out="$(pantheon_render_comment "$HEAD_SHA" artemis)"
+assert_contains "malformed-findings" "table top-finding cell degrades to em dash, not a crash" "$out" "| artemis | \`SHIP\` — green | — |"
+assert_contains "malformed-findings" "fold count degrades to 0, not the string's character length" "$out" "<summary>Full findings (0)</summary>"
+assert_not_contains "malformed-findings" "no bogus non-zero count leaks through" "$out" "Full findings (4)"
+
+# ---------------------------------------------------------------------------
 # Fixture: one agent skipped (docs-only apollo skip), loud row required
 # ---------------------------------------------------------------------------
 reset_agent_env

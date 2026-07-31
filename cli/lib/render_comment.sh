@@ -75,11 +75,19 @@ _pantheon_severity_badge() {
   esac
 }
 
+# `.findings` is only checked for PRESENCE upstream (cli/lib/verdict.sh's decide_verdict,
+# decide_verdict.py's REQUIRED_KEYS), never for being an array — a malformed verdict (e.g. an
+# agent emitting `"findings": "none"` instead of `[]`) would otherwise still pass that
+# validation and reach this renderer. `if type == "array" then . else [] end` degrades any
+# non-array shape to empty rather than letting jq error out or, worse, `length` silently
+# return a wrong count (a string's character count, not zero) — fail-closed for the render
+# layer specifically: a malformed findings shape reads as "no findings", never a bogus count.
+
 # One compact JSON object per line, findings sorted blocker -> should_fix -> note -> other.
 # Zero findings prints zero lines (a `while read` loop over this correctly no-ops).
 _pantheon_sorted_findings() {
   jq -c '
-    (.findings // [])
+    ((.findings // []) | if type == "array" then . else [] end)
     | map(. + {_rank: (if .severity == "blocker" then 0
                         elif .severity == "should_fix" then 1
                         elif .severity == "note" then 2
@@ -94,7 +102,7 @@ _pantheon_sorted_findings() {
 # empty findings array can't turn into a zero-line command substitution edge case.
 _pantheon_top_finding_text() {
   jq -r '
-    (.findings // [])
+    ((.findings // []) | if type == "array" then . else [] end)
     | map(. + {_rank: (if .severity == "blocker" then 0
                         elif .severity == "should_fix" then 1
                         elif .severity == "note" then 2
@@ -211,7 +219,7 @@ pantheon_render_comment() {
     findings_json="${!findings_var:-\{\}}"
     [ -n "$findings_json" ] || findings_json='{}'
 
-    fcount="$(jq -r '(.findings // []) | length' <<<"$findings_json" 2>/dev/null)"
+    fcount="$(jq -r '((.findings // []) | if type == "array" then . else [] end) | length' <<<"$findings_json" 2>/dev/null)"
     [ -n "$fcount" ] || fcount=0
     total_findings=$((total_findings + fcount))
 
