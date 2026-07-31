@@ -68,7 +68,7 @@ for agent in $AGENTS; do
   case "$color" in
     red) overall="red" ;;
     unverified) [ "$overall" = "red" ] || overall="unverified" ;;
-    yellow) [ "$overall" = "green" ] && overall="yellow" || true ;;
+    yellow) if [ "$overall" = "green" ]; then overall="yellow"; fi ;;
   esac
 
   has_findings=false
