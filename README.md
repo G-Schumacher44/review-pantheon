@@ -45,27 +45,56 @@ verifying delivery against claim — is the verification half of spec-driven dev
 
 ## Quick start
 
+### Option A — published action (zero footprint)
+
+```yaml
+- uses: G-Schumacher44/review-pantheon@v1
+  with: { claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} }
+```
+
+Drop that (plus a PR trigger and `pull-requests: write`) into a workflow file and nothing else
+lands in your repo — `action.yml` reads personas and the verdict-decision script from its own
+checkout. Full ~20-line stub: [examples/review-gate.yml](examples/review-gate.yml). Auth is
+`claude_code_oauth_token` (above) or `anthropic_api_key` — exactly one, fails loud otherwise;
+Bedrock/Vertex/Foundry/OIDC federation aren't wired through this action (use Option B for
+those) — see [docs/SETUP.md](docs/SETUP.md#way-c--published-action-zero-repo-footprint-action-only).
+
+<details>
+<summary>Post-install checklist (Option A)</summary>
+
+1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY` — wire whichever one
+   into the stub's `with:` block).
+2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
+3. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
+4. Only after step 3 passes, consider making the check required.
+
+</details>
+
+### Option B — vendored install (`install.sh`)
+
 ```bash
 git clone <this repo> review-pantheon
 ./review-pantheon/install.sh /path/to/your-repo
 ```
 
-That copies the five personas, the verdict-decision script, and a GitHub Actions workflow into
-your repo (`--claude --cursor --codex --gemini` additionally generates in-editor/CLI projections
-of the counsel agents — see [Provider lanes](#provider-lanes)). `install.sh` prints a post-install
-checklist when it finishes — the same steps below — work through it before trusting the gate.
+Copies the five personas, the verdict-decision script, and a GitHub Actions workflow into your
+repo instead of referencing this one (`--claude --cursor --codex --gemini` additionally generates
+in-editor/CLI projections of the counsel agents — see [Provider lanes](#provider-lanes)). Choose
+this over Option A if you want the gate's own files reviewable in your repo's history, or you're
+not ready to depend on this repo being public. `install.sh` prints a post-install checklist when
+it finishes — the same steps below — work through it before trusting the gate.
 
 <details>
-<summary>Post-install checklist</summary>
+<summary>Post-install checklist (Option B)</summary>
 
 1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN`.
 2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
-3. Open `.github/workflows/review.yml` and replace `PIN-ME-TO-A-FULL-COMMIT-SHA` with a real,
-   full 40-character commit SHA for `anthropics/claude-code-action`.
-4. Verify that action's input/output names (`claude_code_oauth_token`, `prompt`, `allowed_tools`,
-   the `result` output) against the release you pinned — written without network access, unverified.
-5. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
-6. Only after step 5 passes, consider making the check required.
+3. `.github/workflows/review.yml` ships pinned to a real, verified
+   `anthropics/claude-code-action` commit SHA (see that file's header comment for the release
+   and the source it was checked against) — if you re-pin it yourself, confirm the SHA still
+   matches a release you trust before relying on this gate.
+4. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
+5. Only after step 4 passes, consider making the check required.
 
 </details>
 

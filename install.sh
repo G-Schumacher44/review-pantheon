@@ -334,17 +334,23 @@ Post-install checklist:
   1. Set the repo secret CLAUDE_CODE_OAUTH_TOKEN (Settings -> Secrets and variables -> Actions).
   2. Set the repo variable REVIEW_GATE_ENABLED=true (Settings -> Secrets and variables ->
      Actions -> Variables) — the workflow no-ops until this is set.
-  3. Pin the action in .github/workflows/review.yml: it ships with a placeholder
-     PIN-ME-TO-A-FULL-COMMIT-SHA in place of a real anthropics/claude-code-action commit SHA.
-     Replace it with a real full 40-character commit SHA before relying on this gate.
-  4. Verify the action's input/output names (claude_code_oauth_token, prompt, allowed_tools,
-     the "result" output the decide step reads) against the release you just pinned — they
-     are unverified guesses, written without network access to the action's docs. This is
-     the same warning that's in review.yml's own header comment.
+  3. .github/workflows/review.yml ships pinned to anthropics/claude-code-action's v1.0.183
+     commit SHA — confirm that SHA still matches a release you trust
+     (gh api repos/anthropics/claude-code-action/git/ref/tags/v1.0.183, or check
+     github.com/anthropics/claude-code-action/releases) before relying on this gate. If you
+     re-pin to a newer release, re-verify the with: inputs and output below against that
+     release's action.yml too — the interface can change between releases.
+  4. What review.yml uses today, already confirmed against v1.0.183's real action.yml:
+     claude_code_oauth_token, prompt, claude_args (with --allowedTools and --json-schema —
+     v1 has no allowed_tools input), and the structured_output output (v1 has no "result"
+     output). See review.yml's own header comment for the sources this was verified against.
   5. Open a test PR with a deliberately planted blocker (a secret in a diff, an unguarded
      rm, whatever your REVIEW_RULES.md forbids) and confirm the gate goes RED before you
      trust a green result on a real PR.
   6. Only after step 5 passes, consider adding this workflow as a required status check.
   7. Using the CLI lane too? Copy gate.conf.example to gate.conf at your repo root and edit
      it — it isn't installed automatically (see README's CLI usage section).
+
+Prefer zero repo footprint? Skip install.sh's gate files entirely and use the published
+action instead — see examples/review-gate.yml and README's "Option A — published action."
 EOF

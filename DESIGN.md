@@ -200,12 +200,16 @@ agents=artemis apollo    # panel for the standard gate
 - Model output is never interpolated into shell (`run:`) directly — it travels via files and
   env vars.
 - The GitHub Action checks out with `persist-credentials: false` and fails loud (not skip)
-  when its token secret is absent. It does **not** yet pin `anthropics/claude-code-action` to
-  a commit SHA — it ships with a loud placeholder, `PIN-ME-TO-A-FULL-COMMIT-SHA`, that refuses
-  to run until you replace it (an unpinned `uses:` fails at job parse/resolve time with an
-  obvious error, it doesn't silently no-op or run unpinned). Pinning it is step one of the
-  install checklist (`install.sh`'s printed output and the README quickstart), not optional
-  follow-up.
+  when its token secret is absent. It pins `anthropics/claude-code-action` to a full commit
+  SHA — `be7b93b1907a4abad570368f3c74b6fe3807510b` (v1.0.183) — read directly from that
+  release's own `action.yml`, not assumed or copied from an older version's docs (a moving
+  tag, or an unpinned `uses:`, is the thing to avoid here — the latter fails at job
+  parse/resolve time with an obvious error rather than silently running unpinned, but a moving
+  tag doesn't fail at all, it just quietly starts running whatever the tag points to next).
+  If you re-pin to a newer release yourself, that's step one of the install checklist
+  (`install.sh`'s printed output and the README quickstart) — the verification step there is
+  "confirm the pinned SHA matches a release you trust," not "guess the interface," since the
+  interface itself is now grounded (see "Published action" below).
 
 ## Follow-up mode (CLI lane only)
 
@@ -231,6 +235,53 @@ identical tools. Differences are intentional, not oversights:
 | Provider choice | Pluggable lane (`--provider`, `cli/providers/*.sh`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
 
+## Published action
+
+`action.yml` at the repo root is a **third** lane on top of the CLI and the vendored
+`action/review.yml`: a composite GitHub Action a target repo consumes with a `uses:
+G-Schumacher44/review-pantheon@v1` reference and nothing else — zero files land in that repo
+(contrast with `install.sh`'s Way A, which vendors personas + `action/review.yml` +
+`decide_verdict.py` into the target repo precisely so its own runner can see them; the
+published action instead reads all of that from its own checkout at `github.action_path`, the
+copy GitHub Actions pulls for the `uses:` reference). `examples/review-gate.yml` is the whole
+consumer-side install — copy it to `.github/workflows/review-gate.yml` and wire one secret.
+
+- **Bundled personas, overridable.** `agents/*.md` in this repo is read by default
+  (`github.action_path/agents`); a target repo can point `personas_path` at its own directory
+  instead (e.g. a repo-local fork of a persona) without forking this repo.
+- **`agents` input, same fixed five.** Same panel DESIGN.md defines everywhere else —
+  `artemis apollo socrates diogenes plato` — default `"artemis apollo"`, the standard gate.
+- **Sequential, not matrix — a real tradeoff, not an oversight.** `action/review.yml` runs
+  Artemis and Apollo as two matrix legs (parallel), passing results between jobs via
+  upload/download-artifact because matrix legs can't expose distinct job outputs to a
+  downstream job. A **composite action cannot use `strategy`/`matrix` at all** — that's a
+  job-level-only GitHub Actions concept, verified against GitHub's own composite-action docs,
+  not assumed — so `action.yml` runs every enabled agent sequentially in one job instead. The
+  payoff is simplicity: no artifact round-trip, no separate job, one `uses:` line for the
+  consumer; the cost is wall-clock (N agents run one after another). Given this lane exists
+  specifically for the simplest possible install, that tradeoff was made on purpose.
+- **The `anthropics/claude-code-action` pin is now real**, not a placeholder — see the
+  "Security posture" section above for the SHA, the release, and where it was verified.
+- **Fail-closed still applies.** Every agent step in `action.yml` runs with
+  `continue-on-error: true` (so a provider failure or a red/unverified verdict never halts the
+  action before it can post a comment and report the result), and the action's own final step
+  fails the job on red or unverified — same posture as the CLI's exit code and
+  `action/review.yml`'s decide step, just phrased for a composite action's constraints (no
+  `if: always()` chains needed when nothing upstream is allowed to hard-fail in the first
+  place — see `action.yml`'s own header comment for the composite-action mechanics this
+  relies on and what was verified about them, including that `steps.<id>.outcome` inside a
+  composite action was historically broken and has since been fixed upstream).
+
+**Honest limitation:** this action can't be integration-tested end-to-end — a real `uses:
+G-Schumacher44/review-pantheon@v1` invocation against a real PR — until this repo is public on
+GitHub (a private repo's actions aren't resolvable via a bare `owner/repo@ref` reference from
+another repo without extra token plumbing this project doesn't want to require). Until then,
+`.github/workflows/ci.yml`'s `composite-action-self-check` job covers what CAN be verified
+without that: `action.yml` and `examples/*.yml` parse as YAML, every file `action.yml`
+references under `github.action_path` actually exists, and the embedded/added shell scripts
+pass `bash -n` and shellcheck (already true via the repo-wide shellcheck job for the two new
+`action/lib/*.sh` files).
+
 ## Deliberately absent
 
 - No fleet/multi-repo sweep — the gate runs on one repo, from that repo. Loop it yourself.
@@ -254,9 +305,20 @@ action/review.yml          GitHub Actions twin gate — one matrix job (artemis,
                            artifact-based result passing, fail-closed decision step
 action/decide_verdict.py   the Action's verdict-decision rule (Python twin of
                            cli/lib/verdict.sh — see "Two runtimes, one rule"); installed into
-                           the target repo, not embedded in the workflow YAML
+                           the target repo, not embedded in the workflow YAML — also read
+                           in-place by action.yml (see below), never installed for that lane
+action/lib/                shared shell helpers for action.yml (build_prompt.sh,
+                           combine_verdicts.sh) — not used by action/review.yml, which keeps
+                           its prompt-build and comment-post logic inline (see "Published
+                           action" above for why the two runtimes differ here)
+action.yml                 the published composite action (see "Published action" above) —
+                           the whole install for a target repo is examples/review-gate.yml
+examples/review-gate.yml   the ~20-line consumer stub for action.yml; the entire footprint of
+                           the published-action lane in a target repo
 tests/                     tests/test-verdict-decision.sh — cross-runner fixture test;
-                           tests/test-install.sh — install.sh editor/CLI lane fixture test
+                           tests/test-install.sh — install.sh editor/CLI lane fixture test;
+                           tests/test-action-refs.sh — asserts every file action.yml
+                           references under github.action_path actually exists
 install.sh                 idempotent installer into a target repo (refuses to clobber
                            customized files); does not install gate.conf; --claude/--cursor/
                            --codex/--gemini generate per-tool projections of agents/*.md for

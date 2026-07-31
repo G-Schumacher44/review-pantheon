@@ -1,9 +1,10 @@
 # Setup — install, first run, troubleshooting
 
 This is the CLI-first walkthrough: get `review-gate` installed, run it once against a real PR
-without spending a token, then run it for real. For the Action-only lane (no CLI at all), see
-[Way C](#way-c--action-only-no-cli) below. Binding contract: `DESIGN.md`. Doc index:
-[docs/README.md](README.md).
+without spending a token, then run it for real. For the zero-footprint, Action-only lane (no
+CLI, no files in your repo), see
+[Way C](#way-c--published-action-zero-repo-footprint-action-only) below. Binding contract:
+`DESIGN.md`. Doc index: [docs/README.md](README.md).
 
 ## Prerequisites
 
@@ -18,7 +19,7 @@ without spending a token, then run it for real. For the Action-only lane (no CLI
 
 ## Three ways to install
 
-<details open>
+<details>
 <summary><strong>Way A — vendored install (<code>install.sh</code>): files land in your repo</strong></summary>
 
 ```bash
@@ -28,10 +29,11 @@ git clone <this repo> review-pantheon
 
 Copies the five personas, the verdict-decision script, and the GitHub Action workflow into
 your target repo (`.github/review-agents/`, `.github/workflows/review.yml`), so your repo's own
-CI checkout can see them without depending on review-pantheon existing on that runner. This is
-the only way that gets you the GitHub Action lane. Add `--claude --cursor --codex --gemini` to
-also generate in-editor/in-CLI projections of the counsel agents. Idempotent — see `install.sh`'s
-own header comment and the README's [Quick start](../README.md#quick-start).
+CI checkout can see them without depending on review-pantheon existing on that runner. Prefer
+this over Way C if you want the gate's own files reviewable in your repo's history. Add
+`--claude --cursor --codex --gemini` to also generate in-editor/in-CLI projections of the
+counsel agents. Idempotent — see `install.sh`'s own header comment and the README's
+[Quick start](../README.md#quick-start).
 
 You still run the CLI lane (`cli/review-gate`) from the review-pantheon checkout itself, not
 from the target repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
@@ -52,7 +54,7 @@ Installs `review-gate`, its provider lanes, and the five personas into a prefix 
 `export PATH=...` line to your shell rc yourself (`bootstrap.sh` won't edit it for you). From
 then on, `review-gate --pr <n>` works from inside any repo with a `gh`-authenticated remote,
 same as running it from an in-repo checkout. This is the CLI lane only — it doesn't install the
-GitHub Action; pair it with Way A in a given repo if you want both lanes.
+GitHub Action; pair it with Way A or Way C in a given repo if you want both lanes.
 
 Also works via `curl | bash` once this repo is public on GitHub:
 
@@ -70,14 +72,41 @@ changed; a file you've hand-edited in the prefix is left alone and reported skip
 
 </details>
 
-<details>
-<summary><strong>Way C — Action-only: no CLI at all</strong></summary>
+<details open>
+<summary><strong>Way C — published action: zero repo footprint, Action-only</strong></summary>
 
-Run only `install.sh /path/to/your-repo` (Way A) and skip the CLI entirely — you never need
-`cli/review-gate` on your machine if the GitHub Action is the only lane you want. Work through
-the post-install checklist `install.sh` prints (secret, variable, pinning the action SHA, a red
-test PR before trusting it) — same checklist as the README's
-[Quick start](../README.md#quick-start).
+Skip `install.sh` and `bootstrap.sh` entirely. Copy [`examples/review-gate.yml`](../examples/review-gate.yml)
+to `.github/workflows/review-gate.yml` in your repo and wire one secret — that file is the
+whole install. `action.yml` at this repo's root is a composite GitHub Action; the `uses:
+G-Schumacher44/review-pantheon@v1` reference reads personas and the verdict-decision script
+from its own checkout, so nothing lands in your repo at all. See `DESIGN.md`'s ["Published
+action"](../DESIGN.md#published-action) section for what's bundled, what's overridable
+(`personas_path`, `agents`, `rules_file`, `model`), and the sequential-vs-matrix tradeoff this
+lane makes.
+
+`action.yml`'s auth surface is deliberately narrow — exactly two inputs, and it fails loud
+unless exactly one is set:
+
+| Route | Input | Notes |
+|---|---|---|
+| Claude Code OAuth token | `claude_code_oauth_token` | The stub's default; a token from `claude setup-token` or your Claude Code subscription. |
+| Anthropic API key | `anthropic_api_key` | Pay-as-you-go via the Anthropic API. |
+
+**Bedrock/Vertex/Foundry or OIDC workload-identity federation are NOT wired through this
+composite action** — `anthropics/claude-code-action` itself supports them (`use_bedrock`,
+`use_vertex`, `use_foundry`, `anthropic_federation_rule_id`, and friends — see
+[its cloud-providers docs](https://github.com/anthropics/claude-code-action/blob/main/docs/cloud-providers.md)),
+but `action.yml`'s own auth-assert step requires one of the two inputs above and doesn't expose
+a passthrough for the cloud-provider ones. If you need pure cloud-provider auth (no Anthropic
+token at all), use Way A instead: `install.sh` vendors `action/review.yml` into your repo,
+which is then yours to edit — add the cloud-provider inputs to its `with:` block directly.
+
+Same post-install checklist as Way A otherwise: set `REVIEW_GATE_ENABLED=true`, open a test PR
+with a deliberately planted blocker, confirm red before trusting a green result.
+
+Still want the Action lane but prefer the files reviewable in your own repo's history (or don't
+want to depend on this repo being public)? That's Way A, not Way C — `install.sh` vendors
+`action/review.yml` instead of referencing this repo's `action.yml` directly.
 
 </details>
 
