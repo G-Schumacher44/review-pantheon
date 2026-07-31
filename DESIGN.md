@@ -326,7 +326,11 @@ examples/review-gate.yml   the ~20-line consumer stub for action.yml; the entire
 tests/                     tests/test-verdict-decision.sh — cross-runner fixture test;
                            tests/test-install.sh — install.sh editor/CLI lane fixture test;
                            tests/test-action-refs.sh — asserts every file action.yml
-                           references under github.action_path actually exists
+                           references under github.action_path actually exists;
+                           tests/test-prompt-assembly.sh — spec-aware Apollo prompt-assembly
+                           fixture test across all three runtimes (action/lib/build_prompt.sh,
+                           cli/review-gate's build_prompt(), action/review.yml's inline copy),
+                           including the cross-runner wording-identity check
 install.sh                 idempotent installer into a target repo (refuses to clobber
                            customized files); does not install gate.conf; --claude/--cursor/
                            --codex/--gemini generate per-tool projections of agents/*.md for

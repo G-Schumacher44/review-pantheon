@@ -3,19 +3,28 @@
 # feature (DESIGN.md's "House rules are pluggable" sibling: a governing spec file, wired the
 # same only-if-exists way, but into Apollo's context ONLY).
 #
-# Two runtimes build a prompt's context block: action/lib/build_prompt.sh (the Action lane,
-# shared by action.yml's five agent steps) and cli/review-gate's own build_prompt() function
-# (the CLI lane, not factored into a separate file — see DESIGN.md's "Layout" section on why
-# the two runtimes keep their prompt-build logic in different places). Neither had a dedicated
-# test before this file. This script:
+# THREE runtimes build a prompt's context block: action/lib/build_prompt.sh (the Action lane,
+# shared by action.yml's five agent steps), cli/review-gate's own build_prompt() function (the
+# CLI lane, not factored into a separate file — see DESIGN.md's "Layout" section on why the
+# runtimes keep their prompt-build logic in different places), and action/review.yml's own
+# inline "Build prompt" step (the vendored twin-gate matrix workflow's copy — a third, YAML-
+# embedded copy of the same logic, not factored out into build_prompt.sh because review.yml
+# runs standalone, checked out into a consumer repo with no action/lib/ alongside it). None had
+# a dedicated test before this file. This script:
 #   - Part A: calls action/lib/build_prompt.sh directly, with and without a spec file, for
 #     apollo AND a non-apollo agent, asserting the context line appears/is absent correctly.
 #   - Part B: exercises cli/review-gate's build_prompt() function itself — extracted verbatim
 #     from the live script (never hand-copied — a drifted copy would defeat the point of this
 #     test) — against fixture repo roots (spec present / absent / explicitly disabled),
 #     asserting the same thing via the CLI code path.
-#   - Cross-checks that both runtimes emit byte-identical wording for the line, per the task
-#     this feature shipped under ("keep both runners' context wording identical").
+#   - Part C: statically checks action/review.yml's inline "Build prompt" step — it's a
+#     `run: |` shell block gated on $AGENT_NAME inside YAML, not a standalone script, so it
+#     can't be sourced/executed like Parts A/B; instead this asserts the apollo+DESIGN.md
+#     conditional is present and extracts the literal echoed line for the wording cross-check
+#     below.
+#   - Cross-checks that all three runtimes emit byte-identical wording for the line, per the
+#     task this feature shipped under ("keep both runners' context wording identical") —
+#     extended here to cover review.yml's inline copy too.
 #
 # No test framework — plain bash, `bash tests/test-prompt-assembly.sh` is the whole invocation.
 #
@@ -172,8 +181,45 @@ cp "$(build_prompt apollo)" "$B3_APOLLO_FILE"
 assert_absent "review-gate build_prompt(): apollo + spec_file= disabled -> line absent even though DESIGN.md exists" "$B3_APOLLO_FILE"
 
 # ---------------------------------------------------------------------------
-# Cross-runner wording check — both runtimes must emit the identical line (this feature's own
-# design rationale: "Keep both runners' context wording identical").
+# Part C — action/review.yml's inline "Build prompt" step (the twin-gate matrix workflow's own
+# copy of this logic — a third copy alongside build_prompt.sh and cli/review-gate's
+# build_prompt(), per this file's header comment). This step is a `run: |` block embedded in
+# YAML, keyed off $AGENT_NAME/$GITHUB_WORKSPACE at real-workflow-run time, so it can't be
+# sourced or executed standalone the way Parts A/B are — this checks it structurally instead:
+# isolate the step's body, assert the apollo+DESIGN.md conditional gating it, and pull out the
+# literal echoed line for the wording cross-check below. review.yml hardcodes "DESIGN.md"
+# (unlike the other two runtimes' $SPEC_FILE/$CFG_SPEC_FILE variables) since this vendored
+# workflow has no gate.conf/spec_file input surface — see review.yml's own header comment.
+# ---------------------------------------------------------------------------
+section "Part C: action/review.yml's inline Build-prompt step"
+
+REVIEW_YML="$ROOT/action/review.yml"
+
+review_yml_build_step="$(awk '
+  /- name: Build prompt/ { grab=1 }
+  grab && /- name:/ && !/Build prompt/ { exit }
+  grab { print }
+' "$REVIEW_YML")"
+
+# shellcheck disable=SC2016 # single-quoted on purpose — searching for the literal
+# "$AGENT_NAME" text inside review.yml's shell block, not expanding a variable here.
+if [[ -n "$review_yml_build_step" ]] && grep -qE '\[ "\$AGENT_NAME" = "apollo" \]' <<<"$review_yml_build_step" && grep -q 'DESIGN.md' <<<"$review_yml_build_step"; then
+  pass "action/review.yml's Build-prompt step gates the spec-file line on AGENT_NAME=apollo + DESIGN.md presence"
+else
+  fail "action/review.yml's Build-prompt step is missing the apollo/DESIGN.md spec-file conditional"
+fi
+
+C1_LINE="$(grep -- 'Spec file:' <<<"$review_yml_build_step" | sed -E 's/^[[:space:]]*echo "(.*)"$/\1/')"
+if [[ -n "$C1_LINE" ]]; then
+  pass "action/review.yml's Build-prompt step echoes a 'Spec file: DESIGN.md (present...)' context line"
+else
+  fail "action/review.yml's Build-prompt step is missing the 'Spec file:' context line"
+fi
+
+# ---------------------------------------------------------------------------
+# Cross-runner wording check — all three runtimes must emit the identical line (this feature's
+# own design rationale: "Keep both runners' context wording identical" — extended here to a
+# third runtime).
 # ---------------------------------------------------------------------------
 section "Cross-runner wording"
 
@@ -184,6 +230,12 @@ if [[ -n "$A1_LINE" && "$A1_LINE" == "$B1_LINE" ]]; then
   pass "action/lib/build_prompt.sh and cli/review-gate emit the identical Spec-file context line"
 else
   fail "wording drift between runners — action: '$A1_LINE' vs cli: '$B1_LINE'"
+fi
+
+if [[ -n "$A1_LINE" && -n "$C1_LINE" && "$A1_LINE" == "$C1_LINE" ]]; then
+  pass "action/lib/build_prompt.sh and action/review.yml's inline copy emit the identical Spec-file context line"
+else
+  fail "wording drift between runners — action/lib/build_prompt.sh: '$A1_LINE' vs action/review.yml: '$C1_LINE'"
 fi
 
 rm -rf "$FIXTURE_WITH_SPEC" "$FIXTURE_NO_SPEC"
