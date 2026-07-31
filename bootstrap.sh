@@ -55,10 +55,20 @@ done
 # `dirname "${BASH_SOURCE[0]}"` breaks if this script is itself invoked through a symlink
 # (e.g. run from a symlinked clone); this follows the link chain to the real file first.
 # Deliberately not GNU `readlink -f` / coreutils `realpath` — neither ships on stock macOS.
+#
+# This is a DELIBERATE copy of cli/review-gate's resolver. bootstrap.sh must remain a single
+# self-contained file because the curl|bash path fetches it alone, so it cannot source a
+# shared lib — keep the two copies in sync by hand when either changes.
 # ---------------------------------------------------------------------------
 resolve_real_dir() {
   local src="$1"
+  local hops=0
   while [[ -h "$src" ]]; do
+    hops=$((hops + 1))
+    if (( hops > 32 )); then
+      echo "bootstrap.sh: resolve_real_dir: symlink chain exceeds 32 hops (cycle?) at '$src'" >&2
+      exit 1
+    fi
     local dir
     dir="$(cd -P "$(dirname "$src")" && pwd)"
     src="$(readlink "$src")"
