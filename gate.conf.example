@@ -15,5 +15,11 @@ base_branch=main
 # blocker-class checks. See REVIEW_RULES.example.md for the shipped starting point.
 rules_file=REVIEW_RULES.md
 
+# Path (relative to the target repo root) to the governing design/spec doc. Only used if the
+# file is actually present there — when it is, Apollo's context (only Apollo's, no other
+# agent's) gets a pointer to it and an instruction to check the delivered change against the
+# sections relevant to what changed. Default: DESIGN.md. Set to empty (spec_file=) to disable.
+spec_file=DESIGN.md
+
 # Space-separated list of agents to run for the standard gate.
 agents=artemis apollo

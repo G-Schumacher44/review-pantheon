@@ -128,6 +128,14 @@ jobs:
             else
               echo "- House rules file: REVIEW_RULES.md (not present - skip house-rule checks, note it)"
             fi
+            # Spec-file context — apollo only, not artemis (same only-if-exists semantics as
+            # the house-rules line above; hardcoded DESIGN.md, same as REVIEW_RULES.md above,
+            # since this vendored workflow has no gate.conf/input surface — see DESIGN.md's
+            # "Lane differences"). The persona skips this check silently when the line is
+            # absent, so a repo with no DESIGN.md gets today's behavior unchanged.
+            if [ "$AGENT_NAME" = "apollo" ] && [ -f "$GITHUB_WORKSPACE/DESIGN.md" ]; then
+              echo "- Spec file: DESIGN.md (present — check the delivered change against the sections of it relevant to the changed behavior; a contradiction is a finding that states both resolutions: fix the code or amend the spec)"
+            fi
             echo
             echo "Use \`git diff ${BASE_SHA}...${HEAD_SHA}\`, \`git show <ref>:path\`, and \`git log\` to inspect the change."
             echo

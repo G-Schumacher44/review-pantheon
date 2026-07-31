@@ -113,7 +113,7 @@ only these two run automatically in CI, and only these two verdicts can block a 
 | Agent | Lens | Verdict vocabulary (green / yellow / red) |
 |---|---|---|
 | **Artemis** | Hunts bugs in the diff — correctness, untested failure paths, shortcuts, house-rule violations. Assumes nothing works until shown. | `SHIP` / `FIX_FIRST` / `STOP` |
-| **Apollo** | Verifies the claim — re-runs stated checks, diffs claimed scope against git reality, checks required records exist. Skipped loudly on docs-only diffs. | `ACCEPT` / `ACCEPT_WITH_NOTES` / `RETURN` |
+| **Apollo** | Verifies the claim — re-runs stated checks, diffs claimed scope against git reality, checks required records exist, and (when a spec file is configured) checks delivery against the governing spec. Skipped loudly on docs-only diffs. | `ACCEPT` / `ACCEPT_WITH_NOTES` / `RETURN` |
 
 **Counsel agents (the philosophers)** — inform, never enforce. Their verdict is counsel a human
 weighs in a decision, not a mechanism that gates a merge — true whatever they're pointed at (spec,
