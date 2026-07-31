@@ -10,7 +10,7 @@ CLI, no files in your repo), see
 
 | Tool | Needed for | Notes |
 |---|---|---|
-| `bash` | Everything | 3.2+ (stock macOS) through 5.x (Linux). No bashisms newer than that. |
+| `bash` | Everything | 3.2+ (stock macOS) through 5.x (Linux). No bashisms newer than that. **Windows:** the CLI lane needs a POSIX shell — use WSL or Git Bash. The Action lane runs on GitHub's Linux runners and works from any OS with no local shell at all. |
 | `git` | Everything | The CLI locates the target repo via `git rev-parse --show-toplevel` and fetches PR refs directly (`refs/pull/<n>/head`) — no local branch checkout needed. |
 | `jq` | Everything | Verdict extraction and validation (`cli/lib/verdict.sh`) is `jq`-based. |
 | `gh`, authenticated | Everything | `review-gate` shells out to `gh pr view` / `gh pr comment`. Run `gh auth status` first if unsure. |
