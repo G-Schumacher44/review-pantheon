@@ -210,6 +210,11 @@ agents=artemis apollo    # panel for the standard gate
   (`install.sh`'s printed output and the README quickstart) — the verification step there is
   "confirm the pinned SHA matches a release you trust," not "guess the interface," since the
   interface itself is now grounded (see "Published action" below).
+- Both the published action and the vendored workflow pass the workflow token to
+  `claude-code-action` explicitly (`github_token: ${{ github.token }}` / `${{ inputs.github_token }}`),
+  so consumers never need to grant `id-token: write` — that permission is only needed for
+  claude-code-action's internal OIDC-token-exchange fallback, which it skips entirely once a
+  `github_token` input is supplied.
 
 ## Follow-up mode (CLI lane only)
 
