@@ -23,12 +23,21 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 resolve_real_dir() {
   local src="$1"
+  local hops=0
   while [[ -h "$src" ]]; do
+    hops=$((hops + 1))
+    if (( hops > 32 )); then
+      echo "review-gate: resolve_real_dir: symlink chain exceeds 32 hops (cycle?) at '$src'" >&2
+      exit 1
+    fi
     local dir
     dir="$(cd -P "$(dirname "$src")" && pwd)"
     src="$(readlink "$src")"
     [[ "$src" != /* ]] && src="$dir/$src"
   done
+  # cd -P resolves the PHYSICAL path (e.g. macOS /var -> /private/var), not the logical one —
+  # deliberate, so SCRIPT_DIR/PANTHEON_ROOT below are consistent with how the OS reports paths
+  # elsewhere, not an accidental side effect of following the symlink chain.
   cd -P "$(dirname "$src")" && pwd
 }
 

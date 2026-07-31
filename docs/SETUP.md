@@ -15,6 +15,8 @@ CLI, no files in your repo), see
 | `jq` | Everything | Verdict extraction and validation (`cli/lib/verdict.sh`) is `jq`-based. |
 | `gh`, authenticated | Everything | `review-gate` shells out to `gh pr view` / `gh pr comment`. Run `gh auth status` first if unsure. |
 | `python3` | Action lane only | `action/decide_verdict.py` is the Action's verdict decider. The CLI lane doesn't need Python at all — its decider is `cli/lib/verdict.sh` (bash + `jq`). |
+| `curl` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Only needed for the no-local-checkout install path — fetches the repo tarball from GitHub's codeload endpoint. Not needed for a local-checkout install, `install.sh`, or normal CLI/Action use. |
+| `tar` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Extracts the tarball `curl` fetches. Same scope as `curl` above — not needed otherwise. |
 | One provider CLI | Actually calling a model | `claude` (Claude Code CLI) is the default lane and the only one integration-tested. `codex`, `gemini`, `cursor-agent` are best-effort — see the README's [Provider lanes](../README.md#provider-lanes) table. `--dry-run` (below) needs none of these installed. |
 
 ## Three ways to install
@@ -68,7 +70,11 @@ repo is public, the curl path fails with an explicit message and a `git clone` f
 rather than silently doing nothing. Clone-and-run (the first form above) works today regardless.
 
 Idempotent, same cmp-and-skip contract as `install.sh`: re-running only touches files that
-changed; a file you've hand-edited in the prefix is left alone and reported skipped.
+changed; a file you've hand-edited in the prefix is left alone and reported skipped. Be aware
+this contract can't tell "hand-edited" from "stale": a file left over from an older
+`bootstrap.sh` run that simply differs from the currently-shipped source is skipped the exact
+same way, so it won't pick up upstream fixes on its own — upgrading an existing prefix means
+removing the file (or the whole prefix) first, then re-running.
 
 </details>
 

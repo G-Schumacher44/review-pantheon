@@ -115,6 +115,22 @@ fetch_tarball() {
     return 1
   fi
 
+  # Defense-in-depth before extracting: list the archive first and reject any member path that
+  # is absolute or contains `..` (path-traversal / write-outside-workdir shapes) rather than
+  # trusting `tar -xzf` to sort it out. GitHub's own codeload tarballs won't ever contain these,
+  # but the fetch above trusts an unauthenticated HTTP response, so this is a cheap belt-and-
+  # braces check on untrusted input, not a fix for a known-malicious source.
+  local listing
+  listing="$(tar -tzf "$work/repo.tar.gz" 2>/dev/null)" \
+    || { echo "bootstrap.sh: failed to list fetched tarball" >&2; return 1; }
+  while IFS= read -r member; do
+    [[ -z "$member" ]] && continue
+    if [[ "$member" == /* || "$member" == *..* ]]; then
+      echo "bootstrap.sh: refusing to extract tarball — unsafe member path '$member'" >&2
+      return 1
+    fi
+  done <<<"$listing"
+
   tar -xzf "$work/repo.tar.gz" -C "$work" || { echo "bootstrap.sh: failed to extract fetched tarball" >&2; return 1; }
 
   local extracted

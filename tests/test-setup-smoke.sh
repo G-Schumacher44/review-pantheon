@@ -142,6 +142,46 @@ else
   fail "bootstrap.sh: review-gate --help failed from the prefix (status=$PREFIX_HELP_STATUS): $PREFIX_HELP_OUT"
 fi
 
+# ---------------------------------------------------------------------------
+# Real symlink assertion — the check above invokes review-gate via its absolute prefix path,
+# which never exercises resolve_real_dir's while-loop body: `[[ -h "$src" ]]` is false for a
+# plain, non-symlink argument, so a path-resolution bug in the loop itself could pass every
+# check above and still be broken for the actual symlink-install use case the function exists
+# for. This creates a REAL symlink to review-gate and invokes --help THROUGH it from an
+# unrelated cwd, so the loop body (readlink + relative-target fixup) actually runs.
+# Absolute-target symlink first, then a relative-target variant below (that one hits the
+# `[[ "$src" != /* ]] && src="$dir/$src"` branch the absolute-target case never reaches).
+# ---------------------------------------------------------------------------
+NEUTRAL_DIR="$(mktemp -d)"
+ln -s "$SCRATCH_PREFIX/cli/review-gate" "$NEUTRAL_DIR/review-gate"
+
+UNRELATED_CWD="$(mktemp -d)"
+SYMLINK_HELP_OUT="$(cd "$UNRELATED_CWD" && "$NEUTRAL_DIR/review-gate" --help 2>&1)"
+SYMLINK_HELP_STATUS=$?
+rm -rf "$UNRELATED_CWD"
+
+if [[ $SYMLINK_HELP_STATUS -eq 0 ]] && grep -q "^Usage: review-gate --pr" <<<"$SYMLINK_HELP_OUT"; then
+  pass "bootstrap.sh: review-gate --help resolves through a real (absolute-target) symlink"
+else
+  fail "bootstrap.sh: review-gate --help failed through a real symlink (status=$SYMLINK_HELP_STATUS): $SYMLINK_HELP_OUT"
+fi
+rm -rf "$NEUTRAL_DIR"
+
+RELLINK_DIR="$(dirname "$SCRATCH_PREFIX")/rellink-neutral"
+mkdir -p "$RELLINK_DIR"
+( cd "$RELLINK_DIR" && ln -s "../$(basename "$SCRATCH_PREFIX")/cli/review-gate" "review-gate" )
+
+UNRELATED_CWD2="$(mktemp -d)"
+RELLINK_HELP_OUT="$(cd "$UNRELATED_CWD2" && "$RELLINK_DIR/review-gate" --help 2>&1)"
+RELLINK_HELP_STATUS=$?
+rm -rf "$UNRELATED_CWD2"
+
+if [[ $RELLINK_HELP_STATUS -eq 0 ]] && grep -q "^Usage: review-gate --pr" <<<"$RELLINK_HELP_OUT"; then
+  pass "bootstrap.sh: review-gate --help resolves through a relative-target symlink"
+else
+  fail "bootstrap.sh: review-gate --help failed through a relative symlink (status=$RELLINK_HELP_STATUS): $RELLINK_HELP_OUT"
+fi
+
 rm -rf "$(dirname "$SCRATCH_PREFIX")"
 
 # ---------------------------------------------------------------------------
