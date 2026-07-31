@@ -1,0 +1,235 @@
+# Setup — install, first run, troubleshooting
+
+This is the CLI-first walkthrough: get `review-gate` installed, run it once against a real PR
+without spending a token, then run it for real. For the Action-only lane (no CLI at all), see
+[Way C](#way-c--action-only-no-cli) below. Binding contract: `DESIGN.md`. Doc index:
+[docs/README.md](README.md).
+
+## Prerequisites
+
+| Tool | Needed for | Notes |
+|---|---|---|
+| `bash` | Everything | 3.2+ (stock macOS) through 5.x (Linux). No bashisms newer than that. |
+| `git` | Everything | The CLI locates the target repo via `git rev-parse --show-toplevel` and fetches PR refs directly (`refs/pull/<n>/head`) — no local branch checkout needed. |
+| `jq` | Everything | Verdict extraction and validation (`cli/lib/verdict.sh`) is `jq`-based. |
+| `gh`, authenticated | Everything | `review-gate` shells out to `gh pr view` / `gh pr comment`. Run `gh auth status` first if unsure. |
+| `python3` | Action lane only | `action/decide_verdict.py` is the Action's verdict decider. The CLI lane doesn't need Python at all — its decider is `cli/lib/verdict.sh` (bash + `jq`). |
+| One provider CLI | Actually calling a model | `claude` (Claude Code CLI) is the default lane and the only one integration-tested. `codex`, `gemini`, `cursor-agent` are best-effort — see the README's [Provider lanes](../README.md#provider-lanes) table. `--dry-run` (below) needs none of these installed. |
+
+## Three ways to install
+
+<details open>
+<summary><strong>Way A — vendored install (<code>install.sh</code>): files land in your repo</strong></summary>
+
+```bash
+git clone <this repo> review-pantheon
+./review-pantheon/install.sh /path/to/your-repo
+```
+
+Copies the five personas, the verdict-decision script, and the GitHub Action workflow into
+your target repo (`.github/review-agents/`, `.github/workflows/review.yml`), so your repo's own
+CI checkout can see them without depending on review-pantheon existing on that runner. This is
+the only way that gets you the GitHub Action lane. Add `--claude --cursor --codex --gemini` to
+also generate in-editor/in-CLI projections of the counsel agents. Idempotent — see `install.sh`'s
+own header comment and the README's [Quick start](../README.md#quick-start).
+
+You still run the CLI lane (`cli/review-gate`) from the review-pantheon checkout itself, not
+from the target repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
+
+</details>
+
+<details>
+<summary><strong>Way B — user-level install (<code>bootstrap.sh</code>): zero repo footprint</strong></summary>
+
+```bash
+git clone <this repo> review-pantheon
+./review-pantheon/bootstrap.sh --prefix ~/.review-pantheon
+export PATH="$HOME/.review-pantheon/cli:$PATH"
+```
+
+Installs `review-gate`, its provider lanes, and the five personas into a prefix directory
+(default `~/.review-pantheon`) — nothing is written into any target repo. Add the printed
+`export PATH=...` line to your shell rc yourself (`bootstrap.sh` won't edit it for you). From
+then on, `review-gate --pr <n>` works from inside any repo with a `gh`-authenticated remote,
+same as running it from an in-repo checkout. This is the CLI lane only — it doesn't install the
+GitHub Action; pair it with Way A in a given repo if you want both lanes.
+
+Also works via `curl | bash` once this repo is public on GitHub:
+
+```bash
+curl -fsSL <raw-url-to-bootstrap.sh> | bash -s -- --prefix ~/.review-pantheon
+```
+
+`bootstrap.sh` detects it isn't running from a local checkout and fetches a tarball of the repo
+via GitHub's codeload endpoint instead. That endpoint 404s against a private repo — until this
+repo is public, the curl path fails with an explicit message and a `git clone` fallback command,
+rather than silently doing nothing. Clone-and-run (the first form above) works today regardless.
+
+Idempotent, same cmp-and-skip contract as `install.sh`: re-running only touches files that
+changed; a file you've hand-edited in the prefix is left alone and reported skipped.
+
+</details>
+
+<details>
+<summary><strong>Way C — Action-only: no CLI at all</strong></summary>
+
+Run only `install.sh /path/to/your-repo` (Way A) and skip the CLI entirely — you never need
+`cli/review-gate` on your machine if the GitHub Action is the only lane you want. Work through
+the post-install checklist `install.sh` prints (secret, variable, pinning the action SHA, a red
+test PR before trusting it) — same checklist as the README's
+[Quick start](../README.md#quick-start).
+
+</details>
+
+## First run — the demo
+
+Run this against **any repo you have locally that has a `gh`-authenticated remote and at least
+one open PR** — it doesn't have to be review-pantheon itself, and it doesn't require `install.sh`
+or `bootstrap.sh` to have been run against that repo at all:
+
+```bash
+cd /path/to/any/repo/with/an/open/pr
+/path/to/review-pantheon/cli/review-gate --pr <number> --dry-run
+```
+
+(Or, with Way B installed and on `PATH`: `review-gate --pr <number> --dry-run` from inside that
+repo.)
+
+`--dry-run` does real work, right up to the point of spending a token or writing anything:
+
+1. Validates the PR number, branch names, and head SHA against the same strict character-class
+   regexes the live path uses (unsafe metadata still fails closed here, not just live).
+2. Runs `gh pr view` for real — real title, real head/base refs, real draft status.
+3. Fetches the real base and head refs (`refs/pull/<n>/head`) and computes the real diff range.
+4. Detects docs-only diffs and follow-up-mode state (`.review-gate-state.json`) exactly as a
+   live run would.
+5. Builds the real prompt file per agent — persona body + the generated context block (diff
+   range, base branch, house-rules file, output-contract reminder) — and writes it to a temp dir.
+6. Prints, per agent, the provider command it *would* run: `[dry-run] would run: cli/providers/<lane>.sh provider_run "<model>" "<prompt_file>"`.
+7. Prints the exact comment it *would* post to the PR — headline, verdict table (each row reads
+   `DRY_RUN`), and the full-findings block — to stdout, never to GitHub.
+
+Zero tokens spent (no provider is invoked), zero risk (nothing is posted, no state file is
+written — `.review-gate-state.json` is only updated after a successful `gh pr comment`).
+
+## First live run
+
+Drop `--dry-run` and it runs for real:
+
+```bash
+review-gate --pr <number>
+```
+
+Each agent's provider lane actually runs, its output goes through the same extraction and
+validation `--dry-run` only simulated, and one combined comment gets posted to the PR:
+
+```markdown
+### 🟢 review-pantheon: all clear
+
+| Agent | Verdict | Top finding |
+|---|---|---|
+| artemis | SHIP | no findings |
+| apollo | ACCEPT | no findings |
+```
+
+— or, when there's something to say, the same table plus a folded `<details>` block with each
+agent's full JSON verdict. Headline emoji/color follows worst-wins precedence (🟢 green, 🟡
+yellow/loud-skip, 🟠 unverified/not-gated, 🔴 red/blocked) — full rule in
+[DESIGN.md](../DESIGN.md#verdict-contract).
+
+Exit codes: `0` on green or yellow, nonzero on red or unverified — `review-gate`'s exit status
+is meant to be usable as a CI/script gate on its own, independent of reading the posted comment.
+A draft PR is a special case: exit `0`, nothing posted, nothing reviewed (see
+[Troubleshooting](#troubleshooting) below).
+
+## Troubleshooting
+
+<details>
+<summary>Draft PR — the run exits 0 but nothing was posted</summary>
+
+```
+review-gate: PR #42 is a draft — skipping loudly. No review run, no comment posted.
+DRAFT — not reviewed, nothing posted
+```
+
+This is the intended behavior, not a failure — see `DESIGN.md`'s
+[Deliberately absent](../DESIGN.md#deliberately-absent) list. Mark the PR ready for review and
+re-run.
+
+</details>
+
+<details>
+<summary>UNVERIFIED verdicts — the fail-closed causes</summary>
+
+An 🟠 `UNVERIFIED` result means the gate refused to trust what the provider printed. It is not a
+crash; it's the fail-closed rule in `DESIGN.md` rule 2 doing its job. The four causes, in the
+order `cli/lib/verdict.sh`'s `decide_verdict` checks them:
+
+1. **No parseable JSON found at all** — the provider's raw output never contained a `{...}`
+   block `extract_last_json` could pull out (it takes the LAST `^{`-anchored block through EOF,
+   so trailing prose after real JSON, or two JSON objects with the second one meant as a
+   correction, are both handled — but a response that never emits JSON isn't recoverable).
+2. **Missing required keys** — the parsed object is missing one of `agent`, `verdict`,
+   `has_blocker`, `findings`, `summary`.
+3. **Bad vocabulary / wrong agent field** — the `verdict` string isn't in that agent's allowed
+   vocabulary (e.g. artemis reporting `"LGTM"` instead of `SHIP`/`FIX_FIRST`/`STOP`), or the
+   `agent` field doesn't match the agent that was actually invoked.
+4. **Provider lane failure** — the CLI itself exited nonzero or timed out (see below) before
+   producing any output to extract from.
+
+Check `review-gate`'s stderr (`note "$agent: $reason — UNVERIFIED"`) for which of these fired,
+then check the raw provider output for that agent — usually the model padded its JSON with
+prose, or the persona prompt got truncated.
+
+Note what does **not** cause UNVERIFIED: a verdict/findings mismatch (e.g. `verdict: SHIP` next
+to a `severity: blocker` finding). That's the blocker invariant instead — it forces the color to
+red, not unverified, because a well-formed object that contradicts itself is a known blocker, a
+stronger signal than "not gated."
+
+</details>
+
+<details>
+<summary>Timeout behavior</summary>
+
+Each agent's provider call is wrapped with a timeout (`REVIEW_GATE_TIMEOUT`, default 600s).
+GNU coreutils `timeout` is used when present (Linux CI, this repo's `Dockerfile.smoke`); on
+stock macOS, where it isn't, `run_with_timeout` falls back to a manual TERM-then-KILL against
+the child and its subprocesses (a provider CLI can spawn its own children). A timed-out agent is
+reported the same way as any other provider-lane failure: `UNVERIFIED`, not a crash of the whole
+run — the other agents in `--agents` still run and get reported.
+
+</details>
+
+<details>
+<summary>Force-push fallback to full-range review</summary>
+
+Follow-up mode normally reviews only `last_reviewed_sha..head` and asks the agent to read its
+own prior comment first. If the PR's head was force-pushed, rebased, or had its history
+rewritten since the last review, the previously reviewed SHA may no longer be an ancestor of the
+new head — an existence check alone isn't enough to catch this (the old commit object can still
+be fetchable, just not connected to the new history). `review-gate` checks ancestry explicitly
+(`git merge-base --is-ancestor`) and falls back to reviewing the **full PR diff** again when it
+fails, with a note in the prompt explaining why:
+
+```
+Follow-up review: a prior pass at <sha> exists but it is not an ancestor of the current head
+(force-push, rebase, or history rewrite). Reviewing the full PR diff again.
+```
+
+This is expected after any force-push — not a bug, and not something you need to clear
+`.review-gate-state.json` for.
+
+</details>
+
+<details>
+<summary>Path resolution — running review-gate from a Way B (bootstrap) install</summary>
+
+`review-gate` locates its own `agents/` and `cli/providers/` directories relative to its own
+real location (symlink-resolved), not relative to the target repo it's reviewing. This works
+whether it's invoked in-repo (`cli/review-gate`), from a `bootstrap.sh` prefix directly
+(`~/.review-pantheon/cli/review-gate`), or through a symlink onto your own `PATH` pointing at
+either of those. If you see a `source: no such file or directory` error mentioning
+`cli/lib/verdict.sh`, the install is incomplete (missing `cli/lib/` or `cli/providers/` next to
+`review-gate`) rather than a symlink problem — re-run `bootstrap.sh`.
+
+</details>

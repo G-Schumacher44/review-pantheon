@@ -70,7 +70,9 @@ checklist when it finishes — the same steps below — work through it before t
 </details>
 
 Prefer the CLI? `cli/review-gate --pr <number>` runs the same panel locally against any repo with
-a `gh`-authenticated remote — see [CLI usage](#cli-usage).
+a `gh`-authenticated remote — see [CLI usage](#cli-usage). No repo footprint at all: `bootstrap.sh
+--prefix ~/.review-pantheon` installs just the CLI onto your `PATH`, nothing written into any
+repo. Full install-and-demo walkthrough: [docs/SETUP.md](docs/SETUP.md).
 
 ## The panel
 

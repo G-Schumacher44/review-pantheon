@@ -13,8 +13,26 @@ set -euo pipefail
 # Paths — agents/ and cli/providers/ live in THIS repo (review-pantheon), not
 # the target repo. gate.conf, REVIEW_RULES.md, and .review-gate-state.json
 # live in the target repo, found below via git.
+#
+# Symlink-safe: a bootstrap.sh (user-level) install can end up invoked through a symlink
+# (e.g. ~/bin/review-gate -> ~/.review-pantheon/cli/review-gate), and plain
+# `dirname "${BASH_SOURCE[0]}"` would resolve to the symlink's directory, not the real one —
+# silently breaking PANTHEON_ROOT and this script's ability to find agents/ and
+# cli/providers/. resolve_real_dir follows the link chain first. Deliberately not GNU
+# `readlink -f` / coreutils `realpath` — neither ships on stock macOS.
 # ---------------------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+resolve_real_dir() {
+  local src="$1"
+  while [[ -h "$src" ]]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_real_dir "${BASH_SOURCE[0]}")"
 PANTHEON_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENTS_DIR="$PANTHEON_ROOT/agents"
 PROVIDERS_DIR="$PANTHEON_ROOT/cli/providers"
