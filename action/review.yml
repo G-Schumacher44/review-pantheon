@@ -6,16 +6,21 @@
 # too, so this isn't automatic — see the job `if:` below) to match the CLI lane's draft
 # behavior: no review run, nothing posted.
 #
-# INSTALL NOTE (read before relying on this): `anthropics/claude-code-action` is pinned below
-# to a placeholder, `PIN-ME-TO-A-FULL-COMMIT-SHA` — this file was authored without network
-# access to look up a real current release SHA. Replace it with a full 40-character commit
-# SHA before this workflow does anything useful (an unpinned `uses:` fails at job
-# parse/resolve time with an obvious error — it doesn't silently no-op). While you're in
-# there, verify the `with:` inputs on the action step (`claude_code_oauth_token`, `prompt`,
-# `allowed_tools`) and the output this workflow reads the agent's raw text from
-# (`steps.run-agent.outputs.result`) against the docs for whatever SHA you pin — the action's
-# interface can change between releases, and these names are unverified guesses. See
-# install.sh's post-install checklist.
+# PIN NOTE: `anthropics/claude-code-action` is pinned below to v1.0.183's full commit SHA
+# (be7b93b1907a4abad570368f3c74b6fe3807510b — https://github.com/anthropics/claude-code-action/
+# releases/tag/v1.0.183), verified by reading that release's actual action.yml, not assumed:
+# https://raw.githubusercontent.com/anthropics/claude-code-action/be7b93b1907a4abad570368f3c74b6fe3807510b/action.yml
+# If you re-pin to a newer release yourself, confirm the pinned SHA matches a release you
+# trust (`gh api repos/anthropics/claude-code-action/git/ref/tags/<tag>`) and re-check the
+# `with:` inputs and output below against that release's action.yml — the action's interface
+# can change between releases. What's used here, confirmed against v1.0.183's action.yml
+# (v1's inputs differ from v0.x — see that repo's docs/migration-guide.md): auth via
+# `claude_code_oauth_token`, prompt via `prompt`, tool allowlist via `--allowedTools` inside
+# the free-form `claude_args` input (there is no `allowed_tools` input in v1 — that was a v0.x
+# input, removed), and the agent's structured result via the `structured_output` output
+# (there is no `result` output in v1 at all), populated by passing `--json-schema` in
+# `claude_args` — see https://github.com/anthropics/claude-code-action/blob/be7b93b1907a4abad570368f3c74b6fe3807510b/docs/usage.md#structured-outputs.
+# See install.sh's post-install checklist.
 name: review-pantheon
 
 on:
@@ -134,17 +139,27 @@ jobs:
       - name: Run review agent
         id: run-agent
         if: matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true'
-        uses: anthropics/claude-code-action@PIN-ME-TO-A-FULL-COMMIT-SHA
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ steps.build-prompt.outputs.prompt }}
-          allowed_tools: "Read,Grep,Glob,Bash"
+          # v1 has no `allowed_tools` input (that was v0.x, removed — see this file's header
+          # comment) — the tool allowlist travels inside `claude_args` as `--allowedTools`
+          # instead. `--json-schema` is the verdict-contract shape (DESIGN.md), structural
+          # only — NOT each agent's own verdict vocabulary, which stays sole-sourced in
+          # action/decide_verdict.py (see DESIGN.md's "Two runtimes, one rule").
+          claude_args: |
+            --allowedTools "Read,Grep,Glob,Bash"
+            --json-schema '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
       - name: Save raw agent output
         if: always() && (matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true')
         env:
           AGENT_NAME: ${{ matrix.agent }}
-          RAW_OUTPUT: ${{ steps.run-agent.outputs.result }}
+          # v1 has no `result` output — the agent's structured verdict comes back through
+          # `structured_output` (populated by the `--json-schema` flag above). See this file's
+          # header comment for the source that was checked to confirm this.
+          RAW_OUTPUT: ${{ steps.run-agent.outputs.structured_output }}
         run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"
 
       # Same decision rule as the CLI lane's cli/lib/verdict.sh (extract trailing JSON,

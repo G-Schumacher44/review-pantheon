@@ -1,0 +1,554 @@
+# action.yml — review-pantheon as a published GitHub Action.
+#
+# The zero-footprint install: a target repo's whole integration is the ~20-line workflow stub
+# at examples/review-gate.yml — nothing is copied into the target repo (contrast with
+# install.sh's Way A, which vendors personas + action/review.yml + decide_verdict.py into the
+# target repo so its own runner can see them). Every file this action reads at run time —
+# personas, action/decide_verdict.py, action/lib/*.sh, the JSON schema below — is read from
+# `${{ github.action_path }}`, i.e. review-pantheon's own checkout as GitHub Actions pulls it
+# for the `uses:` reference, not from the calling repo.
+#
+# anthropics/claude-code-action is pinned below to a real, verified commit SHA — v1.0.183,
+# tag `v1.0.183` (the `v1` tag also currently resolves to this same commit; pin the full SHA,
+# not a tag, since tags on that repo move):
+#   https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+#   SHA: be7b93b1907a4abad570368f3c74b6fe3807510b
+# Verified by reading that release's actual action.yml directly (not assumed from memory or an
+# older version's docs):
+#   https://raw.githubusercontent.com/anthropics/claude-code-action/be7b93b1907a4abad570368f3c74b6fe3807510b/action.yml
+# against that repo's own migration guide for what changed in its v1.0 rewrite:
+#   https://github.com/anthropics/claude-code-action/blob/main/docs/migration-guide.md
+# Confirmed real names (all four of our prior guesses needed correcting — see git history for
+# what they were before this file existed):
+#   - auth inputs: `claude_code_oauth_token` and `anthropic_api_key` (both optional; exactly
+#     one must be set) — these two guesses were correct.
+#   - prompt input: `prompt` — correct as guessed.
+#   - tool allowlist: NOT an `allowed_tools` input (that was a v0.x input, removed in v1) — it's
+#     now `--allowedTools` inside the free-form `claude_args` input (CLI-flag passthrough).
+#   - result output: there is NO `result` output in v1 (the whole v0.x "read raw text output"
+#     model is gone). v1's outputs are `execution_file`, `branch_name`, `github_token`,
+#     `structured_output`, `session_id`. This action uses `structured_output`, populated by
+#     passing `--json-schema '<schema>'` in `claude_args` — see
+#     https://github.com/anthropics/claude-code-action/blob/be7b93b1907a4abad570368f3c74b6fe3807510b/docs/usage.md#structured-outputs.
+#     This is a materially better mechanism than the old "extract trailing JSON from raw text"
+#     approach the vendored action/review.yml historically used (and still uses, for the
+#     CLI-independent reasons documented there) — the schema is enforced by the upstream action
+#     itself, not just hoped for in a persona's closing instructions.
+#
+# Composite-action constraints (verified against GitHub's own docs, not assumed):
+#   - No `strategy`/`matrix` inside a composite action — that's a job-level-only concept. A
+#     composite action's `runs.steps` is a static list; it cannot loop dynamically over a
+#     runtime input (this `agents` input is a string, "artemis apollo" by default, evaluated
+#     at run time — there is no way to turn that into N `uses:` steps). The five possible
+#     agents (agents/*.md — the fixed, bundled persona set) are therefore unrolled into five
+#     static build/run/decide step trios below, each gated by `if: contains(inputs.agents,
+#     '<name>')`. That's structural duplication (GitHub Actions leaves no alternative for a
+#     `uses:` step specifically), not logic duplication — the logic each trio shares
+#     (prompt-building, verdict-deciding) lives once in action/lib/*.sh and
+#     action/decide_verdict.py, called five times with different arguments, not five times
+#     hand-written.
+#   - Every agent here runs SEQUENTIALLY in one job, not as parallel matrix legs the way
+#     action/review.yml's artemis/apollo run. Simplicity over parallelism: one job means the
+#     per-agent decide steps' outputs are readable directly via `steps.<id>.outputs` by the
+#     final combine step in the SAME job — no cross-job artifact upload/download round-trip
+#     (which is why review.yml needs one; matrix legs can't expose distinct job outputs back to
+#     a downstream job, see that file's own comment). The cost is wall-clock: N agents run one
+#     after another, not concurrently. Given the default panel is two agents and this action
+#     targets whoever wants the simplest possible install, that tradeoff was made deliberately
+#     — parallelizing multiple agents inside one composite action isn't achievable without the
+#     same job-boundary machinery review.yml already carries, and this action's whole point is
+#     to not require the target repo to maintain that machinery itself.
+#   - `steps.<id>.outcome` inside a composite action's own conditionals was historically broken
+#     (always empty — actions/runner#1578) but was fixed via actions/runner#1600; current
+#     runner versions support it, and `if: always()` on later composite steps behaves the same
+#     as job-level `always()`. This action still avoids leaning on that where a simpler
+#     mechanism exists: `continue-on-error: true` on the `uses:` and `decide` steps (rather than
+#     relying on always()-chains) is enough to guarantee the combine/enforce steps always run,
+#     because a `continue-on-error` step never marks the composite action itself as failed in
+#     the first place, so there's nothing for a later step to have to survive.
+#   - This action does NOT declare `permissions:` — composite actions can't; the CALLING job
+#     must grant `contents: read` (for its own checkout) and `pull-requests: write` (for the
+#     combined comment this action posts). See examples/review-gate.yml.
+#   - This action does NOT check out the target repo itself — the caller must, with enough
+#     `fetch-depth` for `git diff <base>...<head>` to resolve (fetch-depth: 0 is simplest). See
+#     examples/review-gate.yml.
+#   - Draft-PR skipping is NOT implemented inside this action — it can't be: whether the job
+#     that invokes this action runs at all is decided by the CALLING workflow's job-level `if:`,
+#     before this action ever starts (same reason review.yml's own draft skip is a job `if:`,
+#     not something inside the matrix steps). See examples/review-gate.yml's `if:`.
+#   - Docs-only Apollo skip IS implemented inside this action (it needs the diff, which this
+#     action already computes) — same behavior as review.yml's, loud 🟡 skip, no Apollo run.
+#
+# Honest limitation: this action can't be integration-tested end-to-end (a real `uses:
+# G-Schumacher44/review-pantheon@v1` against a real PR) until this repo is public on GitHub —
+# see DESIGN.md's "Published action" section. `.github/workflows/ci.yml`'s
+# `composite-action-self-check` job covers what CAN be verified without that: the YAML parses,
+# every file this action references under `github.action_path` actually exists, and the
+# embedded shell passes `bash -n`/shellcheck (already true via the repo-wide shellcheck job).
+
+name: "review-pantheon gate"
+description: >-
+  Fail-closed AI review gate (Artemis/Apollo) and counsel panel (Socrates/Diogenes/Plato) for
+  spec-driven development. Read-only, blocker-invariant, zero files installed in your repo.
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  claude_code_oauth_token:
+    description: >-
+      Claude Code OAuth token (alternative to anthropic_api_key). Set exactly one of the two
+      auth inputs — this action fails loud if both or neither are set.
+    required: false
+  anthropic_api_key:
+    description: >-
+      Anthropic API key (alternative to claude_code_oauth_token). Set exactly one of the two
+      auth inputs — this action fails loud if both or neither are set.
+    required: false
+  agents:
+    description: >-
+      Space-separated personas to run, drawn from: artemis apollo socrates diogenes plato
+      (agents/*.md in this repo — the fixed, bundled set). Default is the standard two-agent
+      gate. Adding a counsel agent (socrates/diogenes/plato) here runs it as an enforcing gate
+      leg like the twins, which DESIGN.md calls the exception, not their normal home — see
+      DESIGN.md's "The idea" section before doing that on every PR.
+    required: false
+    default: "artemis apollo"
+  personas_path:
+    description: >-
+      Directory of persona .md files to use INSTEAD of the ones bundled with this action,
+      relative to the checked-out target repo (e.g. ".github/review-agents"). Leave unset to
+      use the bundled personas at this action's own agents/ directory.
+    required: false
+    default: ""
+  rules_file:
+    description: >-
+      House-rules file, relative to the checked-out target repo. Only read if it's actually
+      present there — a target repo that never created one just doesn't get house-rule checks.
+    required: false
+    default: "REVIEW_RULES.md"
+  model:
+    description: >-
+      Optional Claude model id, passed through to every agent invocation as claude_args'
+      `--model`. Leave unset for anthropics/claude-code-action's own default.
+    required: false
+    default: ""
+  post_comment:
+    description: >-
+      Post one combined PR comment (the same format as action/review.yml's). Set to "false" to
+      only compute verdicts and print the would-be comment to the step log without posting —
+      this action's own exit status still reflects the gate result (fails on red/unverified)
+      either way.
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Assert exactly one auth input is set
+      shell: bash
+      env:
+        OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        API_KEY: ${{ inputs.anthropic_api_key }}
+      run: |
+        set -euo pipefail
+        if [ -n "$OAUTH_TOKEN" ] && [ -n "$API_KEY" ]; then
+          echo "::error::review-pantheon: set exactly one of claude_code_oauth_token / anthropic_api_key inputs, not both."
+          exit 1
+        fi
+        if [ -z "$OAUTH_TOKEN" ] && [ -z "$API_KEY" ]; then
+          echo "::error::review-pantheon: set one of claude_code_oauth_token / anthropic_api_key — the gate fails loud, it does not skip."
+          exit 1
+        fi
+
+    - name: Resolve gate configuration
+      id: resolve
+      shell: bash
+      env:
+        PERSONAS_PATH: ${{ inputs.personas_path }}
+        RULES_FILE: ${{ inputs.rules_file }}
+        MODEL: ${{ inputs.model }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "$PERSONAS_PATH" ]; then
+          PERSONAS_DIR="$ACTION_PATH/agents"
+        else
+          PERSONAS_DIR="$GITHUB_WORKSPACE/$PERSONAS_PATH"
+        fi
+        [ -d "$PERSONAS_DIR" ] || { echo "::error::review-pantheon: personas directory not found: $PERSONAS_DIR (check the personas_path input)"; exit 1; }
+        echo "personas_dir=$PERSONAS_DIR" >> "$GITHUB_OUTPUT"
+
+        if [ -n "$RULES_FILE" ] && [ -f "$GITHUB_WORKSPACE/$RULES_FILE" ]; then
+          echo "rules_present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "rules_present=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "rules_file=$RULES_FILE" >> "$GITHUB_OUTPUT"
+
+        # The verdict-contract JSON schema (DESIGN.md's "Verdict contract") — structural only,
+        # deliberately NOT enforcing each agent's own verdict vocabulary here (that would be a
+        # THIRD copy of the vocab->color rule alongside cli/lib/verdict.sh and
+        # action/decide_verdict.py; decide_verdict.py stays the sole place that lives). One
+        # schema shared by every agent, computed once.
+        JSON_SCHEMA='{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
+
+        # JSON_SCHEMA above contains only double quotes, never a single quote, so wrapping it
+        # in single quotes here (for the CLI arg) needs no further escaping.
+        CLAUDE_ARGS="--allowedTools \"Read,Grep,Glob,Bash\"
+        --json-schema '$JSON_SCHEMA'"
+        if [ -n "$MODEL" ]; then
+          CLAUDE_ARGS="$CLAUDE_ARGS
+        --model $MODEL"
+        fi
+
+        delim="pantheon_$(openssl rand -hex 16)"
+        {
+          echo "claude_args<<$delim"
+          echo "$CLAUDE_ARGS"
+          echo "$delim"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Detect docs-only diff
+      id: docs-check
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        docs_only=true
+        changed="$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")"
+        if [ -z "$changed" ]; then
+          docs_only=false
+        else
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              *.md|docs/*) ;;
+              *) docs_only=false ;;
+            esac
+          done <<< "$changed"
+        fi
+        echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
+    # -------------------------------------------------------------------------------------
+    # artemis — always eligible (no docs-only skip; that's Apollo's exception, see DESIGN.md)
+    # -------------------------------------------------------------------------------------
+    - name: Build prompt (artemis)
+      id: build-prompt-artemis
+      if: contains(inputs.agents, 'artemis')
+      shell: bash
+      env:
+        REPO_NAME: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
+        RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+      run: |
+        set -euo pipefail
+        PROMPT_FILE="$RUNNER_TEMP/artemis-prompt.md"
+        bash "${{ github.action_path }}/action/lib/build_prompt.sh" artemis "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        delim="pantheon_$(openssl rand -hex 16)"
+        {
+          echo "prompt<<$delim"
+          cat "$PROMPT_FILE"
+          echo "$delim"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Run artemis
+      id: run-agent-artemis
+      if: contains(inputs.agents, 'artemis')
+      continue-on-error: true
+      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
+        anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        prompt: ${{ steps.build-prompt-artemis.outputs.prompt }}
+        claude_args: ${{ steps.resolve.outputs.claude_args }}
+
+    - name: Save raw output (artemis)
+      id: save-raw-artemis
+      if: contains(inputs.agents, 'artemis')
+      continue-on-error: true
+      shell: bash
+      env:
+        RAW_OUTPUT: ${{ steps.run-agent-artemis.outputs.structured_output }}
+      run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/artemis-raw.txt"
+
+    - name: Decide verdict (artemis)
+      id: decide-artemis
+      if: contains(inputs.agents, 'artemis')
+      continue-on-error: true
+      shell: bash
+      run: python3 "${{ github.action_path }}/action/decide_verdict.py" artemis "$RUNNER_TEMP/artemis-raw.txt"
+
+    # -------------------------------------------------------------------------------------
+    # apollo — the docs-only exception: skips loudly instead of running (DESIGN.md)
+    # -------------------------------------------------------------------------------------
+    - name: Log docs-only skip (apollo)
+      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only == 'true'
+      shell: bash
+      run: echo "::notice::docs-only diff — skipping apollo loudly (nothing but docs changed)."
+
+    - name: Build prompt (apollo)
+      id: build-prompt-apollo
+      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      shell: bash
+      env:
+        REPO_NAME: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
+        RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+      run: |
+        set -euo pipefail
+        PROMPT_FILE="$RUNNER_TEMP/apollo-prompt.md"
+        bash "${{ github.action_path }}/action/lib/build_prompt.sh" apollo "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        delim="pantheon_$(openssl rand -hex 16)"
+        {
+          echo "prompt<<$delim"
+          cat "$PROMPT_FILE"
+          echo "$delim"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Run apollo
+      id: run-agent-apollo
+      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      continue-on-error: true
+      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
+        anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        prompt: ${{ steps.build-prompt-apollo.outputs.prompt }}
+        claude_args: ${{ steps.resolve.outputs.claude_args }}
+
+    - name: Save raw output (apollo)
+      id: save-raw-apollo
+      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        RAW_OUTPUT: ${{ steps.run-agent-apollo.outputs.structured_output }}
+      run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/apollo-raw.txt"
+
+    - name: Decide verdict (apollo)
+      id: decide-apollo
+      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      continue-on-error: true
+      shell: bash
+      run: python3 "${{ github.action_path }}/action/decide_verdict.py" apollo "$RUNNER_TEMP/apollo-raw.txt"
+
+    # -------------------------------------------------------------------------------------
+    # socrates / diogenes / plato — counsel agents. Not part of the default `agents` panel;
+    # only run when explicitly named in the `agents` input (see that input's own description
+    # for why running them as an enforcing gate leg is the exception, not the norm).
+    # -------------------------------------------------------------------------------------
+    - name: Build prompt (socrates)
+      id: build-prompt-socrates
+      if: contains(inputs.agents, 'socrates')
+      shell: bash
+      env:
+        REPO_NAME: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
+        RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+      run: |
+        set -euo pipefail
+        PROMPT_FILE="$RUNNER_TEMP/socrates-prompt.md"
+        bash "${{ github.action_path }}/action/lib/build_prompt.sh" socrates "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        delim="pantheon_$(openssl rand -hex 16)"
+        {
+          echo "prompt<<$delim"
+          cat "$PROMPT_FILE"
+          echo "$delim"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Run socrates
+      id: run-agent-socrates
+      if: contains(inputs.agents, 'socrates')
+      continue-on-error: true
+      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
+        anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        prompt: ${{ steps.build-prompt-socrates.outputs.prompt }}
+        claude_args: ${{ steps.resolve.outputs.claude_args }}
+
+    - name: Save raw output (socrates)
+      id: save-raw-socrates
+      if: contains(inputs.agents, 'socrates')
+      continue-on-error: true
+      shell: bash
+      env:
+        RAW_OUTPUT: ${{ steps.run-agent-socrates.outputs.structured_output }}
+      run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/socrates-raw.txt"
+
+    - name: Decide verdict (socrates)
+      id: decide-socrates
+      if: contains(inputs.agents, 'socrates')
+      continue-on-error: true
+      shell: bash
+      run: python3 "${{ github.action_path }}/action/decide_verdict.py" socrates "$RUNNER_TEMP/socrates-raw.txt"
+
+    - name: Build prompt (diogenes)
+      id: build-prompt-diogenes
+      if: contains(inputs.agents, 'diogenes')
+      shell: bash
+      env:
+        REPO_NAME: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
+        RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+      run: |
+        set -euo pipefail
+        PROMPT_FILE="$RUNNER_TEMP/diogenes-prompt.md"
+        bash "${{ github.action_path }}/action/lib/build_prompt.sh" diogenes "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        delim="pantheon_$(openssl rand -hex 16)"
+        {
+          echo "prompt<<$delim"
+          cat "$PROMPT_FILE"
+          echo "$delim"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Run diogenes
+      id: run-agent-diogenes
+      if: contains(inputs.agents, 'diogenes')
+      continue-on-error: true
+      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
+        anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        prompt: ${{ steps.build-prompt-diogenes.outputs.prompt }}
+        claude_args: ${{ steps.resolve.outputs.claude_args }}
+
+    - name: Save raw output (diogenes)
+      id: save-raw-diogenes
+      if: contains(inputs.agents, 'diogenes')
+      continue-on-error: true
+      shell: bash
+      env:
+        RAW_OUTPUT: ${{ steps.run-agent-diogenes.outputs.structured_output }}
+      run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/diogenes-raw.txt"
+
+    - name: Decide verdict (diogenes)
+      id: decide-diogenes
+      if: contains(inputs.agents, 'diogenes')
+      continue-on-error: true
+      shell: bash
+      run: python3 "${{ github.action_path }}/action/decide_verdict.py" diogenes "$RUNNER_TEMP/diogenes-raw.txt"
+
+    - name: Build prompt (plato)
+      id: build-prompt-plato
+      if: contains(inputs.agents, 'plato')
+      shell: bash
+      env:
+        REPO_NAME: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
+        RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+      run: |
+        set -euo pipefail
+        PROMPT_FILE="$RUNNER_TEMP/plato-prompt.md"
+        bash "${{ github.action_path }}/action/lib/build_prompt.sh" plato "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        delim="pantheon_$(openssl rand -hex 16)"
+        {
+          echo "prompt<<$delim"
+          cat "$PROMPT_FILE"
+          echo "$delim"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Run plato
+      id: run-agent-plato
+      if: contains(inputs.agents, 'plato')
+      continue-on-error: true
+      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
+        anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        prompt: ${{ steps.build-prompt-plato.outputs.prompt }}
+        claude_args: ${{ steps.resolve.outputs.claude_args }}
+
+    - name: Save raw output (plato)
+      id: save-raw-plato
+      if: contains(inputs.agents, 'plato')
+      continue-on-error: true
+      shell: bash
+      env:
+        RAW_OUTPUT: ${{ steps.run-agent-plato.outputs.structured_output }}
+      run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/plato-raw.txt"
+
+    - name: Decide verdict (plato)
+      id: decide-plato
+      if: contains(inputs.agents, 'plato')
+      continue-on-error: true
+      shell: bash
+      run: python3 "${{ github.action_path }}/action/decide_verdict.py" plato "$RUNNER_TEMP/plato-raw.txt"
+
+    # -------------------------------------------------------------------------------------
+    # Combine + enforce — runs regardless of which/whether prior steps failed, because every
+    # step above that CAN fail by design (a red/unverified verdict, a provider error) carries
+    # `continue-on-error: true`, so none of them ever mark this composite action itself
+    # failed. Nothing here needs `if: always()` as a result — see this file's header comment
+    # on why that's a deliberate choice, not an oversight.
+    # -------------------------------------------------------------------------------------
+    - name: Build and post combined comment
+      id: combine
+      shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        GH_TOKEN: ${{ github.token }}
+        POST_COMMENT: ${{ inputs.post_comment }}
+        APOLLO_DOCS_SKIPPED: ${{ steps.docs-check.outputs.docs_only }}
+        ARTEMIS_COLOR: ${{ steps.decide-artemis.outputs.color }}
+        ARTEMIS_VERDICT: ${{ steps.decide-artemis.outputs.verdict }}
+        ARTEMIS_TOP: ${{ steps.decide-artemis.outputs.top_finding }}
+        ARTEMIS_FINDINGS: ${{ steps.decide-artemis.outputs.findings_json }}
+        APOLLO_COLOR: ${{ steps.decide-apollo.outputs.color }}
+        APOLLO_VERDICT: ${{ steps.decide-apollo.outputs.verdict }}
+        APOLLO_TOP: ${{ steps.decide-apollo.outputs.top_finding }}
+        APOLLO_FINDINGS: ${{ steps.decide-apollo.outputs.findings_json }}
+        SOCRATES_COLOR: ${{ steps.decide-socrates.outputs.color }}
+        SOCRATES_VERDICT: ${{ steps.decide-socrates.outputs.verdict }}
+        SOCRATES_TOP: ${{ steps.decide-socrates.outputs.top_finding }}
+        SOCRATES_FINDINGS: ${{ steps.decide-socrates.outputs.findings_json }}
+        DIOGENES_COLOR: ${{ steps.decide-diogenes.outputs.color }}
+        DIOGENES_VERDICT: ${{ steps.decide-diogenes.outputs.verdict }}
+        DIOGENES_TOP: ${{ steps.decide-diogenes.outputs.top_finding }}
+        DIOGENES_FINDINGS: ${{ steps.decide-diogenes.outputs.findings_json }}
+        PLATO_COLOR: ${{ steps.decide-plato.outputs.color }}
+        PLATO_VERDICT: ${{ steps.decide-plato.outputs.verdict }}
+        PLATO_TOP: ${{ steps.decide-plato.outputs.top_finding }}
+        PLATO_FINDINGS: ${{ steps.decide-plato.outputs.findings_json }}
+      run: bash "${{ github.action_path }}/action/lib/combine_verdicts.sh" "${{ inputs.agents }}"
+
+    - name: Enforce gate result
+      shell: bash
+      env:
+        OVERALL_COLOR: ${{ steps.combine.outputs.overall_color }}
+      run: |
+        set -euo pipefail
+        case "$OVERALL_COLOR" in
+          green|yellow) exit 0 ;;
+          red) echo "::error::review-pantheon: blocked (a gate agent returned a red verdict, or the blocker invariant fired)"; exit 1 ;;
+          *) echo "::error::review-pantheon: NOT GATED (unverified result) — fail-closed, not a pass"; exit 1 ;;
+        esac

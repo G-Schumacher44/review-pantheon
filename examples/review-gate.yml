@@ -1,0 +1,30 @@
+# examples/review-gate.yml — the whole install for the published-action lane. Copy to
+# .github/workflows/review-gate.yml — nothing else lands in your repo. See README.md's
+# "Option A — published action" and docs/SETUP.md's "Way C" for the setup checklist.
+name: review-pantheon
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # Repo variable gate (no silent start), plus a draft skip — both must live at job level.
+    if: ${{ vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history: the action needs base...head to compute the diff
+
+      - uses: G-Schumacher44/review-pantheon@v1
+        with:
+          # Set exactly one of these two — it fails loud otherwise. No Bedrock/Vertex/Foundry/
+          # OIDC passthrough here; see docs/SETUP.md's Way C if you need pure cloud-provider auth.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
