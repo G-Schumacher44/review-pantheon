@@ -152,6 +152,14 @@ def emit_github_output(decision: dict) -> None:
         out.write(f"summary<<{delim}\n{summary}\n{delim}\n")
         out.write(f"top_finding<<{delim}\n{decision['top_finding']}\n{delim}\n")
         out.write(f"findings_json<<{delim}\n{json.dumps(decision['verdict_json'])}\n{delim}\n")
+        # invariant_fired / reason: needed by the combined-comment renderer (cli/lib/
+        # render_comment.sh, via action.yml's combine step) to show the "stated verdict was
+        # overridden" notice when the blocker invariant fired. Not previously exposed here —
+        # only color/verdict/summary/top_finding/findings_json were read by review.yml's
+        # older, JSON-dump comment step.
+        out.write(f"invariant_fired={'true' if decision['invariant_fired'] else 'false'}\n")
+        reason = decision.get("reason") or ""
+        out.write(f"reason<<{delim}\n{reason}\n{delim}\n")
 
 
 def main() -> int:

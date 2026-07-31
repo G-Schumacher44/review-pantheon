@@ -174,14 +174,15 @@ fi
 
 [[ -f "$SRC_ROOT/cli/review-gate" ]] || die "missing $SRC_ROOT/cli/review-gate"
 [[ -f "$SRC_ROOT/cli/lib/verdict.sh" ]] || die "missing $SRC_ROOT/cli/lib/verdict.sh"
+[[ -f "$SRC_ROOT/cli/lib/render_comment.sh" ]] || die "missing $SRC_ROOT/cli/lib/render_comment.sh"
 [[ -d "$SRC_ROOT/cli/providers" ]] || die "missing $SRC_ROOT/cli/providers"
 [[ -d "$SRC_ROOT/agents" ]] || die "missing $SRC_ROOT/agents"
 
 # ---------------------------------------------------------------------------
 # Install — mirrors the source layout under $PREFIX (cli/review-gate, cli/lib/verdict.sh,
-# cli/providers/*.sh, agents/*.md) so review-gate's own PANTHEON_ROOT-relative path
-# resolution (agents/ and cli/providers/ next to it) works unmodified from the prefix, exactly
-# as it does from an in-repo checkout.
+# cli/lib/render_comment.sh, cli/providers/*.sh, agents/*.md) so review-gate's own
+# PANTHEON_ROOT-relative path resolution (agents/ and cli/providers/ next to it) works
+# unmodified from the prefix, exactly as it does from an in-repo checkout.
 # ---------------------------------------------------------------------------
 SKIPPED=()
 
@@ -207,6 +208,7 @@ install_file "$SRC_ROOT/cli/review-gate" "$PREFIX/cli/review-gate"
 chmod +x "$PREFIX/cli/review-gate"
 
 install_file "$SRC_ROOT/cli/lib/verdict.sh" "$PREFIX/cli/lib/verdict.sh"
+install_file "$SRC_ROOT/cli/lib/render_comment.sh" "$PREFIX/cli/lib/render_comment.sh"
 
 for f in "$SRC_ROOT"/cli/providers/*.sh; do
   install_file "$f" "$PREFIX/cli/providers/$(basename "$f")"

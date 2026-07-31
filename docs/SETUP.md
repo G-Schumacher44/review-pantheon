@@ -195,18 +195,30 @@ Each agent's provider lane actually runs, its output goes through the same extra
 validation `--dry-run` only simulated, and one combined comment gets posted to the PR:
 
 ```markdown
-### 🟢 review-pantheon: all clear
+### 🟢 **Clean pass**
+No blocker or review-note findings from any agent — this reads as safe to merge on the gate's own signal.
 
 | Agent | Verdict | Top finding |
 |---|---|---|
-| artemis | SHIP | no findings |
-| apollo | ACCEPT | no findings |
+| artemis | `SHIP` — green | — |
+| apollo | `ACCEPT` — green | — |
+
+<details>
+<summary>Full findings (0)</summary>
+...
+</details>
+
+_review-pantheon — fails closed: a missing or unparseable verdict reads as NOT GATED, never as a pass._
 ```
 
-— or, when there's something to say, the same table plus a folded `<details>` block with each
-agent's full JSON verdict. Headline emoji/color follows worst-wins precedence (🟢 green, 🟡
-yellow/loud-skip, 🟠 unverified/not-gated, 🔴 red/blocked) — full rule in
-[DESIGN.md](../DESIGN.md#verdict-contract).
+— or, when there's something to say, the same shape but with a per-agent identity line
+(`**artemis** @ \`<sha>\` — 🟡 FIX_FIRST`), that agent's own one-line summary, and itemized
+findings (severity badge, `file:line`, the issue, the concrete failure scenario) inside the
+findings fold — forced open on red/orange, collapsed otherwise. The raw per-agent verdict JSON
+still ships too, nested inside that fold as its own collapsed block. Headline emoji/color
+follows worst-wins precedence (🟢 green, 🟡 yellow/loud-skip, 🟠 unverified/not-gated, 🔴
+red/blocked) — full rule in [DESIGN.md](../DESIGN.md#verdict-contract), comment shape in
+[DESIGN.md](../DESIGN.md#combined-pr-comment).
 
 Exit codes: `0` on green or yellow, nonzero on red or unverified — `review-gate`'s exit status
 is meant to be usable as a CI/script gate on its own, independent of reading the posted comment.
