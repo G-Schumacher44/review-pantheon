@@ -22,7 +22,10 @@ access. Doc index: [docs/README.md](docs/README.md). Binding contract: [DESIGN.m
       a strict `vX.Y.Z` (digits only, no `-rc1`/build-suffix) — the workflow's own `v*.*.*`
       trigger is a glob and would otherwise also fire on a looser tag, but `bootstrap.sh
       --version` only ever accepts the strict shape, so a release built from anything looser
-      would be unfetchable by that lane. Once that passes, it re-runs the same lint/fixture suite
+      would be unfetchable by that lane. Its second step enforces the ORDER of this checklist
+      itself: it refuses unless the tagged commit is reachable from `origin/main` — a well-formed
+      `vX.Y.Z` tag cut straight from `dev` (skipping the promotion step above) fails here, not
+      silently. Once both pass, it re-runs the same lint/fixture suite
       `ci.yml`'s `lint-and-test` job runs (pinned at the tag, not a branch head), then — only if
       that passes — builds `review-pantheon-vX.Y.Z.tar.gz` (the CLI surface: `cli/`, `agents/`,
       `bootstrap.sh`, `install.sh`, `action/decide_verdict.py`, `action/review.yml` — the two

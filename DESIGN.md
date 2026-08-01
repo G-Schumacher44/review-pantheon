@@ -816,7 +816,15 @@ tests/                     tests/test-verdict-decision.sh — cross-runner fixtu
                            checksum-verified fetch all the way through extraction and install,
                            plus the mismatch case proving nothing lands in --prefix; builds its
                            fixture tarball with the identical explicit manifest
-                           .github/workflows/release.yml uses
+                           .github/workflows/release.yml uses, and proves the PACKAGED install.sh
+                           actually runs successfully against a scratch target (not just that the
+                           files are present);
+                           tests/test-release-tag-gates.sh — release.yml's two tag-validation
+                           gates: the strict-semver regex (extracted from release.yml's source,
+                           not hand-copied) and the origin/main-ancestry check (git merge-base
+                           --is-ancestor, against a real scratch repo with a promoted and an
+                           unpromoted branch) that enforces RELEASING.md's dev->main-before-tag
+                           ceremony was actually followed
 install.sh                 idempotent installer into a target repo (refuses to clobber
                            customized files); does not install gate.conf; --claude/--cursor/
                            --codex/--gemini generate per-tool projections of agents/*.md for

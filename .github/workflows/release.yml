@@ -11,9 +11,10 @@
 #                is the whole point — deliberately NOT the full ci.yml (no Docker setup-smoke,
 #                no composite-action-self-check) since those need a Docker daemon / PR context
 #                this tag-push trigger doesn't have; the fixture+lint suite below is the part of
-#                ci.yml that's meaningful to re-run against an arbitrary tagged commit. Its FIRST
-#                step validates the tag is a strict semver (see below) — everything else in this
-#                job only makes sense to run once that's confirmed.
+#                ci.yml that's meaningful to re-run against an arbitrary tagged commit. Its first
+#                two steps gate everything else: the tag must be a strict semver AND its commit
+#                must be reachable from origin/main (i.e. RELEASING.md's dev->main promotion
+#                ceremony was actually followed, not a stray tag cut from dev or elsewhere).
 #   2. build-and-publish — stages the CLI surface (explicit file list, no globs — see the step
 #                below for why), tars it as review-pantheon-<tag>.tar.gz, generates SHA256SUMS,
 #                and creates the GitHub Release with `gh release create`, notes auto-generated.
@@ -53,6 +54,24 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4 # matches ci.yml's pin — checks out the pushed tag by default
+        with:
+          fetch-depth: 0 # full history — the ancestry check below needs origin/main's real
+          # history, not the shallow single-commit checkout actions/checkout@v4 does by default
+
+      - name: Verify tag is reachable from main (the promotion ceremony was actually followed)
+        run: |
+          set -euo pipefail
+          # RELEASING.md's ceremony is dev -> (promotion PR) -> protected main -> tag main's
+          # commit. Nothing before this enforced that ORDER — a well-formed vX.Y.Z tag cut
+          # straight from dev (or any commit never promoted to main) passed the semver check
+          # above and would otherwise build and publish a release anyway (Codex finding on this
+          # PR). Refuse unless the tagged commit is an ancestor of origin/main.
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::tag '${GITHUB_REF_NAME}' (commit ${GITHUB_SHA}) is NOT reachable from origin/main. RELEASING.md requires promoting dev to main via PR BEFORE tagging — this commit was never promoted (or main has since moved past a point that would make it so). Refusing to build a release from it; see RELEASING.md's checklist."
+            exit 1
+          fi
+          echo "tag '${GITHUB_REF_NAME}' (commit ${GITHUB_SHA}) is reachable from origin/main — promotion ceremony was followed"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -138,6 +157,9 @@ jobs:
 
       - name: Run bootstrap release fetch/install end-to-end fixture tests
         run: bash tests/test-bootstrap-release-e2e.sh
+
+      - name: Run release.yml tag-validation gate fixture tests
+        run: bash tests/test-release-tag-gates.sh
 
   build-and-publish:
     needs: test
