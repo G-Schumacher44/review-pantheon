@@ -17,11 +17,12 @@
 #   - subcommand (argv[1]) must be exactly one of: diff, show, log, status — the four names
 #     DESIGN.md rule 1 tells personas to use. Anything else, including a `-c` or other
 #     global-flag-shaped token in that position, is refused outright.
-#   - every remaining argument must be a plain value (a ref, a path, a range like `base...head`)
-#     or the bare `--` pathspec separator. NO flag of any kind is permitted — not a
-#     per-subcommand allowlist of "safe-looking" flags, a flat refusal, because git's own flag
-#     grammar is large, subcommand-context-dependent, and not this script's job to re-implement
-#     correctly. An argument this wrapper doesn't recognize fails closed.
+#   - every remaining argument must be a plain value (a ref, a path, a range like `base...head`).
+#     NO flag of any kind is permitted, and — as of the caller-supplied-`--` closure below — NOT
+#     the bare `--` pathspec separator either: not a per-subcommand allowlist of "safe-looking"
+#     flags, a flat refusal, because git's own flag grammar is large, subcommand-context-dependent,
+#     and not this script's job to re-implement correctly. An argument this wrapper doesn't
+#     recognize fails closed.
 #   - `diff` additionally requires its first positional argument to be a real revision range
 #     (`A..B` or `A...B`) where BOTH `A` and `B` independently resolve via `git rev-parse --verify
 #     --quiet <side>^{commit}` — containing the substring `..` is necessary but not sufficient. See
@@ -29,6 +30,12 @@
 #     same-named path" rows for why: this is a structural closure (verify it is really a commit
 #     range before git ever runs), not a blocklist/pattern-match entry — a tracked working-tree
 #     path literally named `foo..bar` also contains `..` and must be REFUSED, not diffed.
+#   - `diff` additionally accepts EXACTLY ONE positional argument — no second positional, no
+#     pathspec, ever. See the EXEC/WRITE-SURFACE MATRIX's "caller-supplied `--`" row: revspec
+#     verification alone is not sufficient, because a validated range re-forwarded to real git
+#     alongside a caller-supplied `--` gets parsed as a pathspec instead of a revision — the
+#     wrapper closes this by never letting the caller supply `--` at all (previous bullet) AND by
+#     never giving diff a second argument slot for a pathspec to occupy in the first place.
 #
 # EXEC/WRITE-SURFACE MATRIX — every git config key, attribute, or environment variable that
 # names an executable or a write target, checked against git's own documentation for whether an
@@ -56,6 +63,17 @@
 #     disambiguation falls back to                            revspec validation, not a
 #     treating it as a pathspec)                              substring match; a side that
 #                                                              fails to resolve is refused
+#   Caller-supplied `--` shifts a   diff (a validated       caller can NEVER supply `--`     live
+#     REVSPEC-VALIDATED range into   range re-forwarded as    (refused for every subcommand,
+#     PATHSPEC position (`git diff   `git diff -- A..B`       not just diff, in the top-level
+#     -- A..B` parses `A..B` as a    even though A and B      argv-validation loop); diff also
+#     pathspec, not a revision,      independently resolve    takes EXACTLY ONE positional
+#     even when both sides resolve   as real commits)          argument (no room for a second,
+#     via rev-parse — Codex round                              pathspec-shaped one even
+#     2 on issue #7)                                           without an explicit `--`); the
+#                                                              wrapper appends its OWN trailing
+#                                                              `--` after the validated range,
+#                                                              never a caller-influenced one
 #   core.fsmonitor (hook pathname)  status, diff, any    -c core.fsmonitor=false          live
 #                                     working-tree scan
 #   Optional index-lock write       status                GIT_OPTIONAL_LOCKS=0            live
@@ -159,8 +177,7 @@ esac
 
 for arg in "$@"; do
   case "$arg" in
-    --) ;; # the pathspec separator — inert on its own, no config/exec/output semantics
-    -*) die "argument '$arg' is not permitted — this wrapper allows plain refs/paths/ranges only, no flags of any kind" ;;
+    -*) die "argument '$arg' is not permitted — this wrapper allows plain refs/paths/ranges only, no flags of any kind, and no caller-supplied '--' pathspec separator either (the wrapper owns the '--' boundary itself — see the EXEC/WRITE-SURFACE MATRIX's 'caller-supplied --' row)" ;;
     *) ;;
   esac
 done
@@ -220,13 +237,31 @@ GLOBAL_OVERRIDES=(
 )
 
 # `diff` must be given a proper revision range — see the EXEC/WRITE-SURFACE MATRIX above, "clean/
-# smudge filters" and "`..`-substring range spoofed by a same-named path" rows. A bare `diff` or
-# `diff <single-ref>` compares the WORKING TREE (not just repository objects) against the index or
-# that ref, and git applies any configured `filter.<name>.clean` command to convert the dirty
-# working-tree file before comparing — reproduced live. A proper range (`A..B` / `A...B`) never
-# touches the working tree at all — git compares two repository objects directly — which is also
-# the ONLY form DESIGN.md rule 1 and every generated run-context prompt ever tell an agent to use
-# (`git diff <base>...<branch>`), so requiring one costs no legitimate capability.
+# smudge filters", "`..`-substring range spoofed by a same-named path", and "caller-supplied '--'"
+# rows. A bare `diff` or `diff <single-ref>` compares the WORKING TREE (not just repository
+# objects) against the index or that ref, and git applies any configured `filter.<name>.clean`
+# command to convert the dirty working-tree file before comparing — reproduced live. A proper
+# range (`A..B` / `A...B`) never touches the working tree at all — git compares two repository
+# objects directly — which is also the ONLY form DESIGN.md rule 1 and every generated run-context
+# prompt ever tell an agent to use (`git diff <base>...<branch>`), so requiring one costs no
+# legitimate capability.
+#
+# `diff` takes EXACTLY ONE caller-supplied argument — no second positional, no pathspec, no
+# caller-supplied `--` (already refused above, for every subcommand). This is a structural
+# closure, not incidental: revspec-verifying the one argument is not sufficient on its own —
+# Codex round 2 on issue #7 demonstrated that a validated `A..B` range, re-forwarded to real git
+# alongside a caller-supplied leading `--` (`git diff -- A..B`), gets parsed by git as a PURE
+# PATHSPEC rather than a revision, because `--` changes how git interprets everything after it —
+# even though BOTH `A` and `B` independently resolve as real commits via `rev-parse --verify`. A
+# tracked working-tree file literally named `<A>..<B>` (trivially constructable — any two real
+# ancestor commit SHAs) plus a configured clean filter turns that into the exact clean-filter RCE
+# this wrapper exists to close, reached through argument POSITION rather than argument CONTENT.
+# Fixed by owning the boundary end to end: the caller can never supply `--` (closed above, for
+# every subcommand), diff can never receive more than one positional (closed by the `$# -eq 1`
+# check below, so there is no second slot for a pathspec to occupy even without an explicit `--`),
+# and the wrapper appends ITS OWN trailing `--` after the validated range when invoking real git
+# (see the final `exec` below) so the argument's revision interpretation is never in question and
+# nothing caller-supplied can ever land in pathspec position.
 #
 # Containing the substring `..` is necessary but not sufficient: a tracked working-tree path
 # literally named `foo..bar` also contains it, and real git's own disambiguation rule — fall back
@@ -239,19 +274,16 @@ GLOBAL_OVERRIDES=(
 # invocation this wrapper makes. Either side failing that is a rejected pathspec/working-tree
 # path, named in the error, not silently reinterpreted as one.
 if [[ "$subcommand" == "diff" ]]; then
-  first_positional=""
-  for arg in "$@"; do
-    [[ "$arg" == "--" ]] && continue
-    first_positional="$arg"
-    break
-  done
+  [[ $# -eq 1 ]] \
+    || die "diff takes EXACTLY one argument — a revision range like 'base...head' — got $# (this wrapper does not accept a second positional argument or a pathspec on diff, regardless of a '..'-containing first argument; see the EXEC/WRITE-SURFACE MATRIX's 'caller-supplied --' row)"
 
+  first_positional="$1"
   range_left=""
   range_right=""
-  if [[ -n "$first_positional" && "$first_positional" == *"..."* ]]; then
+  if [[ "$first_positional" == *"..."* ]]; then
     range_left="${first_positional%%...*}"
     range_right="${first_positional#*...}"
-  elif [[ -n "$first_positional" && "$first_positional" == *".."* ]]; then
+  elif [[ "$first_positional" == *".."* ]]; then
     range_left="${first_positional%%..*}"
     range_right="${first_positional#*..}"
   fi
@@ -277,7 +309,15 @@ fi
 # rejects them there — "error: unknown option"), so this is scoped to exactly the two
 # subcommands that can trigger diff output, appended after the subcommand and before whatever
 # plain refs/paths/ranges the model supplied.
+#
+# `diff` is exec'd with its own explicit `-- ` appended after the (now-verified) range argument —
+# the wrapper's OWN trailing pathspec-separator, not the caller's, and with nothing after it (diff
+# takes exactly one argument, enforced above) so there is nothing for it to scope a pathspec onto.
+# This makes the argument's revision interpretation unambiguous and un-influenceable by anything
+# the caller supplied, closing the argument-position class the substring/revspec checks alone did
+# not (see the long comment above the diff-range validation block).
 case "$subcommand" in
-  diff | show) exec git "${GLOBAL_OVERRIDES[@]}" "$subcommand" --no-ext-diff --no-textconv "$@" ;;
+  diff) exec git "${GLOBAL_OVERRIDES[@]}" diff --no-ext-diff --no-textconv "$first_positional" -- ;;
+  show) exec git "${GLOBAL_OVERRIDES[@]}" show --no-ext-diff --no-textconv "$@" ;;
   *) exec git "${GLOBAL_OVERRIDES[@]}" "$subcommand" "$@" ;;
 esac

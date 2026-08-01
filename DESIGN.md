@@ -530,6 +530,26 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
       Windows-only redirect sinks), each independently reproduced failing against the pre-fix
       wrapper before the fix landed — the same "not green-by-construction" standard every
       config-driven-bypass fixture in this file already holds itself to.
+  - **Round 8 — caller-supplied `--` shifts a revspec-validated range into pathspec position
+    (Codex, round 2 on the PR carrying Round 7).** Revspec-verifying both sides of a diff range is
+    NOT sufficient on its own: `git diff -- A..B`, forwarded verbatim by Round 7's wrapper, is
+    parsed by real git as a PURE PATHSPEC — not a revision — because of the leading `--`, even
+    though `A` and `B` independently resolve as real commits via `rev-parse --verify`. A tracked
+    working-tree file literally named `<A>..<B>` (trivially constructable: any two real ancestor
+    commit SHAs) plus a configured clean filter reopens the exact clean-filter RCE Round 7 was
+    written to close — reached through argument POSITION (a caller-supplied `--`) rather than
+    argument CONTENT. Reproduced live against Round 7's own pushed commit: `diff -- <A..B>` ran
+    clean, no refusal, filter fired. Fixed by the wrapper owning the pathspec boundary end to end,
+    not by blocklisting the leading-`--` shape specifically: the caller can never supply `--` at
+    all now (closed in the top-level argv-validation loop, for every subcommand — show/log/status
+    swept for the same argument-position class, not just diff), `diff` accepts EXACTLY one
+    positional argument (so there is no second, pathspec-shaped slot even without an explicit
+    `--`), and the wrapper appends its OWN trailing `--` after the validated range on exec (never
+    a caller-influenced one). The previously-accepted `diff <range> -- <path>` pathspec-scoping
+    form is consequently no longer supported — it was never a documented DESIGN.md rule 1 usage,
+    and was exactly the surface this bypass exploited. Carries the same live-proof-plus-negative-
+    control fixture pattern (`tests/test-git-readonly-wrapper.sh`), independently reproduced
+    failing against Round 7's pushed commit before this fix landed.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is
