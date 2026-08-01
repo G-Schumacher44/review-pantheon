@@ -209,6 +209,45 @@ check "pathological-all-braces-no-json" "artemis" \
   "unverified" "false"
 
 # ---------------------------------------------------------------------------
+# Extractor round 3 — cross-runtime multi-document divergence (a carried finding from PR #4's
+# final review round). jq's stream parser accepts multiple whitespace-separated top-level JSON
+# documents and `jq -e '.'` bases its exit status on only the LAST one — so a candidate that's a
+# well-formed verdict object immediately followed by a second, unrelated JSON document (an
+# array, a bare number — a REAL second document, not malformed prose) read as "valid" to the
+# pre-fix bash extractor even though Python's json.loads() already rejects it via "Extra data".
+# Left unfixed, this corrupted decide_verdict()'s --argjson calls (each requires exactly one
+# JSON value) and crashed the calling shell into empty output under `set -e` instead of
+# returning a clean UNVERIFIED — reproduced live against the pre-fix code before landing this
+# fix (`jq: invalid JSON text passed to --argjson`, decide_verdict producing empty stdout).
+# cli/lib/verdict.sh's `_pantheon_single_json` is the fix: bash now requires exactly one JSON
+# document, identically to Python, instead of trusting `jq -e`'s truthy-on-last-value check.
+# ---------------------------------------------------------------------------
+
+# Baseline/sanity coverage, NOT a repro of the divergence above — an honest Apollo finding on
+# this PR's own self-review: extract_last_json's backward scan for the LAST `{` in the text
+# already isolates `{"b":2}` as a clean, self-contained single-document candidate before
+# _pantheon_single_json's multi-doc check ever runs, so this exact fixture passes identically
+# against the pre-fix code too (plain `jq -e '.'` was never the problem here — the problem was
+# only ever a candidate whose trailing content ISN'T reachable by scanning for a fresh `{`,
+# which is exactly what the two fixtures below are). Kept as coverage that "two full JSON
+# objects, last one wins" still holds post-fix (same case tests/test-verdict-decision.sh's
+# earlier "two-json-objects-last-wins" fixture covers) — not counted as evidence for the
+# cross-runtime divergence fix; the two fixtures immediately below are what actually exercise it.
+check "multi-doc-json-stream-two-objects (baseline — does not exercise the fix; see comment above)" "artemis" \
+  '{"a":1} {"b":2}' \
+  "unverified" "false"
+
+check "verdict-followed-by-second-json-doc-trailing-array" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}
+["not","expected"]' \
+  "unverified" "false"
+
+check "verdict-followed-by-second-json-doc-trailing-scalar" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}
+42' \
+  "unverified" "false"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

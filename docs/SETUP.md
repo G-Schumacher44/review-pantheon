@@ -123,7 +123,7 @@ whole install. `action.yml` at this repo's root is a composite GitHub Action; th
 G-Schumacher44/review-pantheon@v1` reference reads personas and the verdict-decision script
 from its own checkout, so nothing lands in your repo at all. See `DESIGN.md`'s ["Published
 action"](../DESIGN.md#published-action) section for what's bundled, what's overridable
-(`personas_path`, `agents`, `rules_file`, `spec_file`, `model`), and the sequential-vs-matrix
+(`personas_path`, `agents`, `rules_file`, `spec_file`, `model`, `execution`), and the sequential-vs-matrix
 tradeoff this lane makes.
 
 `action.yml`'s auth surface is deliberately narrow — exactly two inputs, and it fails loud
@@ -181,7 +181,9 @@ repo.)
    `DRY_RUN`), and the full-findings block — to stdout, never to GitHub.
 
 Zero tokens spent (no provider is invoked), zero risk (nothing is posted, no state file is
-written — `.review-gate-state.json` is only updated after a successful `gh pr comment`).
+written — `.review-gate-state.json` is only updated after a successful `gh pr comment` **and**
+only when the overall result is green or yellow; an unverified or red result leaves it untouched
+so the next run retries the full PR instead of quietly treating a failed run as reviewed).
 
 ## First live run
 

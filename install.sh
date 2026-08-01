@@ -101,6 +101,7 @@ AGENTS_SRC="$SCRIPT_DIR/agents"
 DECIDE_SRC="$SCRIPT_DIR/action/decide_verdict.py"
 ACTION_SRC="$SCRIPT_DIR/action/review.yml"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
+GIT_WRAPPER_SRC="$SCRIPT_DIR/cli/lib/pantheon-git-readonly.sh"
 
 SKIPPED=()
 
@@ -130,12 +131,23 @@ if [[ "$DO_USER" != "true" ]]; then
   [[ -f "$DECIDE_SRC" ]] || die "missing $DECIDE_SRC"
   [[ -f "$ACTION_SRC" ]] || die "missing $ACTION_SRC"
   [[ -f "$RULES_SRC" ]] || die "missing $RULES_SRC"
+  [[ -f "$GIT_WRAPPER_SRC" ]] || die "missing $GIT_WRAPPER_SRC"
 
   AGENTS_DEST="$TARGET/.github/review-agents"
   DECIDE_DEST="$TARGET/.github/review-agents/decide_verdict.py"
   WORKFLOW_DEST="$TARGET/.github/workflows/review.yml"
   RULES_DEST="$TARGET/REVIEW_RULES.md"
   GITIGNORE_DEST="$TARGET/.gitignore"
+  # action/review.yml reads this file's CONTENT from the PR's base commit (`git show
+  # $BASE_SHA:.github/review-agents/pantheon-git-readonly.sh`, its "Resolve read-only git
+  # wrapper (base-pinned)" step) into $RUNNER_TEMP, and points claude_args' readonly-tier Bash
+  # prefix at THAT resolved path, not at this checked-out-working-tree path directly — installing
+  # it here is still required (it's what gets committed and read at the PR's base), but the path
+  # itself is never the literal --allowedTools prefix. See that step's own comment for why a
+  # wrapper is needed instead of a bare `Bash(git diff *)`-style pattern (Codex P1, round 1) and
+  # why base-pinning is needed on top of the wrapper itself (Codex P1, round 2 — a bare
+  # $GITHUB_WORKSPACE-pinned prefix would let a PR replace this exact file and still be trusted).
+  GIT_WRAPPER_DEST="$TARGET/.github/review-agents/pantheon-git-readonly.sh"
 
   mkdir -p "$AGENTS_DEST"
   for persona in "$AGENTS_SRC"/*.md; do
@@ -145,6 +157,8 @@ if [[ "$DO_USER" != "true" ]]; then
   install_file "$DECIDE_SRC" "$DECIDE_DEST"
   install_file "$ACTION_SRC" "$WORKFLOW_DEST"
   install_file "$RULES_SRC" "$RULES_DEST"
+  install_file "$GIT_WRAPPER_SRC" "$GIT_WRAPPER_DEST"
+  chmod +x "$GIT_WRAPPER_DEST"
 
   # .gitignore: append the state-file entry if not already present.
   if [[ -f "$GITIGNORE_DEST" ]]; then

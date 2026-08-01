@@ -91,6 +91,15 @@ jobs:
       - name: Run prompt-assembly fixture tests
         run: bash tests/test-prompt-assembly.sh
 
+      - name: Run state-persistence fixture tests
+        run: bash tests/test-state-persistence.sh
+
+      - name: Run git-readonly-wrapper fixture tests
+        run: bash tests/test-git-readonly-wrapper.sh
+
+      - name: Run execution-tier fixture tests
+        run: bash tests/test-execution-tier.sh
+
   setup-smoke:
     # Clean-machine, real-Linux run of the setup story (see Dockerfile.smoke's header): required
     # binaries, both fixture suites above, install.sh and bootstrap.sh against fresh scratch
@@ -168,3 +177,9 @@ jobs:
           # IS the acceptance proof for the combined-comment renderer (cli/lib/render_comment.sh):
           # a real composite-action run, on a real PR, posting the new human-first format. Was
           # "false" (mechanics-only, no comment) before the renderer existed to prove out.
+          execution: trusted # this IS the own-repo/trusted-author case execution=readonly's own
+          # docs name as the exception (DESIGN.md's "Security posture") — review-pantheon
+          # reviewing its own PRs, opened by its own maintainer, from its own checkout. readonly
+          # stays the default for every OTHER consumer of this action (reviewing someone else's
+          # fork PR), which this input does not change; it only affects this one self-test
+          # invocation, against this one repo's own PRs.

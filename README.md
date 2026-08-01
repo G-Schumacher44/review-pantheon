@@ -163,10 +163,36 @@ PR opened                                   spec / design doc / proposal
 - **Read-only, by construction.** Every persona is bound to read-only git (`git show`, `git diff`,
   `git log`, `git status`) and forbidden from mutating the tree, index, or HEAD. If a check needs a
   tree change to answer, the agent stops and reports the gap instead.
-- **Prompt-injection-aware.** PR metadata is attacker-controlled on forks. The runner validates PR
-  number, branch names, and head SHA against strict character-class regexes before any touch a
-  shell command or prompt; unsafe metadata fails closed. The Action never interpolates untrusted PR
-  content (title, body) directly into a `run:` script — it goes through `env:` indirection.
+- **Injection-aware, honestly scoped — here's exactly what that means.** PR metadata (number,
+  branch names, head/base SHA) is attacker-controlled on forks; it's validated against strict
+  character-class regexes before any of it reaches a shell command or a prompt, and unsafe
+  metadata fails closed — the Action never interpolates untrusted PR content directly into a
+  `run:` script either, it goes through `env:` indirection. House-rules/spec context files are
+  read pinned to the PR's **base** commit, never its head, inside randomized per-render
+  data-block fences, so a file the PR itself edits can't forge a close and smuggle content past
+  the boundary — **in the CLI lane and the published action** (`action.yml`); the vendored Way-A
+  workflow (`action/review.yml`) does not base-pin and reads these files from the checked-out
+  working tree instead, so a fork PR editing them there does reach the prompt on that one lane —
+  see [Lane differences](#lane-differences). Every persona is told explicitly that everything it
+  reads — diff, file contents, PR metadata, pinned file content — is data, not instructions, and
+  that a directive found inside it is itself a reportable finding, not something to follow. The
+  verdict JSON is schema- and type-validated, and the blocker invariant forces red whenever any
+  finding is a blocker, regardless of the stated verdict word. Tool execution defaults to a
+  read-only tier (`execution=readonly`) that routes Bash through an argv-validating wrapper
+  script, run under an explicit deny-by-default permission mode (`--permission-mode dontAsk`) —
+  not a bare command-prefix pattern (which can't distinguish a read-only git subcommand from the
+  same subcommand carrying a writing/execution-capable flag, or one activated by config/
+  attributes rather than a flag at all) and not an unset permission mode (which leaves an
+  unlisted tool call unanswerable, not denied, outside an interactive terminal) — so reviewing
+  hostile fork content never grants an agent arbitrary command execution. Claude Code itself
+  still always allows a small, built-in, non-configurable set of bare read-only commands
+  (including plain `git diff`/`show`/`log`/`status`) regardless of tier — expected, since those
+  are genuinely read-only; the wrapper's job is everything beyond that. **Honest limit:** none of this
+  can eliminate a schema-valid, deceptive verdict from an agent that's been fully compromised by
+  injected content — these layers make that harder to pull off and more visible when attempted
+  (an injection attempt becomes its own flagged finding, not a silent verdict flip), and
+  cross-review by a second independent agent is the main mitigation against any one agent being
+  fooled, not a guarantee against it.
 - **No auto-merge, ever.** The gate posts one combined PR comment — headline signal, verdict table,
   folded findings when it isn't green. A human reads it and decides.
 - **One persona, one source.** `agents/<name>.md` is the only hand-maintained copy of each
@@ -240,7 +266,8 @@ counsel personas individually and reason across their verdicts yourself.
 ## CLI usage
 
 ```
-review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"] [--dry-run]
+review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"]
+            [--execution readonly|trusted] [--dry-run]
 ```
 
 Run it from inside the target repo. Requires `gh` and `jq`. Reads defaults from `gate.conf` at
@@ -254,6 +281,10 @@ single run.
 - `--pr <number>` — required, the PR to review.
 - `--provider <lane>` — override `gate.conf`'s `provider=` for this run.
 - `--agents "<space-separated list>"` — override `gate.conf`'s `agents=` for this run.
+- `--execution readonly|trusted` — override `gate.conf`'s `execution=` for this run. `readonly`
+  (the default) scopes Bash to a read-only git allowlist; `trusted` restores full Bash —
+  own-repo/trusted-author use only, never for reviewing a fork PR you don't control. See
+  [How the gate stays honest](#how-the-gate-stays-honest).
 - `--dry-run` — builds the prompts and prints the would-be comment without calling any provider
   or posting anything.
 

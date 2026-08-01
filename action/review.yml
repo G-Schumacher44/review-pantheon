@@ -62,6 +62,63 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # PR metadata is attacker-controlled on forks (DESIGN.md's "Security posture") — the same
+      # posture as action.yml's own dedicated validation step and the CLI lane's HEAD_SHA/
+      # BASE_SHA checks. Runs before every step below that uses either SHA in a shell command,
+      # including the new wrapper-resolution step (a `git show`/`git diff` call built from an
+      # unvalidated SHA is exactly the shell-command-injection surface this rule exists to close).
+      - name: Validate PR base/head SHAs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          SHA_RE='^[0-9a-f]{7,40}$'
+          if ! [[ "$BASE_SHA" =~ $SHA_RE ]]; then
+            echo "::error::review-pantheon: unsafe base SHA '$BASE_SHA' from PR event context — UNVERIFIED, refusing to use it in any git command."
+            exit 1
+          fi
+          if ! [[ "$HEAD_SHA" =~ $SHA_RE ]]; then
+            echo "::error::review-pantheon: unsafe head SHA '$HEAD_SHA' from PR event context — UNVERIFIED, refusing to use it in any git command."
+            exit 1
+          fi
+
+      # Codex P1 finding (round 2 on the tiered-execution PR): this workflow's Checkout step
+      # above pulls the PR's OWN tree — on a fork PR, `$GITHUB_WORKSPACE/.github/review-agents/
+      # pantheon-git-readonly.sh` is content the PR author controls. Pointing --allowedTools at
+      # that working-tree path (as this lane originally did) means a PR can simply REPLACE the
+      # wrapper script with an arbitrary executable while the exact same permission-rule path
+      # still authorizes running it — the readonly tier would authorize its own replacement.
+      # Fixed the same way this repo already closes the identical class for REVIEW_RULES.md/
+      # DESIGN.md base-pinning (DESIGN.md's "Security posture" — "Base-SHA-pinned context file
+      # reads"): read the wrapper's CONTENT from the PR's BASE commit via `git show`, write it
+      # to a path OUTSIDE the checked-out working tree ($RUNNER_TEMP), and point every
+      # --allowedTools value at THAT path — a PR editing its own head copy never reaches it.
+      # A Codex P2 finding: on the very PR that first runs install.sh and adds this workflow +
+      # the wrapper, the wrapper exists at HEAD but not at BASE (the commit before install.sh
+      # ran) — base-pinning by design can't read it, and this step fails loud rather than
+      # silently. That's the correct fail-closed outcome, not a bug: falling back to reading the
+      # wrapper from the checked-out working tree "just this once" would reopen exactly the
+      # vulnerability base-pinning exists to close (a PR-introduced file, read from PR content,
+      # on the one PR where doing so is easiest to justify and easiest to overlook as an
+      # exception). If this is that bootstrap PR: merge it via another path first (a manual
+      # review, or temporarily unset the `REVIEW_GATE_ENABLED` repo variable for this one PR),
+      # then every PR after it — including ones editing this workflow again — is gated normally
+      # once the wrapper exists at base.
+      - name: Resolve read-only git wrapper (base-pinned)
+        id: resolve-git-wrapper
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          WRAPPER_DEST="$RUNNER_TEMP/pantheon-git-readonly.sh"
+          if ! git show "${BASE_SHA}:.github/review-agents/pantheon-git-readonly.sh" > "$WRAPPER_DEST" 2>/dev/null; then
+            echo "::error::missing .github/review-agents/pantheon-git-readonly.sh at base commit ${BASE_SHA}. Two possible causes: (1) install.sh hasn't been run in this repo yet — run it, commit the result, and re-push; or (2) this IS the PR that first runs install.sh and adds this workflow — the wrapper exists at this PR's head but not yet at base, and base-pinning correctly refuses to read a PR-introduced file from PR content rather than falling back unsafely. For (2): merge this bootstrap PR via another path (manual review, or temporarily unset the REVIEW_GATE_ENABLED repo variable for just this PR) — every PR after it will be gated normally, since the wrapper will then exist at base."
+            exit 1
+          fi
+          chmod +x "$WRAPPER_DEST"
+          echo "wrapper_path=$WRAPPER_DEST" >> "$GITHUB_OUTPUT"
+
       - name: Detect docs-only diff
         id: docs-check
         env:
@@ -103,6 +160,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           REPO_NAME: ${{ github.repository }}
+          GIT_WRAPPER_PATH: ${{ steps.resolve-git-wrapper.outputs.wrapper_path }}
         run: |
           set -euo pipefail
           PERSONA="$GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md"
@@ -123,6 +181,13 @@ jobs:
             printf -- "- PR: #%s - %s\n" "$PR_NUMBER" "$PR_TITLE"
             echo "- Diff range: ${BASE_SHA}...${HEAD_SHA}"
             echo "- Base branch: $BASE_REF"
+            echo "- Execution: readonly — Bash is restricted to a read-only git wrapper this run, not raw \`git\`."
+            echo "  Use \`$GIT_WRAPPER_PATH diff|show|log|status <plain refs/paths/ranges, no flags>\` in place of"
+            echo "  \`git diff|show|log|status\` (e.g. \`$GIT_WRAPPER_PATH diff <range>\`, \`$GIT_WRAPPER_PATH show <ref>:<path>\`)"
+            echo "  — the wrapper refuses any flag/option and any other subcommand, so this is the only Bash"
+            echo "  invocation available. No other command execution is possible this run. This path is"
+            echo "  base-SHA-pinned (\$RUNNER_TEMP, not the checked-out working tree) — see DESIGN.md's"
+            echo "  \"Security posture\" for why: the working tree on a fork PR is the PR's own content."
             if [ -f "$GITHUB_WORKSPACE/REVIEW_RULES.md" ]; then
               echo "- House rules file: REVIEW_RULES.md (present - treat each rule as a blocker-class check)"
             else
@@ -137,7 +202,7 @@ jobs:
               echo "- Spec file: DESIGN.md (present — check the delivered change against the sections of it relevant to the changed behavior; a contradiction is a finding that states both resolutions: fix the code or amend the spec)"
             fi
             echo
-            echo "Use \`git diff ${BASE_SHA}...${HEAD_SHA}\`, \`git show <ref>:path\`, and \`git log\` to inspect the change."
+            echo "Use the read-only git wrapper named above (not raw \`git\`) with \`${BASE_SHA}...${HEAD_SHA}\` as the diff range to inspect the change."
             echo
             echo "## Output contract"
             echo "End your response with exactly one JSON verdict object, per your persona instructions above, and nothing after it. No prose after the JSON."
@@ -162,8 +227,38 @@ jobs:
           # instead. `--json-schema` is the verdict-contract shape (DESIGN.md), structural
           # only — NOT each agent's own verdict vocabulary, which stays sole-sourced in
           # action/decide_verdict.py (see DESIGN.md's "Two runtimes, one rule").
+          #
+          # Bash is routed through the wrapper resolved by "Resolve read-only git wrapper
+          # (base-pinned)" above — NOT a path under $GITHUB_WORKSPACE (HIGH-1 fix, Codex P1
+          # round 2 — DESIGN.md's "Security posture"): this lane reviews a PR diff, which is
+          # 100%-attacker-controlled content on a fork, and pointing --allowedTools at a
+          # working-tree path would let the PR simply REPLACE the wrapper script with an
+          # arbitrary executable while the exact same permission-rule path still authorized
+          # running it — the readonly tier would authorize its own replacement. Reading the
+          # wrapper's content from the PR's BASE commit into $RUNNER_TEMP (never the checked-out
+          # working tree) closes that the same way this repo already closes it for
+          # REVIEW_RULES.md/DESIGN.md base-pinning elsewhere. (Round 1 of this same fix replaced
+          # a bare `Bash(git diff *)`-style prefix pattern, which can't tell a read-only git
+          # subcommand from the same subcommand carrying a writing/execution-capable flag like
+          # `--output=`/`--ext-diff` — see cli/lib/pantheon-git-readonly.sh's own header comment
+          # for that finding.) Unlike action.yml (the published composite action, which exposes
+          # an `execution` input), this vendored workflow has no config/input surface at all by
+          # design (see DESIGN.md's "Lane differences" — provider/config are hardcoded here the
+          # same way REVIEW_RULES.md/DESIGN.md's paths are) — readonly is not overridable from
+          # outside this file. A Way-A installer who genuinely needs full Bash (own-repo/
+          # trusted-author use only, never for reviewing a fork PR) edits this vendored copy
+          # directly, the same way they'd edit any other hardcoded value here.
+          # --permission-mode dontAsk (not left unset, which is what this workflow did before
+          # this fix): Claude Code's own docs are explicit that without it, a tool call matching
+          # --allowedTools still goes through a permission decision that nothing can answer
+          # outside an interactive terminal — `dontAsk` is documented as the mode for
+          # "locked-down CI and scripts": it auto-denies anything not pre-approved and never
+          # waits for input. See cli/lib/execution.sh's header comment for the fuller writeup (a
+          # real Apollo finding, from this PR's own self-review of action.yml, which has the
+          # identical gap this same fix closes here).
           claude_args: |
-            --allowedTools "Read,Grep,Glob,Bash"
+            --allowedTools "Read,Grep,Glob,Bash(${{ steps.resolve-git-wrapper.outputs.wrapper_path }} *)"
+            --permission-mode dontAsk
             --json-schema '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
       - name: Save raw agent output

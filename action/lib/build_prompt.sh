@@ -29,6 +29,14 @@
 # content to reach the prompt.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck disable=SC1091
+# pantheon_execution_context_note (below) — the same tiered-execution helper cli/review-gate
+# uses, sourced here via a relative path into the action's own checkout (safe because the
+# published action ships this whole repo at github.action_path — same pattern
+# action/lib/combine_verdicts.sh already uses to source cli/lib/render_comment.sh).
+source "$SCRIPT_DIR/../../cli/lib/execution.sh"
+
 AGENT_NAME="${1:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
 PERSONAS_DIR="${2:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
 PROMPT_FILE="${3:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
@@ -37,6 +45,8 @@ RULES_CONTENT_PATH="${RULES_CONTENT_PATH:-}"
 SPEC_FILE="${SPEC_FILE:-}"
 SPEC_PRESENT="${SPEC_PRESENT:-false}"
 SPEC_CONTENT_PATH="${SPEC_CONTENT_PATH:-}"
+EXECUTION="${EXECUTION:-readonly}"
+GIT_WRAPPER_PATH="${GIT_WRAPPER_PATH:-}"
 
 PERSONA="$PERSONAS_DIR/${AGENT_NAME}.md"
 if [ ! -f "$PERSONA" ]; then
@@ -93,6 +103,7 @@ awk '
   printf -- "- PR: #%s - %s\n" "$PR_NUMBER" "$PR_TITLE"
   echo "- Diff range: ${BASE_SHA}...${HEAD_SHA}"
   echo "- Base branch: $BASE_REF"
+  pantheon_execution_context_note "$EXECUTION" "$GIT_WRAPPER_PATH"
   if [ "$RULES_PRESENT" = "true" ]; then
     RULES_CONTENT=""
     if [ -n "$RULES_CONTENT_PATH" ] && [ -f "$RULES_CONTENT_PATH" ]; then
@@ -132,7 +143,11 @@ awk '
     echo "  ----- END PINNED FILE CONTENT (id: ${SPEC_FENCE_ID}) -----"
   fi
   echo
-  echo "Use \`git diff ${BASE_SHA}...${HEAD_SHA}\`, \`git show <ref>:path\`, and \`git log\` to inspect the change."
+  if [ "$EXECUTION" = "trusted" ]; then
+    echo "Use \`git diff ${BASE_SHA}...${HEAD_SHA}\`, \`git show <ref>:path\`, and \`git log\` to inspect the change."
+  else
+    echo "Use the read-only git wrapper named above (not raw \`git\`) with \`${BASE_SHA}...${HEAD_SHA}\` as the diff range to inspect the change."
+  fi
   echo
   echo "## Output contract"
   echo "End your response with exactly one JSON verdict object, per your persona instructions above, and nothing after it. No prose after the JSON. This run additionally constrains your final answer with a JSON schema (--json-schema) matching that same shape — match it."

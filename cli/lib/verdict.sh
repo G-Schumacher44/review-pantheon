@@ -49,13 +49,37 @@
 # small; a handful of parse attempts per call is an accepted cost for the correctness this buys
 # (mirrored exactly in action/decide_verdict.py's extract_last_json — keep both in sync, same
 # as everywhere else in this file).
+# _pantheon_single_json <text> — prints <text>'s single JSON document (compact) on stdout and
+# returns 0 iff <text> is EXACTLY one JSON document with no trailing content, matching what
+# Python's json.loads() already enforces on its own (it raises "Extra data" on anything after
+# the first complete value). jq's stream parser does NOT enforce this by itself: `jq -e '.'
+# <<<"$text"` happily accepts multiple whitespace-separated top-level JSON documents and bases
+# its exit status on only the LAST one — so a candidate consisting of a valid verdict object
+# immediately followed by a second, unrelated JSON value (an array, a bare number — not
+# malformed prose, a genuine second document) read as "valid" to that check even though Python
+# already rejected the same text. Left unfixed, this cross-runtime divergence corrupted every
+# downstream --argjson caller below (each requires EXACTLY one JSON value) and could crash the
+# calling shell into empty output under `set -e` instead of returning a clean UNVERIFIED —
+# reproduced live against the pre-fix version of this function (jq: invalid JSON text passed to
+# --argjson) before this fix landed; see tests/test-verdict-decision.sh's "multi-doc"/"verdict
+# followed by a second JSON doc" fixtures for the same repro, now fixed. Slurping into an array
+# (`jq -c -s`) is what makes "how many top-level documents did this parse into" checkable at
+# all — a plain `jq -e '.'` has no concept of "count", only "did the last one succeed."
+_pantheon_single_json() {
+  local text="$1" slurped count
+  slurped="$(jq -c -s '.' <<<"$text" 2>/dev/null)" || return 1
+  count="$(jq -r 'length' <<<"$slurped" 2>/dev/null)" || return 1
+  [[ "$count" == "1" ]] || return 1
+  jq -c '.[0]' <<<"$slurped"
+}
+
 extract_last_json() {
   local text i candidate
   text="$(cat)"
   for (( i = ${#text} - 1; i >= 0; i-- )); do
     [[ "${text:i:1}" == "{" ]] || continue
     candidate="${text:i}"
-    if jq -e '.' <<<"$candidate" >/dev/null 2>&1; then
+    if _pantheon_single_json "$candidate" >/dev/null 2>&1; then
       printf '%s' "$candidate"
       return 0
     fi
@@ -115,7 +139,12 @@ decide_verdict() {
   local expected_agent="$1" candidate="$2"
   local verdict_json
 
-  if ! verdict_json="$(jq -e '.' <<<"$candidate" 2>/dev/null)"; then
+  # _pantheon_single_json (above) is the exactly-one-document check — a candidate that is
+  # itself a verdict object followed by trailing content that's ALSO valid JSON (not just
+  # malformed prose) must be rejected here identically to Python's json.loads(), not silently
+  # accepted as if the trailing document weren't there. See that function's header comment for
+  # the concrete cross-runtime divergence this closes.
+  if ! verdict_json="$(_pantheon_single_json "$candidate")"; then
     jq -nc --arg agent "$expected_agent" \
       --arg reason "no parseable JSON object found in provider output" \
       '{agent:$agent, color:"unverified", verdict:"UNVERIFIED", reason:$reason,

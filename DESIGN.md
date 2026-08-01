@@ -143,14 +143,20 @@ reasons, and only one of them is schema-checked:
 provider_run <model> <prompt-file>   # prints the agent's raw output to stdout, nonzero on failure
 ```
 
-- `claude.sh` — `claude -p` with a restricted tool set (Read, Grep, Glob, Bash) and a timeout.
-  Default lane; the only one integration-tested in v1.
+- `claude.sh` — `claude -p` with a tiered, execution-scoped tool set (Read, Grep, Glob, and a
+  Bash allowlist that depends on the `execution` setting — see "Security posture" below) and a
+  timeout. Default lane; the only one integration-tested in v1.
 - `codex.sh` — `codex exec` non-interactive.
 - `gemini.sh` — `gemini` CLI non-interactive prompt mode.
 - `cursor.sh` — `cursor-agent` headless.
 
 The gate never trusts a lane to be well-behaved: it extracts the trailing JSON object from
-stdout, validates it against the contract with `jq`, and treats any failure as UNVERIFIED.
+stdout, validates it against the contract with `jq`, and treats any failure as UNVERIFIED. That
+trailing object must be exactly one JSON document with nothing after it — trailing content that
+is itself valid JSON (a second object, array, or scalar, not just malformed prose) is rejected
+identically to malformed trailing content, matching what Python's `json.loads()` already
+enforces on its own; both runtimes' extractors implement this the same way (see "Two runtimes,
+one rule" below).
 Provider selection: `--provider <lane>` flag, else `provider=` in config, else `claude`.
 Prompts are built identically for every lane: persona file + a generated context block (diff
 range, base branch, house-rules file, output-contract reminder). No lane gets a private fork
@@ -248,6 +254,7 @@ base_branch=main         # merge base for the review diff
 rules_file=REVIEW_RULES.md
 spec_file=DESIGN.md      # governing spec, Apollo-only context; only-if-exists; empty disables
 agents=artemis apollo    # panel for the standard gate
+execution=readonly       # readonly (default) or trusted — see "Security posture"
 ```
 
 ## Security posture (kept from the private ancestor, by design)
@@ -257,9 +264,11 @@ agents=artemis apollo    # panel for the standard gate
   prompt or a shell command. Unsafe metadata → UNVERIFIED, not a crash. The CLI lane
   (`cli/review-gate`) validates HEAD_SHA and BASE_SHA before either is used; the published
   action (`action.yml`) validates both PR event-context SHAs in its own dedicated step, before
-  the base-pinned rules/spec reads or the docs-only diff check ever run — a `git show`/`git
-  diff` call built from an unvalidated SHA is exactly the shell-command-injection surface this
-  rule exists to close.
+  the base-pinned rules/spec reads or the docs-only diff check ever run; `action/review.yml`
+  (the vendored Way-A workflow) gained the same dedicated validation step when its own
+  base-pinned wrapper resolution was added (see below) — a `git show`/`git diff` call built
+  from an unvalidated SHA is exactly the shell-command-injection surface this rule exists to
+  close, on every lane now.
 - Model output is never interpolated into shell (`run:`) directly — it travels via files and
   env vars.
 - **Base-SHA-pinned context file reads.** `REVIEW_RULES.md` and the spec file (`DESIGN.md` by
@@ -291,12 +300,219 @@ agents=artemis apollo    # panel for the standard gate
   so consumers never need to grant `id-token: write` — that permission is only needed for
   claude-code-action's internal OIDC-token-exchange fallback, which it skips entirely once a
   `github_token` input is supplied.
+- **Tiered tool execution — read-only by default.** Every provider invocation's tool set is
+  scoped by an `execution` setting: `readonly` (the default — `gate.conf`'s `execution=`, the
+  CLI's `--execution` flag, or `action.yml`'s `execution` input) restricts Bash to exactly one
+  Claude Code permission-rule prefix — `Bash(<pantheon-git-readonly.sh's path> *)` — with
+  Read/Grep/Glob left unrestricted (already read-only by nature). `trusted` restores full Bash,
+  the pre-existing v1 behavior. Reviewing a fork PR's diff means reviewing 100%-attacker-
+  controlled content; an agent that prompt injection can steer into running an arbitrary shell
+  command is a code-execution primitive, not a review gate, so `readonly` is the default on
+  every surface that invokes a provider (`cli/providers/claude.sh`, `action.yml`,
+  `action/review.yml`) — `trusted` is an explicit, documented opt-in for own-repo/trusted-author
+  use only, never for reviewing a fork PR you don't control.
+  - **Round 1 (bare prefix) → round 2 (wrapper) — a real finding, self-caught.** The first
+    version of this tier used bare `Bash(git diff *)` / `Bash(git show *)` / `Bash(git log *)` /
+    `Bash(git status *)` patterns. A Codex review on this PR caught that a command-prefix match
+    has no understanding of git's own argument grammar: `Bash(git diff *)` also permits
+    `git diff --output=tracked-file` (git's own docs describe `--output <file>` as writing to a
+    file) and `git diff --ext-diff` (spawns an arbitrary external helper) — neither read-only in
+    any sense that matters, and a prefix match on a command the MODEL chose to type is not a
+    boundary when prompt injection is exactly what's steering the model. Fixed by routing
+    `readonly` through `cli/lib/pantheon-git-readonly.sh` instead: it validates the FULL argv
+    itself (subcommand must be exactly `diff`/`show`/`log`/`status`; every remaining argument
+    must be a plain ref/path/range — no flags of any kind, not even a per-subcommand "safe" list)
+    before ever calling real `git`, and forces a pager/editor/external-diff-free environment on
+    top. See that script's own header comment for the full rationale, including what it does and
+    does not claim to fix (Claude Code's own Bash-permission handling of CHAINED shell commands —
+    `cmd1 && cmd2`, `;`, `|` — is a property of the `claude` CLI itself, tracked upstream, not
+    something a wrapper script run from inside one permitted invocation can patch; this tier is
+    defense in depth on top of whatever the installed `claude` CLI provides there, not a
+    substitute for it).
+  - The CLI lane's wrapper ships alongside `cli/lib/execution.sh` and is picked up automatically
+    (`bootstrap.sh` and `install.sh` both vendor it — see "Layout" below). `action.yml` reads it
+    from its own checkout (`github.action_path`, no vendoring needed — that checkout is
+    review-pantheon's own trusted tree, never the reviewed PR's). `action/review.yml` (the
+    vendored, no-config-surface lane — see "Lane differences") is different: `install.sh` vendors
+    the wrapper INTO the target repo, and that repo's own checkout in this workflow pulls the
+    PR's own tree — so a naive `Bash(<path under $GITHUB_WORKSPACE> *)` rule would let a PR
+    simply replace the wrapper script with an arbitrary executable while the identical
+    permission-rule path still authorized running it (a Codex P1 finding, round 2). Fixed the
+    same way this repo already closes the identical class for `REVIEW_RULES.md`/`DESIGN.md`
+    base-pinning: a dedicated "Resolve read-only git wrapper (base-pinned)" step reads the
+    wrapper's content from the PR's **base** commit via `git show`, writes it to `$RUNNER_TEMP`
+    (never the checked-out working tree), and every `--allowedTools`/context-note reference
+    points at that resolved path — preceded by the same "Validate PR base/head SHAs" check
+    `action.yml` already has, newly added to this lane too. A Way-A installer who genuinely
+    needs `trusted` edits that vendored file directly, same as before.
+  - Every runtime's generated per-run prompt tells the agent to call the wrapper in place of raw
+    `git` when `readonly` is active (`cli/lib/execution.sh`'s `pantheon_execution_context_note`,
+    templated into all three prompt-builders — `cli/review-gate`'s `build_prompt()`,
+    `action/lib/build_prompt.sh`, and `action/review.yml`'s inline copy) — the persona files
+    themselves stay install-agnostic (DESIGN.md rule 4) and can't embed a path that differs per
+    install, so the per-run context block is where that substitution is told.
+  - Codex, Gemini, and Cursor's provider lanes have no equivalent tool-scoping mechanism in
+    their own CLIs as of v1, so this tiering currently applies to the Claude lane — the only
+    integration-tested one — across all three surfaces that invoke it; that gap is disclosed,
+    not silently assumed closed.
+  - **Round 3 — configured diff drivers, index writes, and permission-mode (fresh Codex/Apollo
+    evidence after round 2 landed).** Three more findings, all fixed in the wrapper/invocation
+    layer, none requiring another rethink of the shape above:
+    - Rejecting `--ext-diff` as an explicit argument doesn't stop a *configured* external diff
+      driver from firing on a plain, validation-passing `diff`/`show` — a `.gitattributes` entry
+      (`*.foo diff=evil`) plus a `diff.evil.command=...` config entry activates the driver
+      without the model ever typing `--ext-diff`. Codex reproduced this live against the
+      round-2 wrapper. Fixed by forcing `--no-ext-diff --no-textconv` onto every `diff`/`show`
+      call the wrapper makes — injected by the wrapper itself, not accepted from the model's
+      argv (still rejected as a flag like any other), so no config or attributes state the
+      target repo happens to carry can re-enable a driver or content filter. Reproduced-then-
+      fixed with a real helper script in `tests/test-git-readonly-wrapper.sh`.
+    - `git status` performs an optional index refresh that writes `.git/index` by default,
+      contradicting this tier's "never mutates the index" framing and able to race a concurrent
+      repo operation on a shared runner. Fixed with `GIT_OPTIONAL_LOCKS=0` in the wrapper's
+      forced environment (git's own documented mechanism for disabling optional lock-taking
+      operations) — verified with a real mtime-unchanged assertion, not just absence of an
+      error.
+    - **`--permission-mode dontAsk`, not left unset.** A live run of `action.yml` with no
+      explicit permission mode (an Apollo finding from this PR's own self-review, observed
+      first-hand during that very run) showed the wrapper's own invocation sitting unanswerable
+      while bare `git log`/`git diff` kept working — the inverse of the intended restriction.
+      Root cause, confirmed against Claude Code's own docs: a tool call matching `--allowedTools`
+      still goes through a permission decision that nothing can answer outside an interactive
+      terminal unless a mode says otherwise, while Claude Code separately treats a *built-in,
+      not-configurable* set of Bash commands — including "read-only forms of `git`" — as always-
+      approved **in every mode**, wrapper or no wrapper. `dontAsk` is documented as the mode for
+      "locked-down CI and scripts": it auto-denies anything not pre-approved and never waits for
+      input. Added to all three provider-invocation surfaces (`cli/providers/claude.sh`,
+      `action.yml`, `action/review.yml`), replacing the CLI lane's prior `--permission-mode
+      default` (whose own docs describe it as prompting on first use, not denying).
+    - **Honest consequence of that built-in bypass:** a bare `git diff`/`show`/`log`/`status`
+      with no flags can run without ever reaching `pantheon-git-readonly.sh` at all, on any
+      tier, because Claude Code itself always allows those — this is expected and fine (they're
+      genuinely read-only), but it means the wrapper's actual job is everything *beyond* that
+      built-in-safe set (any flag, any other subcommand), not "every git invocation routes
+      through it." The wrapper remains the enforcement point for that broader surface regardless
+      of what Claude Code's own undocumented internal classifier does or doesn't catch on its
+      own — an explicit, versioned, this-repo-owned guarantee instead of a dependency on
+      upstream behavior this repo can't audit.
+    - The very first PR that runs `install.sh` in a repo and adds `action/review.yml` + the
+      wrapper together has the wrapper at its own head but not yet at base — base-pinning
+      correctly refuses to read it from the working tree even for that PR (falling back "just
+      this once" would reopen the exact vulnerability base-pinning exists to close), so that
+      step fails loud with an explanation and a workaround (merge the bootstrap PR via another
+      path once) rather than either silently degrading or leaving an unexplained failure.
+  - **Round 4 — configured fsmonitor hooks, a config-key sweep, and the own-repo trusted
+    disposition.** One more Codex finding plus a deliberate audit pass, both closed in the
+    wrapper:
+    - A pathname-valued `core.fsmonitor` — git's own config docs define that as the path to an
+      external "fsmonitor hook" command — ran on a validation-passing `status`, **and** on plain
+      `diff` too (git consults the hook to speed up its working-tree scan regardless of which
+      read command triggered the scan); `GIT_OPTIONAL_LOCKS=0` did nothing to stop it, a
+      different mechanism entirely. Reproduced live by Codex, reproduced again here against a
+      real marker-writing hook before landing the fix, on both subcommands. Fixed by forcing
+      `-c core.fsmonitor=false` as a GLOBAL config override the wrapper injects itself, applied
+      to every subcommand (the hook is a property of the repository scan, not of any one
+      subcommand) — a `-c key=value` must precede the subcommand in git's own argument grammar,
+      which is exactly why the flag-refusal loop rejects the model ever supplying its own; the
+      wrapper's own overrides are trusted precisely because nothing the model supplies can reach
+      or alter them, a distinction now stated explicitly in the wrapper's own header comment.
+    - Swept git's config docs for every other key that names an executable and is reachable from
+      the four allowlisted subcommands with no explicit flag: `core.pager`/`core.editor` (already
+      closed by env + `-c`), `log.showSignature`+`gpg.program` (tested live — did not fire on the
+      git version this was verified against, forced `-c log.showSignature=false` anyway as
+      no-cost insurance), and confirmed `core.sshCommand`/`credential.helper`/`protocol.*.allow`
+      are genuinely unreachable — none of `diff`/`show`/`log`/`status` contact a remote, and
+      nothing network-capable (`fetch`, `pull`, `clone`, `push`, `ls-remote`, …) is on the
+      allowlist. That reachability claim is stated as a standing invariant in the wrapper's own
+      comment, not a one-time check: if a future change ever adds a networked subcommand to the
+      allowlist, it needs re-auditing. `difftool`/`mergetool`-only config (`difftool.*`,
+      `merge.tool`) is unreachable the same way — neither subcommand is allowlisted. Every
+      wrapper fixture that proves a config-driven bypass is closed also carries a negative
+      control in the same fixture repo (RAW git, same config, MUST fire the marker) —
+      the direct check on "did skip test coverage quietly rot into a check that can't fail" this
+      whole codebase already applies to itself elsewhere (its own review method: a check that
+      can't fail carries no information).
+    - **Own-repo disposition.** This repo's own CI self-test (`.github/workflows/ci.yml`'s
+      `composite-action-self-check` job) reviews review-pantheon's own PRs, from its own
+      checkout, opened by its own maintainer — precisely the own-repo/trusted-author case
+      `execution=trusted`'s own docs name as the exception to the readonly default. Set
+      explicitly on that one invocation; every other consumer of `action.yml` (reviewing someone
+      else's fork PR) is unaffected and still defaults to `readonly`.
+  - **Round 5 — trace-output-sink environment variables (Codex P2).** git's own docs define
+    `GIT_TRACE` and its siblings as trace-output sinks: set to an absolute path, git APPENDS
+    trace records there on every invocation — no flag, no config, just an inherited environment
+    variable. Reproduced live before fixing: `GIT_TRACE=<path to a tracked file>` pointed at a
+    file inside a real repo, run through the pre-fix wrapper, grew that file and left the
+    working tree dirty — a write, reachable purely from ambient environment (a debugging-enabled
+    CI runner, a shell that happened to have one of these set) rather than anything a hostile PR
+    controls directly. `GIT_TRACE2_EVENT`'s directory-sink form (a directory value creates a
+    per-process file inside it) is a distinct code path, reproduced and fixed the same way.
+    Fixed by unsetting every documented trace-output-sink variable in the wrapper's forced
+    environment: the general trace, the per-subsystem traces (fsmonitor, pack access, packet,
+    packfile, performance, refs, setup, shallow, curl and its verbose sibling
+    `GIT_CURL_VERBOSE`), and the Trace2 library's three sinks (human-readable, JSON event,
+    perf). Both trace mechanisms now carry a live fixture with a negative control (raw git DOES
+    write/create the marker; the wrapper does not), the same "not green-by-construction"
+    standard every config-driven-bypass fixture in this file already holds itself to.
+  - **Round 6 — a comprehensive exec/write-surface close, plus base-pinning `gate.conf`'s
+    `execution=` itself.** After five rounds of individual findings on the same wrapper, this
+    round did one exhaustive pass instead of another single patch:
+    - **`cli/lib/pantheon-git-readonly.sh`'s header comment is now the single canonical
+      enumeration** of every git config key, attribute, or environment variable that names an
+      executable or a write target, checked against git's own documentation for reachability
+      from the four allowlisted subcommands with no explicit model-supplied flag — a table of
+      vector → neutralization → verification status, plus a "not reachable" section (aliases,
+      remote-touching mechanisms) with the reasoning for why each is out of scope, stated as a
+      standing invariant, not a one-time check. Read that file directly rather than duplicating
+      the table here — this section only calls out what's new since Round 5.
+    - **Clean/smudge filters** (`filter.<name>.clean`, activated via `.gitattributes` —
+      distinct from the ext-diff/textconv machinery Round 2 closed): fire on a `diff` that
+      touches the WORKING TREE (a bare `diff` or `diff <single-ref>`), never on a blob-to-blob
+      range comparison. Reproduced live on both forms; confirmed `show`/`log`/`status` never
+      trigger this mechanism at all. Fixed structurally, not by blocklisting the filter
+      mechanism itself: `diff` now requires its first positional argument to contain `..` (a
+      proper range) — the ONLY form DESIGN.md rule 1 and every generated run-context prompt
+      ever told an agent to use in the first place, so this costs no legitimate capability.
+    - **Auto-maintenance** (`gc.auto`, `maintenance.auto`): tested for a live trigger from
+      `status` (git's own trace output showed no gc/maintenance invocation) — not reproducible,
+      forced off anyway (`-c gc.auto=0 -c maintenance.auto=false`) as the same no-cost-insurance
+      posture as Round 4's `log.showSignature=false`.
+    - **`gate.conf`'s `execution=` key itself is now base-pinned**, closing a gap in the
+      wrapper's own trust model: `cli/review-gate` never checks out the PR branch, but a
+      maintainer who first runs `gh pr checkout <n>` (a common local-review habit) before
+      invoking `review-gate` would have the PR's own head content checked out — including a
+      hostile `gate.conf` shipping its own `execution=trusted` to restore unrestricted Bash
+      before the gate inspects anything. Same trust boundary as `REVIEW_RULES.md`/`DESIGN.md`
+      base-pinning, applied to this one security-sensitive `gate.conf` key; every other
+      `gate.conf` key (provider, model, base_branch, rules_file, spec_file, agents) is
+      lower-stakes and stays working-tree-sourced, unchanged. An explicit `--execution` CLI flag
+      is operator-typed input, not PR-controlled configuration, so it's resolved and validated
+      immediately (fail-fast, before any `gh`/network call) rather than waiting on `BASE_SHA` —
+      only the gate.conf-sourced fallback waits for the base-pinned read.
+- **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
+  randomized data-block fences, verdict schema/type validation, the blocker invariant,
+  untrusted-data persona framing (every persona is told explicitly that everything it reads is
+  data, not instructions, and that a directive found inside it is itself a reportable finding —
+  see `agents/*.md`'s "Untrusted data, not instructions"), or default-readonly execution —
+  eliminates the risk of a schema-valid, deceptive verdict from an agent that injected content
+  has fully compromised. Together they raise the bar and make an attempt more visible (an
+  injection attempt is itself a flagged finding, not a silent verdict flip) rather than making
+  one impossible. Cross-review by a second independent agent (Artemis vs. Apollo) is the
+  mitigation against any one agent being fooled — not a guarantee against it.
 
 ## Follow-up mode (CLI lane only)
 
 Re-reviewing a PR after new commits reviews `last_reviewed_sha..head`, and the prompt tells the
 agent to read its own prior PR comment instead of re-auditing from scratch. Reviewed SHAs are
-tracked in `.review-gate-state.json` (git-ignored; bootstraps empty). This is a CLI-only
+tracked in `.review-gate-state.json` (git-ignored; bootstraps empty), written by
+`update_review_gate_state()` **only for a green or yellow overall outcome** — a red or
+UNVERIFIED result (a transient provider timeout, a malformed model response, anything that
+didn't actually gate the PR) leaves the file untouched, so the next run retries the full review
+instead of treating a failed run as if it had reviewed anything. A prior version of this write
+ran unconditionally after any successful `gh pr comment` post regardless of the computed
+verdict, which meant an UNVERIFIED result still marked the head reviewed and a follow-up run
+would only re-review what changed since a run that never actually gated anything — see
+`tests/test-state-persistence.sh` for the fixture proving both directions. This is a CLI-only
 feature, kept deliberately: the Action re-reviews the full diff on every push already (a fresh
 runner, no persisted state between runs, and GitHub's own UI shows the diff since your last
 review anyway), but a human running `review-gate` repeatedly against the same long-lived PR
@@ -312,7 +528,7 @@ identical tools. Differences are intentional, not oversights:
 | | CLI (`cli/review-gate`) | GitHub Action (`action/review.yml`) |
 |---|---|---|
 | Follow-up mode | Yes — incremental diff since last reviewed SHA (see above). | No — re-reviews the full diff on every push; no state persisted between runs. |
-| Configuration | `gate.conf` (provider, model, base branch, rules file, agent list). | None — twin panel (artemis, apollo) and `REVIEW_RULES.md` are hardcoded in the workflow. |
+| Configuration | `gate.conf` (provider, model, base branch, rules file, agent list, execution tier). | None — twin panel (artemis, apollo), `REVIEW_RULES.md`, and the read-only execution tier are hardcoded in the workflow. |
 | Provider choice | Pluggable lane (`--provider`, `cli/providers/*.sh`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
 | Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Still reads `REVIEW_RULES.md`/`DESIGN.md` straight from the checked-out working tree (this lane's inline "Build prompt" step is a third, hand-synced copy of the prompt-build logic — see "Layout" below — and wasn't brought forward in this fix). The published `action.yml` lane (a **different** file from this table's `action/review.yml` column) got the same base-pinning as the CLI. |
@@ -384,6 +600,15 @@ cli/lib/verdict.sh         extraction + verdict-decision (blocker invariant incl
                            sourced by cli/review-gate AND tests/test-verdict-decision.sh
 cli/lib/render_comment.sh  the combined-comment renderer — sourced by cli/review-gate AND
                            action/lib/combine_verdicts.sh (see "Combined PR comment" below)
+cli/lib/execution.sh       tiered tool-execution policy (readonly default, trusted opt-in) —
+                           sourced by cli/review-gate, exported to cli/providers/claude.sh via
+                           PANTHEON_ALLOWED_TOOLS; also sourced by action/lib/build_prompt.sh
+                           for the per-run execution context note (see "Security posture" above)
+cli/lib/pantheon-git-readonly.sh  the argv-validating read-only git wrapper the readonly tier
+                           routes Bash through instead of a bare command-prefix pattern —
+                           vendored by bootstrap.sh (CLI lane) and install.sh
+                           (.github/review-agents/, for action/review.yml); read in place by
+                           action.yml from its own checkout (see "Security posture" above)
 cli/providers/             provider lanes (claude, codex, gemini, cursor)
 action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
                            artifact-based result passing, fail-closed decision step
@@ -411,7 +636,16 @@ tests/                     tests/test-verdict-decision.sh — cross-runner fixtu
                            tests/test-prompt-assembly.sh — spec-aware Apollo prompt-assembly
                            fixture test across all three runtimes (action/lib/build_prompt.sh,
                            cli/review-gate's build_prompt(), action/review.yml's inline copy),
-                           including the cross-runner wording-identity check
+                           including the cross-runner wording-identity check and (Part F) the
+                           five-persona "Untrusted data" wording-identity check;
+                           tests/test-state-persistence.sh — extracts cli/review-gate's
+                           update_review_gate_state() verbatim and proves state is written only
+                           for a green/yellow outcome, never for red/unverified;
+                           tests/test-git-readonly-wrapper.sh — hostile/legit argv fixtures for
+                           cli/lib/pantheon-git-readonly.sh;
+                           tests/test-execution-tier.sh — unit + cross-surface-consistency
+                           fixtures for cli/lib/execution.sh and every file that computes an
+                           --allowedTools value
 install.sh                 idempotent installer into a target repo (refuses to clobber
                            customized files); does not install gate.conf; --claude/--cursor/
                            --codex/--gemini generate per-tool projections of agents/*.md for

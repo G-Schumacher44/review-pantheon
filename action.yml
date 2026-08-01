@@ -156,6 +156,18 @@ inputs:
       either way.
     required: false
     default: "true"
+  execution:
+    description: >-
+      Tool-execution tier for every underlying claude-code-action invocation: "readonly" (the
+      default) restricts Bash to a read-only git allowlist (diff/show/log/status) — Read/Grep/
+      Glob stay unrestricted, they're already read-only by nature. Reviewing a PR diff is
+      reviewing content that's 100% attacker-controlled on a fork, so this is the mechanical
+      backstop behind the personas' own "read-only" instructions (which prompt injection can
+      defeat, being prose). "trusted" restores full Bash, the pre-existing behavior — reserve it
+      for own-repo/trusted-author use only, never for reviewing a fork PR you don't control. See
+      DESIGN.md's "Security posture".
+    required: false
+    default: "readonly"
 
 runs:
   using: "composite"
@@ -208,10 +220,38 @@ runs:
         RULES_FILE: ${{ inputs.rules_file }}
         SPEC_FILE: ${{ inputs.spec_file }}
         MODEL: ${{ inputs.model }}
+        EXECUTION: ${{ inputs.execution }}
         ACTION_PATH: ${{ github.action_path }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
+
+        # Tiered execution (HIGH-1 fix — see the `execution` input's own description and
+        # DESIGN.md's "Security posture"). Fail loud on an unrecognized value rather than
+        # silently coercing to a guess — this is a security default, same posture as the
+        # auth-input assertion step above.
+        #
+        # readonly is routed through cli/lib/pantheon-git-readonly.sh (this action's own
+        # checkout at $ACTION_PATH — no vendoring needed, unlike action/review.yml below), not a
+        # bare `Bash(git diff *)`-style prefix pattern: a prefix match can't tell a read-only git
+        # subcommand from the same subcommand carrying a writing/execution-capable flag
+        # (`--output=`, `--ext-diff`) — a real Codex finding on this PR. See that script's own
+        # header comment and cli/lib/execution.sh's for the finding this closes.
+        GIT_WRAPPER="$ACTION_PATH/cli/lib/pantheon-git-readonly.sh"
+        case "$EXECUTION" in
+          readonly)
+            ALLOWED_TOOLS="Read,Grep,Glob,Bash($GIT_WRAPPER *)"
+            ;;
+          trusted)
+            ALLOWED_TOOLS='Read,Grep,Glob,Bash'
+            ;;
+          *)
+            echo "::error::review-pantheon: unknown execution tier '$EXECUTION' (must be 'readonly' or 'trusted')"
+            exit 1
+            ;;
+        esac
+        echo "execution=$EXECUTION" >> "$GITHUB_OUTPUT"
+        echo "git_wrapper_path=$GIT_WRAPPER" >> "$GITHUB_OUTPUT"
 
         if [ -z "$PERSONAS_PATH" ]; then
           PERSONAS_DIR="$ACTION_PATH/agents"
@@ -267,8 +307,22 @@ runs:
         JSON_SCHEMA='{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
         # JSON_SCHEMA above contains only double quotes, never a single quote, so wrapping it
-        # in single quotes here (for the CLI arg) needs no further escaping.
-        CLAUDE_ARGS="--allowedTools \"Read,Grep,Glob,Bash\"
+        # in single quotes here (for the CLI arg) needs no further escaping. ALLOWED_TOOLS
+        # (computed above from the execution tier) never contains a double quote either.
+        #
+        # --permission-mode dontAsk (not left unset, which is what this action did before this
+        # fix): Claude Code's own docs are explicit that without it, a tool call matching
+        # --allowedTools still goes through a permission decision that nothing can answer outside
+        # an interactive terminal — `dontAsk` is documented as the mode for "locked-down CI and
+        # scripts": it auto-denies anything not pre-approved and never waits for input.
+        # Empirically confirmed the gap this closes: a live run of this action (no explicit
+        # --permission-mode, matching the pre-fix state) reported the wrapper's own invocation as
+        # unreachable while Claude Code's separate, unconditional built-in "read-only forms of
+        # git" allowance kept bare `git log`/`git diff` working regardless — see
+        # cli/lib/execution.sh's header comment for the fuller writeup (a real Apollo finding,
+        # from this PR's own self-review, on this exact composite action).
+        CLAUDE_ARGS="--allowedTools \"$ALLOWED_TOOLS\"
+        --permission-mode dontAsk
         --json-schema '$JSON_SCHEMA'"
         if [ -n "$MODEL" ]; then
           CLAUDE_ARGS="$CLAUDE_ARGS
@@ -322,6 +376,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/artemis-prompt.md"
@@ -383,6 +439,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
         SPEC_FILE: ${{ steps.resolve.outputs.spec_file }}
         SPEC_PRESENT: ${{ steps.resolve.outputs.spec_present }}
         SPEC_CONTENT_PATH: ${{ steps.resolve.outputs.spec_content_path }}
@@ -444,6 +502,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/socrates-prompt.md"
@@ -497,6 +557,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/diogenes-prompt.md"
@@ -550,6 +612,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/plato-prompt.md"

@@ -23,3 +23,10 @@ spec_file=DESIGN.md
 
 # Space-separated list of agents to run for the standard gate.
 agents=artemis apollo
+
+# Tool-execution tier for the underlying `claude` invocation: "readonly" (the default) scopes
+# Bash to a read-only git allowlist (diff/show/log/status) so reviewing a hostile fork's diff
+# never grants an agent arbitrary command execution. "trusted" restores full Bash — reserve it
+# for own-repo/trusted-author use only, NEVER for reviewing a fork PR you don't control. See
+# DESIGN.md's "Security posture".
+execution=readonly

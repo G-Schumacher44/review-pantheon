@@ -65,6 +65,24 @@ else
   fail "tests/test-prompt-assembly.sh"
 fi
 
+if bash "$ROOT/tests/test-state-persistence.sh"; then
+  pass "tests/test-state-persistence.sh"
+else
+  fail "tests/test-state-persistence.sh"
+fi
+
+if bash "$ROOT/tests/test-git-readonly-wrapper.sh"; then
+  pass "tests/test-git-readonly-wrapper.sh"
+else
+  fail "tests/test-git-readonly-wrapper.sh"
+fi
+
+if bash "$ROOT/tests/test-execution-tier.sh"; then
+  pass "tests/test-execution-tier.sh"
+else
+  fail "tests/test-execution-tier.sh"
+fi
+
 # ---------------------------------------------------------------------------
 # Stage 3 — install.sh, all four flags, against a freshly git-init'ed scratch repo (not this
 # repo's own checkout — a clean-machine install has no relationship to review-pantheon's tree).
@@ -116,6 +134,8 @@ fi
 for f in \
   "cli/review-gate" \
   "cli/lib/verdict.sh" \
+  "cli/lib/render_comment.sh" \
+  "cli/lib/execution.sh" \
   "cli/providers/claude.sh" \
   "agents/artemis.md"
 do
@@ -125,6 +145,37 @@ do
     fail "bootstrap.sh: $f missing from prefix"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Stage 4a — every cli/lib/*.sh file cli/review-gate references must exist in the bootstrap
+# prefix. DERIVED from cli/review-gate itself (grepped for `PANTHEON_ROOT/cli/lib/<file>`
+# references — covers both `source`d files like cli/lib/execution.sh AND path-constructed-but-
+# not-sourced ones like cli/lib/pantheon-git-readonly.sh, which review-gate builds a path to and
+# execs indirectly rather than sourcing), never hand-copied into a second list here — a
+# hand-copied list is exactly how bootstrap.sh's manifest went stale the first time (a Codex P1
+# finding on this PR: cli/lib/execution.sh landed without being added to bootstrap.sh, and every
+# bootstrap install broke at `source cli/lib/execution.sh` until a follow-up commit caught it).
+# The hardcoded list in Stage 4 above stays as an explicit, human-readable baseline; this stage
+# is what actually prevents the NEXT new cli/lib/*.sh file from silently recurring the same gap.
+# ---------------------------------------------------------------------------
+section "Stage 4a: cli/lib/*.sh files review-gate references are all present in the bootstrap prefix (derived, not hand-copied)"
+
+REFERENCED_LIB_FILES="$(grep -oE 'PANTHEON_ROOT/cli/lib/[A-Za-z0-9_.-]+' "$ROOT/cli/review-gate" | sed -E 's#^PANTHEON_ROOT/##' | sort -u)"
+
+if [[ -n "$REFERENCED_LIB_FILES" ]]; then
+  pass "derived a non-empty cli/lib/*.sh reference list from cli/review-gate ($(printf '%s\n' "$REFERENCED_LIB_FILES" | wc -l | tr -d ' ') file(s))"
+else
+  fail "derived an EMPTY cli/lib/*.sh reference list from cli/review-gate — the grep pattern no longer matches; update it (review-gate's PANTHEON_ROOT/cli/lib/ reference shape changed)"
+fi
+
+while IFS= read -r rel; do
+  [[ -z "$rel" ]] && continue
+  if [[ -f "$SCRATCH_PREFIX/$rel" ]]; then
+    pass "bootstrap.sh: $rel (referenced by cli/review-gate) landed in prefix"
+  else
+    fail "bootstrap.sh: $rel is referenced by cli/review-gate but MISSING from the bootstrap prefix — add it to bootstrap.sh's manifest"
+  fi
+done <<< "$REFERENCED_LIB_FILES"
 
 if [[ -x "$SCRATCH_PREFIX/cli/review-gate" ]]; then
   pass "bootstrap.sh: review-gate is executable in prefix"
