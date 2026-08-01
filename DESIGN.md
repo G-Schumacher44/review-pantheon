@@ -803,10 +803,43 @@ tests/                     tests/test-verdict-decision.sh — cross-runner fixtu
                            cli/lib/pantheon-git-readonly.sh;
                            tests/test-execution-tier.sh — unit + cross-surface-consistency
                            fixtures for cli/lib/execution.sh and every file that computes an
-                           --allowedTools value
+                           --allowedTools value;
+                           tests/test-bootstrap-release.sh — bootstrap.sh's --version/release-
+                           fetch additions, unit-level: release-asset URL builders, sha256_of/
+                           verify_checksum (happy + mismatch/missing-entry refusal, structural
+                           proof the checksum check precedes any tar listing/extraction), and
+                           offline --version flag validation (bad format dies before any
+                           network attempt; well-formed-but-unfetchable fails loud via a
+                           stubbed curl, deterministic regardless of sandbox connectivity);
+                           tests/test-bootstrap-release-e2e.sh — the same --version lane,
+                           integration-level: a real (stubbed-curl-served, no live network)
+                           checksum-verified fetch all the way through extraction and install,
+                           plus the mismatch case proving nothing lands in --prefix; builds its
+                           fixture tarball with the identical explicit manifest
+                           .github/workflows/release.yml uses, and proves the PACKAGED install.sh
+                           actually runs successfully against a scratch target (not just that the
+                           files are present);
+                           tests/test-release-tag-gates.sh — release.yml's two tag-validation
+                           gates: the strict-semver regex (extracted from release.yml's source,
+                           not hand-copied) and the origin/main-ancestry check (git merge-base
+                           --is-ancestor, against a real scratch repo with a promoted and an
+                           unpromoted branch) that enforces RELEASING.md's dev->main-before-tag
+                           ceremony was actually followed
 install.sh                 idempotent installer into a target repo (refuses to clobber
                            customized files); does not install gate.conf; --claude/--cursor/
                            --codex/--gemini generate per-tool projections of agents/*.md for
                            in-session use (see "Generated per-tool projections" above)
+bootstrap.sh                user-level, repo-independent CLI install (Way B) — a single
+                           self-contained script (no shared lib, deliberately, since the
+                           curl|bash lane fetches it alone); --version vX.Y.Z pins the remote-
+                           fetch path to a tagged, checksum-verified GitHub Release instead of
+                           dev's current HEAD (see RELEASING.md and .github/workflows/
+                           release.yml below)
+.github/workflows/release.yml  tag-push (`v*.*.*`, strict-semver-validated) release gate: re-
+                           runs ci.yml's lint-and-test suite pinned at the tag, then builds the
+                           versioned CLI-surface tarball + SHA256SUMS and publishes both as a
+                           GitHub Release
+RELEASING.md                the operator's release ceremony — dev green, dev->main promotion
+                           PR, tagging main, moving the v1 major tag, post-release verification
 docs/                      anything that doesn't fit above
 ```

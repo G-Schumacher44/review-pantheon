@@ -1,6 +1,11 @@
 # examples/review-gate.yml — the whole install for the published-action lane. Copy to
 # .github/workflows/review-gate.yml — nothing else lands in your repo. See README.md's
 # "Option A — published action" and docs/SETUP.md's "Way C" for the setup checklist.
+#
+# `uses: G-Schumacher44/review-pantheon@v1` below resolves once this repo's first `v*.*.*` tag
+# has been cut and the `v1` major tag moved to point at it (see RELEASING.md at repo root) — the
+# tag doesn't exist yet on a brand-new checkout of this repo. Nothing to do here; this note is
+# just so a `@v1` 404 before that point reads as "not released yet," not as a typo.
 name: review-pantheon
 
 on:

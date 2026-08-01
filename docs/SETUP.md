@@ -112,6 +112,11 @@ this contract can't tell "hand-edited" from "stale": a file left over from an ol
 same way, so it won't pick up upstream fixes on its own — upgrading an existing prefix means
 removing the file (or the whole prefix) first, then re-running.
 
+Want to pin to a specific tagged release instead of tracking `dev`'s current HEAD? Add
+`--version vX.Y.Z` to the remote-fetch (`curl | bash`) form above — it fetches that release's
+checksummed tarball and verifies it (`sha256sum`/`shasum`) before extracting, dying loud on a
+mismatch rather than installing an unverified archive. See RELEASING.md for how tags get cut.
+
 </details>
 
 <details open>
