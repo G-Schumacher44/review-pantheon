@@ -131,6 +131,16 @@ section "Hostile invocations — diff without a range (working-tree-touching for
 refuse "bare 'diff' (no arguments — compares working tree to index)" diff
 refuse "'diff HEAD' (single ref, no range — compares working tree to that ref)" diff HEAD
 refuse "'diff -- README.md' (no range, path only — still working-tree-touching)" diff -- README.md
+refuse "'diff --' (bare caller-supplied pathspec separator, no other args)" diff --
+
+section "Hostile invocations — caller-supplied '--' (Codex round 2 on issue #7)"
+
+refuse "'diff -- <range>' (leading '--' shifts a validated range into pathspec position)" \
+  diff -- "HEAD~1...HEAD"
+refuse "'show -- HEAD' (caller-supplied '--' refused for every subcommand, not just diff)" \
+  show -- HEAD
+refuse "'log -- HEAD' (same, on log)" log -- HEAD
+refuse "'status --' (same, on status)" status --
 
 section "Legit invocations — exactly what DESIGN.md rule 1 tells personas to use"
 
@@ -152,8 +162,27 @@ echo "second" >> "$SCRATCH_REPO/file.txt"
 git -C "$SCRATCH_REPO" commit -q -am "second commit"
 
 accept_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD (bare range)" diff "HEAD~1...HEAD"
-accept_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD -- file.txt (range + -- pathspec separator + path)" \
+
+# Round 2 (Codex, issue #7): the 'range + -- pathspec separator + path' form this suite used to
+# accept is now REFUSED outright — diff takes exactly one argument and the caller can never supply
+# '--' at all (see the wrapper's EXEC/WRITE-SURFACE MATRIX 'caller-supplied --' row for why: a
+# validated range re-forwarded alongside a caller-supplied '--' gets parsed by real git as a
+# pathspec, not a revision, even though both sides independently resolve as real commits).
+refuse_in() {
+  local dir="$1" name="$2"; shift 2
+  local out status
+  out="$(cd "$dir" && "$WRAPPER" "$@" 2>&1)"
+  status=$?
+  if [[ $status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$out"; then
+    pass "$name: refused ($out)"
+  else
+    fail "$name: NOT refused (status=$status, output: $out)"
+  fi
+}
+refuse_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD -- file.txt (range + -- pathspec separator + path — no longer supported)" \
   diff "HEAD~1...HEAD" -- file.txt
+refuse_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD file.txt (range + a second positional, no '--' — still refused, diff takes exactly one argument)" \
+  diff "HEAD~1...HEAD" file.txt
 
 rm -rf "$SCRATCH_REPO"
 
@@ -447,6 +476,263 @@ else
 fi
 
 rm -rf "$TRACE2_REPO" "$TRACE2_MARKER_DIR_RAW" "$TRACE2_MARKER_DIR_WRAPPED"
+
+# ---------------------------------------------------------------------------
+# `..`-substring range spoofed by a same-named path (issue #7 checklist item 3 / Codex P1 on PR
+# #5). The pre-fix wrapper's diff-range check was a substring test (`*..*`) — it accepted the
+# STRING "foo..bar" as a "range" whether or not "foo" and "bar" were real revisions. A tracked
+# working-tree file literally named `foo..bar`, with a configured clean filter, exploits exactly
+# that: git's own disambiguation rule falls back to treating a token that doesn't resolve as a
+# revision as a PATHSPEC when it names an existing path, so `diff foo..bar` becomes a working-tree
+# diff of that one file — reopening the clean-filter path the original `..`-substring check was
+# meant to close in the first place. The fix replaces the substring check with real revspec
+# validation (`git rev-parse --verify --quiet <side>^{commit}` on both sides): "foo" and "bar"
+# don't resolve to commits, so the wrapper refuses the whole invocation before git ever runs.
+# ---------------------------------------------------------------------------
+section "'..'-substring range spoofed by a same-named path (foo..bar as a tracked file + clean filter)"
+
+SPOOF_REPO="$(mktemp -d)"
+git -C "$SPOOF_REPO" init -q
+git -C "$SPOOF_REPO" config user.email "test@example.com"
+git -C "$SPOOF_REPO" config user.name "test"
+printf 'a\n' > "$SPOOF_REPO/foo..bar"
+git -C "$SPOOF_REPO" add -- "foo..bar"
+git -C "$SPOOF_REPO" commit -q -m first
+
+SPOOF_MARKER="$(mktemp -u)"
+rm -f "$SPOOF_MARKER"
+SPOOF_SCRIPT="$(mktemp)"
+cat > "$SPOOF_SCRIPT" <<EOF
+#!/bin/sh
+touch "$SPOOF_MARKER"
+cat
+EOF
+chmod +x "$SPOOF_SCRIPT"
+git -C "$SPOOF_REPO" config "filter.evilspoof.clean" "$SPOOF_SCRIPT"
+echo "foo..bar filter=evilspoof" > "$SPOOF_REPO/.gitattributes"
+printf 'modified working-tree content\n' > "$SPOOF_REPO/foo..bar"
+
+# Negative control: RAW git, same repo, same filter, `diff foo..bar` (git falls back to treating
+# the unparseable "foo..bar" revision as the existing same-named pathspec) MUST fire the marker —
+# proving the fixture is live, and reproducing exactly what the pre-fix wrapper's `*..*` substring
+# check would have let straight through (the check has no idea "foo..bar" fails to resolve as a
+# revision — it only sees the substring and accepts it, then forwards it verbatim to real git,
+# which is precisely this raw-git call).
+rm -f "$SPOOF_MARKER"
+( cd "$SPOOF_REPO" && git diff "foo..bar" >/dev/null 2>&1 )
+if [[ -f "$SPOOF_MARKER" ]]; then
+  pass "negative control: RAW git (no wrapper) treats 'foo..bar' as the same-named PATH and fires the configured clean filter — fixture is live, and this is exactly what the pre-fix substring-only check would have forwarded to"
+else
+  fail "negative control FAILED: raw git did not fire the configured clean filter via 'diff foo..bar' at all — this fixture is not exercising anything, every assertion below is meaningless"
+fi
+
+# The current (fixed) wrapper must REFUSE this outright — "foo" and "bar" don't resolve to real
+# commits via 'git rev-parse --verify --quiet', so it never reaches real git at all.
+rm -f "$SPOOF_MARKER"
+refuse_out="$(cd "$SPOOF_REPO" && "$WRAPPER" diff "foo..bar" 2>&1)"
+refuse_status=$?
+if [[ $refuse_status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$refuse_out" && [[ ! -f "$SPOOF_MARKER" ]]; then
+  pass "wrapper refuses 'diff foo..bar' (a tracked path, not a real revision range) before git ever runs — clean filter never fires ($refuse_out)"
+else
+  fail "wrapper did NOT refuse 'diff foo..bar' as expected (status=$refuse_status, marker present=$([[ -f "$SPOOF_MARKER" ]] && echo yes || echo no), output: $refuse_out) — '..'-substring-range regression"
+fi
+
+rm -f "$SPOOF_MARKER" "$SPOOF_SCRIPT"
+rm -rf "$SPOOF_REPO"
+
+# ---------------------------------------------------------------------------
+# Caller-supplied '--' shifts a REVSPEC-VALIDATED range into pathspec position (Codex round 2 on
+# issue #7, found against this PR's own round-1 fix). Revspec-verifying both sides of a range is
+# NOT sufficient on its own: `git diff -- A..B`, forwarded verbatim by the round-1 wrapper, gets
+# parsed by real git as a PURE PATHSPEC (because of the leading `--`), not as a revision — even
+# though A and B independently resolve as real commits via `rev-parse --verify`. A tracked
+# working-tree file literally named `<A>..<B>` (trivially constructable: any two real ancestor
+# commit SHAs) plus a configured clean filter reopens the exact clean-filter RCE this wrapper
+# exists to close, reached through argument POSITION (a caller-supplied `--`) rather than argument
+# CONTENT. Fixed by never letting the caller supply `--` at all (any subcommand) and capping diff
+# at exactly one positional argument, so there is no pathspec slot for the wrapper's own trailing
+# `--` (appended after the validated range on exec) to ever scope onto.
+# ---------------------------------------------------------------------------
+section "Caller-supplied '--' shifts a validated range into pathspec position (Codex round 2)"
+
+BOUNDARY_REPO="$(mktemp -d)"
+git -C "$BOUNDARY_REPO" init -q
+git -C "$BOUNDARY_REPO" config user.email "test@example.com"
+git -C "$BOUNDARY_REPO" config user.name "test"
+printf 'a\n' > "$BOUNDARY_REPO/a.txt"
+git -C "$BOUNDARY_REPO" add a.txt
+git -C "$BOUNDARY_REPO" commit -q -m first
+BOUNDARY_SHA1="$(git -C "$BOUNDARY_REPO" rev-parse HEAD)"
+printf 'b\n' > "$BOUNDARY_REPO/a.txt"
+git -C "$BOUNDARY_REPO" commit -q -am second
+BOUNDARY_SHA2="$(git -C "$BOUNDARY_REPO" rev-parse HEAD)"
+
+BOUNDARY_SPOOF_PATH="${BOUNDARY_SHA1}..${BOUNDARY_SHA2}"
+printf 'a\n' > "$BOUNDARY_REPO/$BOUNDARY_SPOOF_PATH"
+git -C "$BOUNDARY_REPO" add -- "$BOUNDARY_SPOOF_PATH"
+git -C "$BOUNDARY_REPO" commit -q -m "add spoof path"
+
+BOUNDARY_MARKER="$(mktemp -u)"
+rm -f "$BOUNDARY_MARKER"
+BOUNDARY_SCRIPT="$(mktemp)"
+cat > "$BOUNDARY_SCRIPT" <<EOF
+#!/bin/sh
+touch "$BOUNDARY_MARKER"
+cat
+EOF
+chmod +x "$BOUNDARY_SCRIPT"
+git -C "$BOUNDARY_REPO" config "filter.evilboundary.clean" "$BOUNDARY_SCRIPT"
+echo "$BOUNDARY_SPOOF_PATH filter=evilboundary" > "$BOUNDARY_REPO/.gitattributes"
+printf 'modified working-tree content\n' > "$BOUNDARY_REPO/$BOUNDARY_SPOOF_PATH"
+
+# Negative control: RAW git, `--no-ext-diff --no-textconv -- <A..B>` (exactly what this PR's
+# round-1 wrapper forwarded to for `diff -- <A..B>`) MUST fire the marker — proving both that the
+# fixture is live AND that the round-1 wrapper (which only revspec-validated the range and let
+# caller-supplied '--' straight through) was genuinely vulnerable to this shape.
+rm -f "$BOUNDARY_MARKER"
+( cd "$BOUNDARY_REPO" && git diff --no-ext-diff --no-textconv -- "$BOUNDARY_SPOOF_PATH" >/dev/null 2>&1 )
+if [[ -f "$BOUNDARY_MARKER" ]]; then
+  pass "negative control: RAW git 'diff -- <A..B>' (both sides real commits) parses it as a PATHSPEC, not a range, and fires the configured clean filter — fixture is live, and this is exactly what the round-1 wrapper forwarded to"
+else
+  fail "negative control FAILED: raw git did not fire the configured clean filter via 'diff -- <A..B>' at all — this fixture is not exercising anything, every assertion below is meaningless"
+fi
+
+# The current (round-2-fixed) wrapper must REFUSE 'diff -- <A..B>' outright — the caller can never
+# supply '--' at all, for any subcommand.
+rm -f "$BOUNDARY_MARKER"
+boundary_out="$(cd "$BOUNDARY_REPO" && "$WRAPPER" diff -- "$BOUNDARY_SPOOF_PATH" 2>&1)"
+boundary_status=$?
+if [[ $boundary_status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$boundary_out" && [[ ! -f "$BOUNDARY_MARKER" ]]; then
+  pass "wrapper refuses 'diff -- <A..B>' (caller-supplied '--') before git ever runs — clean filter never fires ($boundary_out)"
+else
+  fail "wrapper did NOT refuse 'diff -- <A..B>' as expected (status=$boundary_status, marker present=$([[ -f "$BOUNDARY_MARKER" ]] && echo yes || echo no), output: $boundary_out) — caller-supplied-'--' regression"
+fi
+
+# Two-argument form (no explicit '--', just a second positional) must also be refused — diff
+# takes exactly one argument, so there is no pathspec slot even without a caller-supplied '--'.
+rm -f "$BOUNDARY_MARKER"
+boundary_out2="$(cd "$BOUNDARY_REPO" && "$WRAPPER" diff "$BOUNDARY_SPOOF_PATH" "$BOUNDARY_SPOOF_PATH" 2>&1)"
+boundary_status2=$?
+if [[ $boundary_status2 -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$boundary_out2" && [[ ! -f "$BOUNDARY_MARKER" ]]; then
+  pass "wrapper refuses a two-argument 'diff <A..B> <A..B>' — exactly-one-argument enforcement closes this even without an explicit '--' ($boundary_out2)"
+else
+  fail "wrapper did NOT refuse the two-argument form as expected (status=$boundary_status2, marker present=$([[ -f "$BOUNDARY_MARKER" ]] && echo yes || echo no), output: $boundary_out2)"
+fi
+
+# By contrast, the legit single-argument range form (same repo, same filter, no '--') must still
+# work AND still not fire the filter — real git prefers the revision interpretation when both
+# sides resolve and there's no '--' forcing pathspec position.
+rm -f "$BOUNDARY_MARKER"
+( cd "$BOUNDARY_REPO" && "$WRAPPER" diff "${BOUNDARY_SHA1}...${BOUNDARY_SHA2}" >/dev/null 2>&1 )
+boundary_legit_status=$?
+if [[ $boundary_legit_status -eq 0 ]] && [[ ! -f "$BOUNDARY_MARKER" ]]; then
+  pass "wrapper still accepts the legit single-argument range form (no '--') and the filter does not fire"
+else
+  fail "wrapper's legit single-argument range form regressed (status=$boundary_legit_status, marker present=$([[ -f "$BOUNDARY_MARKER" ]] && echo yes || echo no))"
+fi
+
+rm -f "$BOUNDARY_MARKER" "$BOUNDARY_SCRIPT"
+rm -rf "$BOUNDARY_REPO"
+
+# ---------------------------------------------------------------------------
+# GIT_REDIRECT_STDOUT / GIT_REDIRECT_STDERR (issue #7 checklist item 2). git's own docs describe
+# these as a Git for Windows mechanism: set to an absolute path, git.exe redirects its own
+# stdout/stderr handles there. On this platform's git, they are a documented no-op (confirmed
+# below) — so unlike every other fixture in this file, there is no live marker-file proof
+# available here; that's not a gap in this fixture, it's the honest shape of a Windows-only
+# mechanism exercised from non-Windows CI. What CAN be verified on any platform: (1) the wrapper's
+# source actually scrubs both variables, structurally, and (2) plain git on THIS platform really
+# does ignore them (the "why no live proof" claim is itself checked, not just asserted).
+# ---------------------------------------------------------------------------
+section "GIT_REDIRECT_STDOUT / GIT_REDIRECT_STDERR (Git for Windows sinks — structural + platform note)"
+
+# The unset statement spans multiple lines via trailing backslash continuations, so join them
+# into one logical line first rather than requiring both variable names on the same physical line.
+WRAPPER_JOINED="$(sed -e ':a' -e 'N' -e '$!ba' -e 's/\\\n[[:space:]]*/ /g' "$WRAPPER")"
+if grep -qE 'unset[^#]*GIT_REDIRECT_STDOUT' <<<"$WRAPPER_JOINED" && \
+   grep -qE 'unset[^#]*GIT_REDIRECT_STDERR' <<<"$WRAPPER_JOINED"; then
+  pass "wrapper source scrubs both GIT_REDIRECT_STDOUT and GIT_REDIRECT_STDERR in its unset block"
+else
+  fail "wrapper source does NOT scrub GIT_REDIRECT_STDOUT/GIT_REDIRECT_STDERR — issue #7 item 2 unaddressed"
+fi
+
+REDIRECT_REPO="$(mktemp -d)"
+git -C "$REDIRECT_REPO" init -q
+git -C "$REDIRECT_REPO" config user.email "test@example.com"
+git -C "$REDIRECT_REPO" config user.name "test"
+printf 'a\n' > "$REDIRECT_REPO/f.txt"
+git -C "$REDIRECT_REPO" add f.txt
+git -C "$REDIRECT_REPO" commit -q -m first
+
+REDIRECT_MARKER="$(mktemp -u)"
+rm -f "$REDIRECT_MARKER"
+( cd "$REDIRECT_REPO" && GIT_REDIRECT_STDOUT="$REDIRECT_MARKER" git show HEAD --stat >/dev/null 2>&1 )
+if [[ -f "$REDIRECT_MARKER" ]]; then
+  pass "platform note: this platform's git DOES honor GIT_REDIRECT_STDOUT (unexpected — treat the scrub above as load-bearing here too, not just Windows insurance)"
+else
+  echo "NOTE this platform's git ignores GIT_REDIRECT_STDOUT (no marker file created) — matches git's own docs describing it as Windows-only; the live half of this fixture cannot fire here by design, the structural check above is the real assertion on this platform"
+fi
+
+rm -f "$REDIRECT_MARKER"
+rm -rf "$REDIRECT_REPO"
+
+# ---------------------------------------------------------------------------
+# GIT_NO_LAZY_FETCH (issue #7 checklist item 1). In a partial clone (--filter=blob:none), reading
+# an object git doesn't have locally normally triggers a silent on-demand fetch from the
+# configured remote AND writes the fetched pack into .git/objects — a network round-trip and a
+# write, from a subcommand this wrapper's whole premise is "no transport, no write." Reproduced
+# live against a local file:// remote (exercises the identical lazy-fetch code path git uses for
+# any remote, no real network required): a fresh bare partial clone, reading the tip blob with
+# GIT_NO_LAZY_FETCH unset grows .git/objects; the wrapper (which forces GIT_NO_LAZY_FETCH=1) must
+# fail closed instead — the read errors out, but nothing is fetched or written.
+# ---------------------------------------------------------------------------
+section "GIT_NO_LAZY_FETCH (partial-clone lazy fetch forced off, no object write on a missing blob)"
+
+count_objects() { find "$1" -type f 2>/dev/null | wc -l | tr -d ' '; }
+
+LAZY_ORIGIN="$(mktemp -d)"
+git -C "$LAZY_ORIGIN" init -q
+git -C "$LAZY_ORIGIN" config user.email "test@example.com"
+git -C "$LAZY_ORIGIN" config user.name "test"
+git -C "$LAZY_ORIGIN" config uploadpack.allowFilter true
+git -C "$LAZY_ORIGIN" config uploadpack.allowAnySHA1InWant true
+printf 'big content\n' > "$LAZY_ORIGIN/big.txt"
+git -C "$LAZY_ORIGIN" add big.txt
+git -C "$LAZY_ORIGIN" commit -q -m first
+
+LAZY_CLONE_RAW="$(mktemp -d)"
+rm -rf "$LAZY_CLONE_RAW"
+git clone -q --bare --filter=blob:none "file://$LAZY_ORIGIN" "$LAZY_CLONE_RAW" 2>/dev/null
+
+before_raw="$(count_objects "$LAZY_CLONE_RAW/objects")"
+( cd "$LAZY_CLONE_RAW" && env -u GIT_NO_LAZY_FETCH git cat-file -p "HEAD:big.txt" >/dev/null 2>&1 )
+after_raw="$(count_objects "$LAZY_CLONE_RAW/objects")"
+if [[ "$after_raw" -gt "$before_raw" ]]; then
+  pass "negative control: RAW git (GIT_NO_LAZY_FETCH unset) lazy-fetches and WRITES the missing blob object on a plain read ($before_raw -> $after_raw objects in .git/objects) — fixture is live, matching the pre-fix wrapper (which set no such variable and forwarded straight to this same behavior)"
+else
+  fail "negative control FAILED: raw git did not grow .git/objects at all ($before_raw -> $after_raw) — this fixture is not exercising anything, the assertion below is meaningless"
+fi
+
+LAZY_CLONE_WRAP="$(mktemp -d)"
+rm -rf "$LAZY_CLONE_WRAP"
+git clone -q --bare --filter=blob:none "file://$LAZY_ORIGIN" "$LAZY_CLONE_WRAP" 2>/dev/null
+
+before_wrap="$(count_objects "$LAZY_CLONE_WRAP/objects")"
+( cd "$LAZY_CLONE_WRAP" && "$WRAPPER" show "HEAD:big.txt" >/dev/null 2>&1 )
+after_wrap="$(count_objects "$LAZY_CLONE_WRAP/objects")"
+if [[ "$after_wrap" == "$before_wrap" ]]; then
+  pass "wrapper-run 'show HEAD:big.txt' against a partial clone with the blob missing left .git/objects unchanged ($before_wrap objects) — GIT_NO_LAZY_FETCH=1 forced by the wrapper closes the lazy-fetch write (the read itself fails closed, which is correct: no object, no fetch)"
+else
+  fail "wrapper-run 'show HEAD:big.txt' against a partial clone GREW .git/objects ($before_wrap -> $after_wrap) — GIT_NO_LAZY_FETCH regression"
+fi
+
+if grep -q '^export GIT_NO_LAZY_FETCH=1$' "$WRAPPER"; then
+  pass "wrapper source forces 'export GIT_NO_LAZY_FETCH=1' in its environment block"
+else
+  fail "wrapper source does NOT force GIT_NO_LAZY_FETCH=1 anywhere — issue #7 item 1 unaddressed"
+fi
+
+rm -rf "$LAZY_ORIGIN" "$LAZY_CLONE_RAW" "$LAZY_CLONE_WRAP"
 
 echo
 echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"

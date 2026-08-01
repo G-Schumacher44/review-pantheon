@@ -17,14 +17,25 @@
 #   - subcommand (argv[1]) must be exactly one of: diff, show, log, status — the four names
 #     DESIGN.md rule 1 tells personas to use. Anything else, including a `-c` or other
 #     global-flag-shaped token in that position, is refused outright.
-#   - every remaining argument must be a plain value (a ref, a path, a range like `base...head`)
-#     or the bare `--` pathspec separator. NO flag of any kind is permitted — not a
-#     per-subcommand allowlist of "safe-looking" flags, a flat refusal, because git's own flag
-#     grammar is large, subcommand-context-dependent, and not this script's job to re-implement
-#     correctly. An argument this wrapper doesn't recognize fails closed.
-#   - `diff` additionally requires its first positional argument to contain `..` (a proper range
-#     — `A..B` or `A...B`). See the EXEC/WRITE-SURFACE MATRIX's "clean/smudge filters" row for
-#     why: this is a structural closure, not a blocklist entry.
+#   - every remaining argument must be a plain value (a ref, a path, a range like `base...head`).
+#     NO flag of any kind is permitted, and — as of the caller-supplied-`--` closure below — NOT
+#     the bare `--` pathspec separator either: not a per-subcommand allowlist of "safe-looking"
+#     flags, a flat refusal, because git's own flag grammar is large, subcommand-context-dependent,
+#     and not this script's job to re-implement correctly. An argument this wrapper doesn't
+#     recognize fails closed.
+#   - `diff` additionally requires its first positional argument to be a real revision range
+#     (`A..B` or `A...B`) where BOTH `A` and `B` independently resolve via `git rev-parse --verify
+#     --quiet <side>^{commit}` — containing the substring `..` is necessary but not sufficient. See
+#     the EXEC/WRITE-SURFACE MATRIX's "clean/smudge filters" and "`..`-substring range spoofed by a
+#     same-named path" rows for why: this is a structural closure (verify it is really a commit
+#     range before git ever runs), not a blocklist/pattern-match entry — a tracked working-tree
+#     path literally named `foo..bar` also contains `..` and must be REFUSED, not diffed.
+#   - `diff` additionally accepts EXACTLY ONE positional argument — no second positional, no
+#     pathspec, ever. See the EXEC/WRITE-SURFACE MATRIX's "caller-supplied `--`" row: revspec
+#     verification alone is not sufficient, because a validated range re-forwarded to real git
+#     alongside a caller-supplied `--` gets parsed as a pathspec instead of a revision — the
+#     wrapper closes this by never letting the caller supply `--` at all (previous bullet) AND by
+#     never giving diff a second argument slot for a pathspec to occupy in the first place.
 #
 # EXEC/WRITE-SURFACE MATRIX — every git config key, attribute, or environment variable that
 # names an executable or a write target, checked against git's own documentation for whether an
@@ -45,9 +56,32 @@
 #                                                            invoke the filter machinery.
 #                                                            show/log/status confirmed
 #                                                            NOT to trigger this at all.
+#   `..`-substring range spoofed    diff                  each side resolved via          live
+#     by a same-named path (e.g. a                           `git rev-parse --verify
+#     tracked file literally named                           --quiet <side>^{commit}`
+#     `foo..bar` — git's own                                 BEFORE diff runs — real
+#     disambiguation falls back to                            revspec validation, not a
+#     treating it as a pathspec)                              substring match; a side that
+#                                                              fails to resolve is refused
+#   Caller-supplied `--` shifts a   diff (a validated       caller can NEVER supply `--`     live
+#     REVSPEC-VALIDATED range into   range re-forwarded as    (refused for every subcommand,
+#     PATHSPEC position (`git diff   `git diff -- A..B`       not just diff, in the top-level
+#     -- A..B` parses `A..B` as a    even though A and B      argv-validation loop); diff also
+#     pathspec, not a revision,      independently resolve    takes EXACTLY ONE positional
+#     even when both sides resolve   as real commits)          argument (no room for a second,
+#     via rev-parse — Codex round                              pathspec-shaped one even
+#     2 on issue #7)                                           without an explicit `--`); the
+#                                                              wrapper appends its OWN trailing
+#                                                              `--` after the validated range,
+#                                                              never a caller-influenced one
 #   core.fsmonitor (hook pathname)  status, diff, any    -c core.fsmonitor=false          live
 #                                     working-tree scan
 #   Optional index-lock write       status                GIT_OPTIONAL_LOCKS=0            live
+#   Partial-clone lazy fetch of     diff, show, log (any  GIT_NO_LAZY_FETCH=1 (forced     live
+#     missing promisor objects       object access in a     env) — the read fails closed
+#     (a remote round-trip +        partial clone)          with no object written
+#     `.git/objects` pack writes,
+#     from an allowlisted READ)
 #   core.pager / $PAGER             any (paginated out)  GIT_PAGER=cat, PAGER=cat,        reasoning
 #                                                            -c core.pager=cat
 #   core.editor / $EDITOR           none of the four     GIT_EDITOR=true,                 defense
@@ -57,6 +91,14 @@
 #                                                                                            not repro'd
 #   GIT_TRACE and siblings           any                   unset (see full list below)     live
 #     (trace-output-sink env vars)
+#   GIT_REDIRECT_STDOUT /            any (Windows-only     unset (alongside the             structural
+#     GIT_REDIRECT_STDERR (a Git      redirection sink)      GIT_TRACE* block below)           (Windows-
+#     for Windows-only sink — same                                                             only; a
+#     inherited-env class as                                                                   no-op on
+#     GIT_TRACE*)                                                                               this
+#                                                                                                platform's
+#                                                                                                git per
+#                                                                                                local repro)
 #   core.hooksPath (standard hooks) none of the four      -c core.hooksPath=/dev/null      defense
 #                                     invoke a tracked                                       in depth
 #                                     hook under normal
@@ -135,38 +177,31 @@ esac
 
 for arg in "$@"; do
   case "$arg" in
-    --) ;; # the pathspec separator — inert on its own, no config/exec/output semantics
-    -*) die "argument '$arg' is not permitted — this wrapper allows plain refs/paths/ranges only, no flags of any kind" ;;
+    -*) die "argument '$arg' is not permitted — this wrapper allows plain refs/paths/ranges only, no flags of any kind, and no caller-supplied '--' pathspec separator either (the wrapper owns the '--' boundary itself — see the EXEC/WRITE-SURFACE MATRIX's 'caller-supplied --' row)" ;;
     *) ;;
   esac
 done
 
-# `diff` must be given a proper range (contains `..`) — see the EXEC/WRITE-SURFACE MATRIX above,
-# "clean/smudge filters" row. A bare `diff` or `diff <single-ref>` compares the WORKING TREE
-# (not just repository objects) against the index or that ref, and git applies any configured
-# `filter.<name>.clean` command to convert the dirty working-tree file before comparing —
-# reproduced live. A proper range (`A..B` / `A...B`) never touches the working tree at all — git
-# compares two repository objects directly — which is also the ONLY form DESIGN.md rule 1 and
-# every generated run-context prompt ever tell an agent to use (`git diff <base>...<branch>`),
-# so requiring one costs no legitimate capability.
-if [[ "$subcommand" == "diff" ]]; then
-  first_positional=""
-  for arg in "$@"; do
-    [[ "$arg" == "--" ]] && continue
-    first_positional="$arg"
-    break
-  done
-  [[ -n "$first_positional" && "$first_positional" == *..* ]] \
-    || die "diff requires a range argument containing '..' or '...' (e.g. 'base...head') — a bare 'diff' or a single ref compares against the working tree, which this wrapper does not allow (working-tree comparisons can trigger a configured clean/smudge filter)"
-fi
-
 # Force a safe environment regardless of whatever the caller's shell already has set — see the
-# EXEC/WRITE-SURFACE MATRIX above for what each closes.
+# EXEC/WRITE-SURFACE MATRIX above for what each closes. Deliberately done BEFORE the diff-range
+# validation below: that validation shells out to `git rev-parse` itself, and that sub-invocation
+# needs the same hardened environment (GIT_OPTIONAL_LOCKS, GIT_NO_LAZY_FETCH, the trace-sink
+# unsets, GLOBAL_OVERRIDES) as the final command — it is still a `git` invocation this wrapper is
+# responsible for, not just a syntax check.
 export GIT_PAGER=cat
 export PAGER=cat
 export GIT_EDITOR=true
 export GIT_SEQUENCE_EDITOR=true
 export GIT_OPTIONAL_LOCKS=0
+# GIT_NO_LAZY_FETCH=1: in a partial clone with missing promisor objects (blob:none/tree:none),
+# an allowlisted diff/show/log that touches a missing object silently contacts the configured
+# remote and writes the fetched pack into `.git/objects` — a network round-trip AND a write, from
+# a subcommand this wrapper's whole premise is "read-only, no transport." Reproduced live: a bare
+# partial clone (blobs missing), `show HEAD:<path>` through the pre-fix wrapper fetched and wrote
+# 4 new loose/pack objects; with GIT_NO_LAZY_FETCH=1 the same command instead fails closed
+# ("fatal: Not a valid object name") with zero objects written. See git's own docs for
+# GIT_NO_LAZY_FETCH.
+export GIT_NO_LAZY_FETCH=1
 unset GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT 2>/dev/null || true
 
 # Trace-output-sink environment variables (git-scm.com/docs/git's GIT_TRACE*/GIT_TRACE2*
@@ -175,10 +210,16 @@ unset GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFI
 # needed — reproduced live (GIT_TRACE against a plain file, GIT_TRACE2_EVENT's directory-sink
 # form). The general trace, every per-subsystem trace (fsmonitor, pack access, packet, packfile,
 # performance, refs, setup, shallow, curl and its verbose sibling), and the Trace2 library's
-# three sinks (human-readable, JSON event, perf).
+# three sinks (human-readable, JSON event, perf). Also unset here: GIT_REDIRECT_STDOUT and
+# GIT_REDIRECT_STDERR — git's own docs describe these as a Git for Windows mechanism that
+# redirects git.exe's own stdout/stderr handles to the named path; a no-op on this platform's git
+# (confirmed by local repro — set and run, no file created), but inherited-environment-driven the
+# exact same way as GIT_TRACE*, so scrubbed here rather than assumed absent on every platform this
+# wrapper might run on.
 unset GIT_TRACE GIT_TRACE_FSMONITOR GIT_TRACE_PACK_ACCESS GIT_TRACE_PACKET GIT_TRACE_PACKFILE \
       GIT_TRACE_PERFORMANCE GIT_TRACE_REFS GIT_TRACE_SETUP GIT_TRACE_SHALLOW GIT_TRACE_CURL \
-      GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 GIT_TRACE2_EVENT GIT_TRACE2_PERF 2>/dev/null || true
+      GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 GIT_TRACE2_EVENT GIT_TRACE2_PERF \
+      GIT_REDIRECT_STDOUT GIT_REDIRECT_STDERR 2>/dev/null || true
 
 # Global -c overrides — see the EXEC/WRITE-SURFACE MATRIX and the "GLOBAL_OVERRIDES" comment
 # block above for what each closes and why these are trusted (wrapper-written, never
@@ -195,12 +236,88 @@ GLOBAL_OVERRIDES=(
   -c maintenance.auto=false
 )
 
+# `diff` must be given a proper revision range — see the EXEC/WRITE-SURFACE MATRIX above, "clean/
+# smudge filters", "`..`-substring range spoofed by a same-named path", and "caller-supplied '--'"
+# rows. A bare `diff` or `diff <single-ref>` compares the WORKING TREE (not just repository
+# objects) against the index or that ref, and git applies any configured `filter.<name>.clean`
+# command to convert the dirty working-tree file before comparing — reproduced live. A proper
+# range (`A..B` / `A...B`) never touches the working tree at all — git compares two repository
+# objects directly — which is also the ONLY form DESIGN.md rule 1 and every generated run-context
+# prompt ever tell an agent to use (`git diff <base>...<branch>`), so requiring one costs no
+# legitimate capability.
+#
+# `diff` takes EXACTLY ONE caller-supplied argument — no second positional, no pathspec, no
+# caller-supplied `--` (already refused above, for every subcommand). This is a structural
+# closure, not incidental: revspec-verifying the one argument is not sufficient on its own —
+# Codex round 2 on issue #7 demonstrated that a validated `A..B` range, re-forwarded to real git
+# alongside a caller-supplied leading `--` (`git diff -- A..B`), gets parsed by git as a PURE
+# PATHSPEC rather than a revision, because `--` changes how git interprets everything after it —
+# even though BOTH `A` and `B` independently resolve as real commits via `rev-parse --verify`. A
+# tracked working-tree file literally named `<A>..<B>` (trivially constructable — any two real
+# ancestor commit SHAs) plus a configured clean filter turns that into the exact clean-filter RCE
+# this wrapper exists to close, reached through argument POSITION rather than argument CONTENT.
+# Fixed by owning the boundary end to end: the caller can never supply `--` (closed above, for
+# every subcommand), diff can never receive more than one positional (closed by the `$# -eq 1`
+# check below, so there is no second slot for a pathspec to occupy even without an explicit `--`),
+# and the wrapper appends ITS OWN trailing `--` after the validated range when invoking real git
+# (see the final `exec` below) so the argument's revision interpretation is never in question and
+# nothing caller-supplied can ever land in pathspec position.
+#
+# Containing the substring `..` is necessary but not sufficient: a tracked working-tree path
+# literally named `foo..bar` also contains it, and real git's own disambiguation rule — fall back
+# to treating a token that doesn't resolve as a revision as a pathspec, when it names an existing
+# path — is exactly what lets that path reopen the clean-filter path this range requirement exists
+# to close (reproduced live: raw git treats `foo..bar` as the existing file, not a range, and the
+# pre-fix wrapper's substring check let it straight through). So each side of the range is
+# independently resolved to a REAL commit with `git rev-parse --verify --quiet <side>^{commit}`
+# BEFORE diff ever runs, under the same hardened environment/GLOBAL_OVERRIDES as every other git
+# invocation this wrapper makes. Either side failing that is a rejected pathspec/working-tree
+# path, named in the error, not silently reinterpreted as one.
+if [[ "$subcommand" == "diff" ]]; then
+  [[ $# -eq 1 ]] \
+    || die "diff takes EXACTLY one argument — a revision range like 'base...head' — got $# (this wrapper does not accept a second positional argument or a pathspec on diff, regardless of a '..'-containing first argument; see the EXEC/WRITE-SURFACE MATRIX's 'caller-supplied --' row)"
+
+  first_positional="$1"
+  range_left=""
+  range_right=""
+  if [[ "$first_positional" == *"..."* ]]; then
+    range_left="${first_positional%%...*}"
+    range_right="${first_positional#*...}"
+  elif [[ "$first_positional" == *".."* ]]; then
+    range_left="${first_positional%%..*}"
+    range_right="${first_positional#*..}"
+  fi
+
+  [[ -n "$range_left" && -n "$range_right" ]] \
+    || die "diff requires a range argument containing '..' or '...' (e.g. 'base...head') — a bare 'diff', a single ref, or a bare path compares against the working tree, which this wrapper does not allow (working-tree comparisons can trigger a configured clean/smudge filter)"
+
+  for side in "$range_left" "$range_right"; do
+    # Belt-and-braces: a side beginning with '-' can never be a legal ref name (git itself
+    # disallows it), so refuse it outright here rather than ever handing an attacker-controlled,
+    # dash-prefixed string to `git rev-parse` as an argument — no-cost insurance against that
+    # being reinterpreted as a flag, same posture as the gc.auto/log.showSignature overrides above.
+    if [[ "$side" == -* ]]; then
+      die "diff range argument '$first_positional' has a side ('$side') starting with '-' — not a legal ref name, refused before ever reaching git"
+    fi
+    git "${GLOBAL_OVERRIDES[@]}" rev-parse --verify --quiet "${side}^{commit}" >/dev/null 2>&1 \
+      || die "diff range argument '$first_positional' does not resolve to two real commits ('$side' failed 'git rev-parse --verify --quiet') — this wrapper requires a genuine revision range, not a working-tree path or pathspec that merely contains '..'"
+  done
+fi
+
 # --no-ext-diff/--no-textconv are diff-machinery flags: valid on diff/show (which is where a
 # configured driver or textconv filter could otherwise fire), invalid on log/status (git itself
 # rejects them there — "error: unknown option"), so this is scoped to exactly the two
 # subcommands that can trigger diff output, appended after the subcommand and before whatever
 # plain refs/paths/ranges the model supplied.
+#
+# `diff` is exec'd with its own explicit `-- ` appended after the (now-verified) range argument —
+# the wrapper's OWN trailing pathspec-separator, not the caller's, and with nothing after it (diff
+# takes exactly one argument, enforced above) so there is nothing for it to scope a pathspec onto.
+# This makes the argument's revision interpretation unambiguous and un-influenceable by anything
+# the caller supplied, closing the argument-position class the substring/revspec checks alone did
+# not (see the long comment above the diff-range validation block).
 case "$subcommand" in
-  diff | show) exec git "${GLOBAL_OVERRIDES[@]}" "$subcommand" --no-ext-diff --no-textconv "$@" ;;
+  diff) exec git "${GLOBAL_OVERRIDES[@]}" diff --no-ext-diff --no-textconv "$first_positional" -- ;;
+  show) exec git "${GLOBAL_OVERRIDES[@]}" show --no-ext-diff --no-textconv "$@" ;;
   *) exec git "${GLOBAL_OVERRIDES[@]}" "$subcommand" "$@" ;;
 esac

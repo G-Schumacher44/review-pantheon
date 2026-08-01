@@ -353,13 +353,56 @@ for trace_var in GIT_TRACE GIT_TRACE2 GIT_TRACE2_EVENT GIT_TRACE2_PERF GIT_CURL_
   fi
 done
 
-# Round 6 (Codex P1): diff must require a proper range (contains '..') — a bare diff or a
-# single-ref diff touches the working tree and can trigger a configured clean/smudge filter.
-# shellcheck disable=SC2016
-if strip_comments "$WRAPPER_SCRIPT" | grep -qF '"$first_positional" == *..*'; then
-  pass "pantheon-git-readonly.sh requires diff's first positional argument to contain '..' (a proper range)"
+# Round 6 (Codex P1): diff must require a proper range — a bare diff or a single-ref diff
+# touches the working tree and can trigger a configured clean/smudge filter. Round 7 / issue #7
+# item 3 (Codex P1 on PR #5) replaced the original substring-only check ('"$first_positional" ==
+# *..*', which a tracked path literally named 'foo..bar' also satisfies) with real revspec
+# validation: each side of the range must independently resolve via 'git rev-parse --verify
+# --quiet <side>^{commit}' before diff ever runs. Guard against EITHER regressing — the substring
+# requirement disappearing entirely (no range check at all) AND the rev-parse verification being
+# removed in favor of going back to a bare substring match.
+if strip_comments "$WRAPPER_SCRIPT" | grep -qF '*"..."*' && strip_comments "$WRAPPER_SCRIPT" | grep -qF '*".."*'; then
+  pass "pantheon-git-readonly.sh's diff-range detection still requires a '..' or '...' substring before considering something a range"
 else
-  fail "pantheon-git-readonly.sh no longer requires a range on diff — the clean-filter bypass via a bare/single-ref diff could regress"
+  fail "pantheon-git-readonly.sh no longer detects a '..'/'...'-shaped range on diff — the clean-filter bypass via a bare/single-ref diff could regress"
+fi
+
+# shellcheck disable=SC2016
+if strip_comments "$WRAPPER_SCRIPT" | grep -qF 'rev-parse --verify --quiet "${side}^{commit}"'; then
+  pass "pantheon-git-readonly.sh verifies both sides of a diff range with 'git rev-parse --verify --quiet <side>^{commit}' (real revspec validation, not a substring-only check)"
+else
+  fail "pantheon-git-readonly.sh no longer verifies diff-range sides via 'git rev-parse --verify --quiet' — the '..'-substring-spoofed-by-a-same-named-path bypass (issue #7 item 3) could regress"
+fi
+
+# Round 8 / issue #7 Codex round 2: revspec verification alone is not sufficient — a validated
+# range re-forwarded to real git alongside a caller-supplied '--' gets parsed as a PATHSPEC, not a
+# revision, even though both sides independently resolve as real commits. Closed two ways: the
+# caller can never supply '--' at all (the top-level argv-validation loop no longer special-cases
+# it), and diff accepts EXACTLY one positional argument, so there is no pathspec slot for a
+# caller-supplied '--' (or an implicit trailing pathspec without one) to ever occupy.
+if strip_comments "$WRAPPER_SCRIPT" | grep -qE '^\s*--\)\s*;;'; then
+  fail "pantheon-git-readonly.sh's argv-validation loop still special-cases a bare '--' as an allowed argument — the caller-supplied-'--' pathspec-position bypass (issue #7 Codex round 2) could regress"
+else
+  pass "pantheon-git-readonly.sh's argv-validation loop no longer special-cases a caller-supplied '--' as allowed (it is refused like any other '-'-prefixed argument, for every subcommand)"
+fi
+
+# NOTE: grepping the RAW file here, not strip_comments' output — strip_comments' naive '#'-starts-
+# a-comment regex mistreats bash's own '$#' (argument-count) syntax as a comment start and mangles
+# the rest of the line, which would false-negative this check. '[[ $# -eq 1 ]]' only appears in
+# this file as the actual diff-arg-count guard (a comment above it references the same fragment
+# without the surrounding '[[ ]]', so this exact substring is unambiguous).
+# shellcheck disable=SC2016
+if grep -qF '[[ $# -eq 1 ]]' "$WRAPPER_SCRIPT" && strip_comments "$WRAPPER_SCRIPT" | grep -q 'subcommand" == "diff"'; then
+  pass "pantheon-git-readonly.sh caps diff at exactly one positional argument (no pathspec slot even without a caller-supplied '--')"
+else
+  fail "pantheon-git-readonly.sh no longer caps diff at exactly one argument — a second positional (pathspec) argument could regress"
+fi
+
+# shellcheck disable=SC2016
+if strip_comments "$WRAPPER_SCRIPT" | grep -qF '"$first_positional" -- ;;'; then
+  pass "pantheon-git-readonly.sh's diff exec appends its OWN trailing '--' after the validated range (never a caller-influenced one)"
+else
+  fail "pantheon-git-readonly.sh's diff exec no longer appends its own trailing '--' after the validated range"
 fi
 
 for gc_override in "gc.auto=0" "maintenance.auto=false"; do
