@@ -1,6 +1,7 @@
 # CI for review-pantheon itself — "the review tool must survive its own review" (see
 # tests/test-verdict-decision.sh's header). Syntax-checks and lints every shell script, byte-
-# compiles the Python decision script, and runs the verdict-decision fixture test.
+# compiles the Python decision script, and runs the verdict-decision and combined-comment-
+# renderer fixture tests.
 #
 # The review.yml gate (lint-and-test/setup-smoke) does NOT run against itself — that requires
 # CLAUDE_CODE_OAUTH_TOKEN and REVIEW_GATE_ENABLED, which this repo doesn't set for its own CI.
@@ -81,6 +82,9 @@ jobs:
       - name: Run verdict-decision fixture tests
         run: bash tests/test-verdict-decision.sh
 
+      - name: Run combined-comment renderer fixture tests
+        run: bash tests/test-render-comment.sh
+
       - name: Run install.sh fixture tests
         run: bash tests/test-install.sh
 
@@ -114,7 +118,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write # only exercised if the optional live self-test below runs and post_comment is ever flipped to true; harmless otherwise
+      pull-requests: write # needed by the live self-test below, which posts the combined comment (post_comment: "true") when it runs; only exercised on a pull_request event with the token secret present, harmless otherwise
     env:
       HAS_CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
@@ -160,4 +164,7 @@ jobs:
         uses: ./
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          post_comment: "false" # verify the mechanics without spamming this repo's own PRs
+          post_comment: "true" # let the twins' verdict comment land on this repo's own PRs — this
+          # IS the acceptance proof for the combined-comment renderer (cli/lib/render_comment.sh):
+          # a real composite-action run, on a real PR, posting the new human-first format. Was
+          # "false" (mechanics-only, no comment) before the renderer existed to prove out.

@@ -173,6 +173,27 @@ disagree with each other or with the expected result. They must implement identi
 - the same fail-closed rule (missing/unparseable/out-of-vocabulary verdict → unverified),
 - the same blocker invariant (see the verdict contract above).
 
+## Combined PR comment
+
+Every gate run posts exactly one comment: a bold signal line (🟢 clean pass / 🟡 review notes /
+🟠 NOT GATED, fail-closed / 🔴 blocked) with a one-sentence plain-language read on what that
+means for the merge, a verdict table (one row per agent — a docs-only skip or a same-run
+failure shows up as its own loud row, never silently dropped), then a findings fold: human-
+readable per-agent sections — an identity line (agent, reviewed head SHA, verdict), the agent's
+own one-line summary, an overridden-verdict notice if the blocker invariant fired, and
+itemized findings (severity badge, `file:line`, the issue, the concrete failure scenario) —
+forced open on red/orange, collapsed otherwise. The raw per-agent verdict JSON still ships,
+nested inside that fold as its own collapsed block, so the machine-readable form is never lost,
+just no longer the primary read. `cli/lib/render_comment.sh` is the one implementation of this
+— sourced by both `cli/review-gate` and `action/lib/combine_verdicts.sh` (the composite
+action's renderer), so the CLI lane and the published-action lane read identically by
+construction, not by hand-kept-in-sync wording. `action/review.yml` (the vendored,
+install.sh-Way-A workflow) is the one lane that still can't reach it — a target repo never gets
+a copy of `cli/lib/` (see "Published action" above) — so its "Build and post combined comment"
+step remains a hand-synced inline copy of the pre-existing (plainer) table + raw-JSON-dump
+shape; bringing it up to the same format needs either vendoring `cli/lib/render_comment.sh`
+into install.sh's footprint or duplicating the renderer inline in that YAML, neither done here.
+
 ## House rules are pluggable
 
 Artemis and Apollo check "house rules" as blockers — but every team's rules differ. The gate
@@ -304,10 +325,12 @@ pass `bash -n` and shellcheck (already true via the repo-wide shellcheck job for
 ```
 agents/                    five canonical personas (the single source of truth)
 cli/review-gate            the runner: builds prompts, calls a provider lane, validates
-                           verdicts, posts ONE combined PR comment (signal headline +
-                           verdict table + folded findings)
+                           verdicts, posts ONE combined PR comment (see "Combined PR comment"
+                           below)
 cli/lib/verdict.sh         extraction + verdict-decision (blocker invariant included) —
                            sourced by cli/review-gate AND tests/test-verdict-decision.sh
+cli/lib/render_comment.sh  the combined-comment renderer — sourced by cli/review-gate AND
+                           action/lib/combine_verdicts.sh (see "Combined PR comment" below)
 cli/providers/             provider lanes (claude, codex, gemini, cursor)
 action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
                            artifact-based result passing, fail-closed decision step
@@ -316,9 +339,12 @@ action/decide_verdict.py   the Action's verdict-decision rule (Python twin of
                            the target repo, not embedded in the workflow YAML — also read
                            in-place by action.yml (see below), never installed for that lane
 action/lib/                shared shell helpers for action.yml (build_prompt.sh,
-                           combine_verdicts.sh) — not used by action/review.yml, which keeps
-                           its prompt-build and comment-post logic inline (see "Published
-                           action" above for why the two runtimes differ here)
+                           combine_verdicts.sh) — combine_verdicts.sh sources
+                           cli/lib/render_comment.sh (relative path, safe because the
+                           published action ships this whole repo); NOT used by
+                           action/review.yml, which keeps its prompt-build and comment-post
+                           logic inline and hand-synced (see "Published action" above and
+                           "Combined PR comment" below for why that one lane still differs)
 action.yml                 the published composite action (see "Published action" above) —
                            the whole install for a target repo is examples/review-gate.yml
 examples/review-gate.yml   the ~20-line consumer stub for action.yml; the entire footprint of
@@ -327,6 +353,8 @@ tests/                     tests/test-verdict-decision.sh — cross-runner fixtu
                            tests/test-install.sh — install.sh editor/CLI lane fixture test;
                            tests/test-action-refs.sh — asserts every file action.yml
                            references under github.action_path actually exists;
+                           tests/test-render-comment.sh — combined-comment renderer fixture
+                           test (see "Combined PR comment" below);
                            tests/test-prompt-assembly.sh — spec-aware Apollo prompt-assembly
                            fixture test across all three runtimes (action/lib/build_prompt.sh,
                            cli/review-gate's build_prompt(), action/review.yml's inline copy),

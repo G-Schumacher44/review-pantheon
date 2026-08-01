@@ -48,6 +48,8 @@ PROVIDERS_DIR="$PANTHEON_ROOT/cli/providers"
 
 # shellcheck disable=SC1091
 source "$PANTHEON_ROOT/cli/lib/verdict.sh"
+# shellcheck disable=SC1091
+source "$PANTHEON_ROOT/cli/lib/render_comment.sh"
 
 AGENT_TIMEOUT_SECS="${REVIEW_GATE_TIMEOUT:-600}"
 
@@ -327,7 +329,7 @@ build_prompt() {
 # cli/lib/verdict.sh, sourced above — factored out so tests/test-verdict-decision.sh exercises
 # the exact same code path this runner uses, not a reimplementation of it.
 
-declare -a RESULT_AGENT RESULT_COLOR RESULT_VERDICT RESULT_TOP RESULT_JSON
+declare -a RESULT_AGENT RESULT_COLOR RESULT_VERDICT RESULT_TOP RESULT_JSON RESULT_INVARIANT RESULT_REASON
 
 run_agent() {
   local agent="$1"
@@ -338,6 +340,7 @@ run_agent() {
     RESULT_AGENT+=("apollo"); RESULT_COLOR+=("yellow")
     RESULT_VERDICT+=("SKIPPED"); RESULT_TOP+=("docs-only diff: apollo skipped by design")
     RESULT_JSON+=('{"agent":"apollo","verdict":"SKIPPED","has_blocker":false,"findings":[],"summary":"docs-only diff: apollo skipped by design"}')
+    RESULT_INVARIANT+=("false"); RESULT_REASON+=("")
     return
   fi
 
@@ -348,6 +351,7 @@ run_agent() {
     RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
     RESULT_VERDICT+=("DRY_RUN"); RESULT_TOP+=("dry-run: provider not called")
     RESULT_JSON+=('{}')
+    RESULT_INVARIANT+=("false"); RESULT_REASON+=("")
     return
   fi
 
@@ -364,6 +368,7 @@ run_agent() {
     RESULT_AGENT+=("$agent"); RESULT_COLOR+=("unverified")
     RESULT_VERDICT+=("UNVERIFIED"); RESULT_TOP+=("provider lane failed — see runner logs")
     RESULT_JSON+=('{}')
+    RESULT_INVARIANT+=("false"); RESULT_REASON+=("")
     return
   fi
 
@@ -390,6 +395,7 @@ run_agent() {
   RESULT_AGENT+=("$agent"); RESULT_COLOR+=("$color")
   RESULT_VERDICT+=("$verdict"); RESULT_TOP+=("$top_finding")
   RESULT_JSON+=("$verdict_json_out")
+  RESULT_INVARIANT+=("$invariant_fired"); RESULT_REASON+=("$reason")
 }
 
 for agent in $AGENTS_LIST; do
@@ -397,65 +403,25 @@ for agent in $AGENTS_LIST; do
 done
 
 # ---------------------------------------------------------------------------
-# Aggregate signal — worst wins.
+# Combined PR comment — one per gate run. Built by cli/lib/render_comment.sh (sourced above),
+# the same renderer action/lib/combine_verdicts.sh uses, so the CLI and Action lanes read
+# identically (DESIGN.md's "Two runtimes, one rule"). Feed it the per-agent <NAME>_* env vars
+# it expects, from the RESULT_* arrays run_agent populated above.
 # ---------------------------------------------------------------------------
-OVERALL="green"
-for c in "${RESULT_COLOR[@]}"; do
-  case "$c" in
-    red) OVERALL="red" ;;
-    unverified) if [[ "$OVERALL" != "red" ]]; then OVERALL="unverified"; fi ;;
-    yellow) if [[ "$OVERALL" == "green" ]]; then OVERALL="yellow"; fi ;;
-  esac
+for i in "${!RESULT_AGENT[@]}"; do
+  upper="$(printf '%s' "${RESULT_AGENT[$i]}" | tr '[:lower:]' '[:upper:]')"
+  printf -v "${upper}_COLOR" '%s' "${RESULT_COLOR[$i]}"
+  printf -v "${upper}_VERDICT" '%s' "${RESULT_VERDICT[$i]}"
+  printf -v "${upper}_TOP" '%s' "${RESULT_TOP[$i]}"
+  printf -v "${upper}_FINDINGS" '%s' "${RESULT_JSON[$i]}"
+  printf -v "${upper}_INVARIANT" '%s' "${RESULT_INVARIANT[$i]}"
+  printf -v "${upper}_REASON" '%s' "${RESULT_REASON[$i]}"
 done
 
-case "$OVERALL" in
-  green) HEADLINE="🟢 review-pantheon: all clear" ;;
-  yellow) HEADLINE="🟡 review-pantheon: review notes" ;;
-  unverified) HEADLINE="🟠 review-pantheon: NOT GATED (unverified result)" ;;
-  red) HEADLINE="🔴 review-pantheon: blocked" ;;
-esac
-
-# ---------------------------------------------------------------------------
-# Combined PR comment — one per gate run.
-# ---------------------------------------------------------------------------
-# Fold the full-findings block in whenever ANY agent actually reported findings — not only
-# when the overall signal isn't green. An agent can find should_fix/note items and still land
-# on a green-mapped verdict; those findings would otherwise be silently dropped from the
-# comment even though they're right there in the JSON.
-ANY_FINDINGS=false
-for j in "${RESULT_JSON[@]}"; do
-  if jq -e '((.findings // []) | length) > 0' <<<"$j" >/dev/null 2>&1; then
-    ANY_FINDINGS=true
-    break
-  fi
-done
+OVERALL="$(pantheon_overall_color "${RESULT_AGENT[@]}")"
 
 COMMENT_FILE="$WORKDIR/comment.md"
-{
-  echo "### $HEADLINE"
-  echo
-  echo "| Agent | Verdict | Top finding |"
-  echo "|---|---|---|"
-  for i in "${!RESULT_AGENT[@]}"; do
-    echo "| ${RESULT_AGENT[$i]} | ${RESULT_VERDICT[$i]} | ${RESULT_TOP[$i]} |"
-  done
-
-  if [[ "$OVERALL" != "green" || "$ANY_FINDINGS" == "true" ]]; then
-    echo
-    echo "<details>"
-    echo "<summary>Full findings</summary>"
-    echo
-    for i in "${!RESULT_AGENT[@]}"; do
-      echo "**${RESULT_AGENT[$i]}**"
-      echo
-      echo '```json'
-      jq '.' <<<"${RESULT_JSON[$i]}" 2>/dev/null || echo "${RESULT_JSON[$i]}"
-      echo '```'
-      echo
-    done
-    echo "</details>"
-  fi
-} > "$COMMENT_FILE"
+pantheon_render_comment "$HEAD_SHA" "${RESULT_AGENT[@]}" > "$COMMENT_FILE"
 
 if [[ "$DRY_RUN" == "true" ]]; then
   note "[dry-run] would post this comment to PR #$PR_NUMBER:"

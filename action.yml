@@ -547,28 +547,39 @@ runs:
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         GH_TOKEN: ${{ github.token }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         POST_COMMENT: ${{ inputs.post_comment }}
         APOLLO_DOCS_SKIPPED: ${{ steps.docs-check.outputs.docs_only }}
         ARTEMIS_COLOR: ${{ steps.decide-artemis.outputs.color }}
         ARTEMIS_VERDICT: ${{ steps.decide-artemis.outputs.verdict }}
         ARTEMIS_TOP: ${{ steps.decide-artemis.outputs.top_finding }}
         ARTEMIS_FINDINGS: ${{ steps.decide-artemis.outputs.findings_json }}
+        ARTEMIS_INVARIANT: ${{ steps.decide-artemis.outputs.invariant_fired }}
+        ARTEMIS_REASON: ${{ steps.decide-artemis.outputs.reason }}
         APOLLO_COLOR: ${{ steps.decide-apollo.outputs.color }}
         APOLLO_VERDICT: ${{ steps.decide-apollo.outputs.verdict }}
         APOLLO_TOP: ${{ steps.decide-apollo.outputs.top_finding }}
         APOLLO_FINDINGS: ${{ steps.decide-apollo.outputs.findings_json }}
+        APOLLO_INVARIANT: ${{ steps.decide-apollo.outputs.invariant_fired }}
+        APOLLO_REASON: ${{ steps.decide-apollo.outputs.reason }}
         SOCRATES_COLOR: ${{ steps.decide-socrates.outputs.color }}
         SOCRATES_VERDICT: ${{ steps.decide-socrates.outputs.verdict }}
         SOCRATES_TOP: ${{ steps.decide-socrates.outputs.top_finding }}
         SOCRATES_FINDINGS: ${{ steps.decide-socrates.outputs.findings_json }}
+        SOCRATES_INVARIANT: ${{ steps.decide-socrates.outputs.invariant_fired }}
+        SOCRATES_REASON: ${{ steps.decide-socrates.outputs.reason }}
         DIOGENES_COLOR: ${{ steps.decide-diogenes.outputs.color }}
         DIOGENES_VERDICT: ${{ steps.decide-diogenes.outputs.verdict }}
         DIOGENES_TOP: ${{ steps.decide-diogenes.outputs.top_finding }}
         DIOGENES_FINDINGS: ${{ steps.decide-diogenes.outputs.findings_json }}
+        DIOGENES_INVARIANT: ${{ steps.decide-diogenes.outputs.invariant_fired }}
+        DIOGENES_REASON: ${{ steps.decide-diogenes.outputs.reason }}
         PLATO_COLOR: ${{ steps.decide-plato.outputs.color }}
         PLATO_VERDICT: ${{ steps.decide-plato.outputs.verdict }}
         PLATO_TOP: ${{ steps.decide-plato.outputs.top_finding }}
         PLATO_FINDINGS: ${{ steps.decide-plato.outputs.findings_json }}
+        PLATO_INVARIANT: ${{ steps.decide-plato.outputs.invariant_fired }}
+        PLATO_REASON: ${{ steps.decide-plato.outputs.reason }}
       run: bash "${{ github.action_path }}/action/lib/combine_verdicts.sh" "${{ inputs.agents }}"
 
     - name: Enforce gate result
