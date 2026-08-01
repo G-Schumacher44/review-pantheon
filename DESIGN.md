@@ -16,7 +16,9 @@ Most AI code review collapses two different jobs into one pass. This system spli
   paths, shortcuts, rule violations. She assumes nothing works until the code shows it does.
 - **The verifier (Apollo)** audits the *claim* of completed work: re-runs stated verification,
   diffs what was claimed against what git actually shows, checks required records were written.
-  He assumes nothing was done until evidence shows it was.
+  He assumes nothing was done until evidence shows it was. When a governing spec file is named
+  in his run context, he also checks the delivered change against the sections of it relevant
+  to what changed — a contradiction there is rule 5 below, enforced per-PR, not just documented.
 
 They are twins, not duplicates — different questions, different failure modes caught. Together
 they're the **gate agents**: machinery that runs on every PR, in CI and the CLI, against
@@ -210,6 +212,7 @@ provider=claude          # lane in cli/providers/
 model=                   # lane-specific model id; empty = lane default
 base_branch=main         # merge base for the review diff
 rules_file=REVIEW_RULES.md
+spec_file=DESIGN.md      # governing spec, Apollo-only context; only-if-exists; empty disables
 agents=artemis apollo    # panel for the standard gate
 ```
 
@@ -351,7 +354,11 @@ tests/                     tests/test-verdict-decision.sh — cross-runner fixtu
                            tests/test-action-refs.sh — asserts every file action.yml
                            references under github.action_path actually exists;
                            tests/test-render-comment.sh — combined-comment renderer fixture
-                           test (see "Combined PR comment" below)
+                           test (see "Combined PR comment" below);
+                           tests/test-prompt-assembly.sh — spec-aware Apollo prompt-assembly
+                           fixture test across all three runtimes (action/lib/build_prompt.sh,
+                           cli/review-gate's build_prompt(), action/review.yml's inline copy),
+                           including the cross-runner wording-identity check
 install.sh                 idempotent installer into a target repo (refuses to clobber
                            customized files); does not install gate.conf; --claude/--cursor/
                            --codex/--gemini generate per-tool projections of agents/*.md for

@@ -88,6 +88,9 @@ jobs:
       - name: Run install.sh fixture tests
         run: bash tests/test-install.sh
 
+      - name: Run prompt-assembly fixture tests
+        run: bash tests/test-prompt-assembly.sh
+
   setup-smoke:
     # Clean-machine, real-Linux run of the setup story (see Dockerfile.smoke's header): required
     # binaries, both fixture suites above, install.sh and bootstrap.sh against fresh scratch

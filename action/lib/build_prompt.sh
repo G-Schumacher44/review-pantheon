@@ -12,12 +12,17 @@
 #
 # Usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>
 # Reads from env: REPO_NAME, PR_NUMBER, PR_TITLE, BASE_SHA, HEAD_SHA, BASE_REF, RULES_FILE,
-# RULES_PRESENT (true/false).
+# RULES_PRESENT (true/false), and — apollo only — SPEC_FILE, SPEC_PRESENT (true/false). The
+# non-apollo build-prompt steps in action.yml don't set SPEC_FILE/SPEC_PRESENT at all, so both
+# default to empty/false below rather than tripping `set -u`.
 set -euo pipefail
 
 AGENT_NAME="${1:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
 PERSONAS_DIR="${2:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
 PROMPT_FILE="${3:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
+
+SPEC_FILE="${SPEC_FILE:-}"
+SPEC_PRESENT="${SPEC_PRESENT:-false}"
 
 PERSONA="$PERSONAS_DIR/${AGENT_NAME}.md"
 if [ ! -f "$PERSONA" ]; then
@@ -44,6 +49,13 @@ awk '
     echo "- House rules file: $RULES_FILE (present - treat each rule as a blocker-class check)"
   else
     echo "- House rules file: $RULES_FILE (not present - skip house-rule checks, note it)"
+  fi
+  # Spec-file context — apollo only, not other agents (SPEC_PRESENT is only ever "true" for the
+  # apollo build-prompt step; every other agent leaves it at the "false" default above). The
+  # persona itself skips the check silently when this line is absent, so a repo with no spec
+  # file gets today's behavior unchanged for every agent.
+  if [ "$AGENT_NAME" = "apollo" ] && [ "$SPEC_PRESENT" = "true" ]; then
+    echo "- Spec file: $SPEC_FILE (present — check the delivered change against the sections of it relevant to the changed behavior; a contradiction is a finding that states both resolutions: fix the code or amend the spec)"
   fi
   echo
   echo "Use \`git diff ${BASE_SHA}...${HEAD_SHA}\`, \`git show <ref>:path\`, and \`git log\` to inspect the change."

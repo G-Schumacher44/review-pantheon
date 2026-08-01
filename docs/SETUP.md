@@ -123,8 +123,8 @@ whole install. `action.yml` at this repo's root is a composite GitHub Action; th
 G-Schumacher44/review-pantheon@v1` reference reads personas and the verdict-decision script
 from its own checkout, so nothing lands in your repo at all. See `DESIGN.md`'s ["Published
 action"](../DESIGN.md#published-action) section for what's bundled, what's overridable
-(`personas_path`, `agents`, `rules_file`, `model`), and the sequential-vs-matrix tradeoff this
-lane makes.
+(`personas_path`, `agents`, `rules_file`, `spec_file`, `model`), and the sequential-vs-matrix
+tradeoff this lane makes.
 
 `action.yml`'s auth surface is deliberately narrow — exactly two inputs, and it fails loud
 unless exactly one is set:

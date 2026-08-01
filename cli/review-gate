@@ -141,6 +141,7 @@ CFG_PROVIDER="claude"
 CFG_MODEL=""
 CFG_BASE_BRANCH="main"
 CFG_RULES_FILE="REVIEW_RULES.md"
+CFG_SPEC_FILE="DESIGN.md"
 CFG_AGENTS="artemis apollo"
 
 if [[ -f "$REPO_ROOT/gate.conf" ]]; then
@@ -153,6 +154,7 @@ if [[ -f "$REPO_ROOT/gate.conf" ]]; then
       model) CFG_MODEL="$cfg_val" ;;
       base_branch) CFG_BASE_BRANCH="$cfg_val" ;;
       rules_file) CFG_RULES_FILE="$cfg_val" ;;
+      spec_file) CFG_SPEC_FILE="$cfg_val" ;;
       agents) CFG_AGENTS="$cfg_val" ;;
     esac
   done < "$REPO_ROOT/gate.conf"
@@ -281,6 +283,7 @@ build_prompt() {
   local persona_file="$AGENTS_DIR/${agent}.md"
   local prompt_file="$WORKDIR/${agent}.prompt.md"
   local rules_path="$REPO_ROOT/$CFG_RULES_FILE"
+  local spec_path="$REPO_ROOT/$CFG_SPEC_FILE"
 
   [[ -f "$persona_file" ]] || die "no persona file for agent '$agent' ($persona_file)"
 
@@ -298,6 +301,12 @@ build_prompt() {
       echo "- House rules file: $CFG_RULES_FILE (present — treat each rule as a blocker-class check)"
     else
       echo "- House rules file: $CFG_RULES_FILE (not present in this repo — skip house-rule checks, note it)"
+    fi
+    # Spec-file context — Apollo's check-the-spec line only, not other agents'; the persona
+    # itself skips the check silently when this line is absent, so a repo with no spec file
+    # (or spec_file= disabled in gate.conf) gets today's behavior unchanged for every agent.
+    if [[ "$agent" == "apollo" && -n "$CFG_SPEC_FILE" && -f "$spec_path" ]]; then
+      echo "- Spec file: $CFG_SPEC_FILE (present — check the delivered change against the sections of it relevant to the changed behavior; a contradiction is a finding that states both resolutions: fix the code or amend the spec)"
     fi
     if [[ -n "$FOLLOWUP_NOTE" ]]; then
       echo "- $FOLLOWUP_NOTE"
