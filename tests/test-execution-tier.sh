@@ -307,13 +307,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Part F — cli/lib/pantheon-git-readonly.sh: structural checks for the round-2 hardening
-# (config/attributes-driven diff-driver bypass, index-write hygiene) that
-# tests/test-git-readonly-wrapper.sh exercises live. This is the same file/behavior check
-# pairing used throughout this repo (e.g. Part B above checks the same shape via grep that
-# tests/test-git-readonly-wrapper.sh proves via live invocation).
+# Part F — cli/lib/pantheon-git-readonly.sh: structural checks for the round-2/round-3
+# hardening (config/attributes-driven diff-driver bypass, index-write hygiene, configured
+# fsmonitor-hook bypass) that tests/test-git-readonly-wrapper.sh exercises live. Same
+# file/behavior check pairing used throughout this repo (e.g. Part B above checks the same
+# shape via grep that tests/test-git-readonly-wrapper.sh proves via live invocation).
 # ---------------------------------------------------------------------------
-section "Part F: cli/lib/pantheon-git-readonly.sh round-2 hardening (structural)"
+section "Part F: cli/lib/pantheon-git-readonly.sh round-2/round-3 hardening (structural)"
 
 WRAPPER_SCRIPT="$ROOT/cli/lib/pantheon-git-readonly.sh"
 
@@ -327,6 +327,24 @@ if grep -qF 'GIT_OPTIONAL_LOCKS=0' "$WRAPPER_SCRIPT"; then
   pass "pantheon-git-readonly.sh sets GIT_OPTIONAL_LOCKS=0"
 else
   fail "pantheon-git-readonly.sh no longer sets GIT_OPTIONAL_LOCKS=0 — the status index-write regression could recur"
+fi
+
+if grep -qF 'core.fsmonitor=false' "$WRAPPER_SCRIPT"; then
+  pass "pantheon-git-readonly.sh forces -c core.fsmonitor=false"
+else
+  fail "pantheon-git-readonly.sh no longer forces -c core.fsmonitor=false — the configured-fsmonitor-hook bypass could regress"
+fi
+
+# Regression guard: an empty diff.external override was tested and rejected (breaks diff
+# entirely — git tries to run a program named nothing) in favor of relying on --no-ext-diff,
+# which was verified to already cover that config key. Guard against it reappearing as LIVE
+# code — the wrapper's own header comment mentions the literal string while explaining why it
+# was rejected, so this must check non-comment lines only (strip_comments, defined in Part B
+# above), or it flags its own explanatory prose as a false positive.
+if strip_comments "$WRAPPER_SCRIPT" | grep -qF 'diff.external='; then
+  fail "pantheon-git-readonly.sh sets a 'diff.external=' override in live code — this was tested and found to break diff entirely (git tries to run a program named nothing); --no-ext-diff alone covers this config key"
+else
+  pass "pantheon-git-readonly.sh does not carry the broken empty 'diff.external=' override in live code"
 fi
 
 echo

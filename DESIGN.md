@@ -401,6 +401,43 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
       this once" would reopen the exact vulnerability base-pinning exists to close), so that
       step fails loud with an explanation and a workaround (merge the bootstrap PR via another
       path once) rather than either silently degrading or leaving an unexplained failure.
+  - **Round 4 — configured fsmonitor hooks, a config-key sweep, and the own-repo trusted
+    disposition.** One more Codex finding plus a deliberate audit pass, both closed in the
+    wrapper:
+    - A pathname-valued `core.fsmonitor` — git's own config docs define that as the path to an
+      external "fsmonitor hook" command — ran on a validation-passing `status`, **and** on plain
+      `diff` too (git consults the hook to speed up its working-tree scan regardless of which
+      read command triggered the scan); `GIT_OPTIONAL_LOCKS=0` did nothing to stop it, a
+      different mechanism entirely. Reproduced live by Codex, reproduced again here against a
+      real marker-writing hook before landing the fix, on both subcommands. Fixed by forcing
+      `-c core.fsmonitor=false` as a GLOBAL config override the wrapper injects itself, applied
+      to every subcommand (the hook is a property of the repository scan, not of any one
+      subcommand) — a `-c key=value` must precede the subcommand in git's own argument grammar,
+      which is exactly why the flag-refusal loop rejects the model ever supplying its own; the
+      wrapper's own overrides are trusted precisely because nothing the model supplies can reach
+      or alter them, a distinction now stated explicitly in the wrapper's own header comment.
+    - Swept git's config docs for every other key that names an executable and is reachable from
+      the four allowlisted subcommands with no explicit flag: `core.pager`/`core.editor` (already
+      closed by env + `-c`), `log.showSignature`+`gpg.program` (tested live — did not fire on the
+      git version this was verified against, forced `-c log.showSignature=false` anyway as
+      no-cost insurance), and confirmed `core.sshCommand`/`credential.helper`/`protocol.*.allow`
+      are genuinely unreachable — none of `diff`/`show`/`log`/`status` contact a remote, and
+      nothing network-capable (`fetch`, `pull`, `clone`, `push`, `ls-remote`, …) is on the
+      allowlist. That reachability claim is stated as a standing invariant in the wrapper's own
+      comment, not a one-time check: if a future change ever adds a networked subcommand to the
+      allowlist, it needs re-auditing. `difftool`/`mergetool`-only config (`difftool.*`,
+      `merge.tool`) is unreachable the same way — neither subcommand is allowlisted. Every
+      wrapper fixture that proves a config-driven bypass is closed also carries a negative
+      control in the same fixture repo (RAW git, same config, MUST fire the marker) —
+      the direct check on "did skip test coverage quietly rot into a check that can't fail" this
+      whole codebase already applies to itself elsewhere (its own review method: a check that
+      can't fail carries no information).
+    - **Own-repo disposition.** This repo's own CI self-test (`.github/workflows/ci.yml`'s
+      `composite-action-self-check` job) reviews review-pantheon's own PRs, from its own
+      checkout, opened by its own maintainer — precisely the own-repo/trusted-author case
+      `execution=trusted`'s own docs name as the exception to the readonly default. Set
+      explicitly on that one invocation; every other consumer of `action.yml` (reviewing someone
+      else's fork PR) is unaffected and still defaults to `readonly`.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is

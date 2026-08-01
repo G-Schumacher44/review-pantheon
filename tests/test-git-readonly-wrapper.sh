@@ -182,6 +182,17 @@ EOF
 chmod +x "$HELPER_SCRIPT"
 git -C "$DRIVER_REPO" config "diff.evil.command" "$HELPER_SCRIPT"
 
+# Negative control, proving this fixture is live (not green-by-construction): RAW git, same
+# fixture repo, same configured driver, MUST fire the marker via a plain diff.
+rm -f "$HELPER_FIRED_MARKER"
+( cd "$DRIVER_REPO" && git diff "HEAD~1...HEAD" >/dev/null 2>&1 )
+if [[ -f "$HELPER_FIRED_MARKER" ]]; then
+  pass "negative control: RAW git (no wrapper) DOES fire the configured diff driver on 'diff' — fixture is live"
+else
+  fail "negative control FAILED: raw git did not fire the configured diff driver at all — this fixture is not exercising anything, every 'did not fire' result below is meaningless"
+fi
+
+rm -f "$HELPER_FIRED_MARKER"
 ( cd "$DRIVER_REPO" && "$WRAPPER" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
 if [[ -f "$HELPER_FIRED_MARKER" ]]; then
   fail "configured external diff driver FIRED via a plain 'diff HEAD~1...HEAD' — --no-ext-diff/--no-textconv regression"
@@ -238,6 +249,67 @@ else
 fi
 
 rm -rf "$LOCKS_REPO"
+
+# ---------------------------------------------------------------------------
+# Configured fsmonitor-hook bypass (Codex P1, round 3 — fresh evidence again, on TWO
+# subcommands). A pathname-valued `core.fsmonitor` (git's own docs: the path to an external
+# fsmonitor hook command) ran on a validation-passing `status`, and on plain `diff` too —
+# GIT_OPTIONAL_LOCKS=0 does nothing to stop it, a different mechanism entirely. This fixture
+# reproduces exactly that (a real marker-writing helper set as core.fsmonitor) against both
+# subcommands and asserts it never runs.
+# ---------------------------------------------------------------------------
+section "Configured fsmonitor-hook bypass (core.fsmonitor, no model-supplied flag)"
+
+FSMON_REPO="$(mktemp -d)"
+git -C "$FSMON_REPO" init -q
+git -C "$FSMON_REPO" config user.email "test@example.com"
+git -C "$FSMON_REPO" config user.name "test"
+echo "a" > "$FSMON_REPO/file.txt"
+git -C "$FSMON_REPO" add file.txt
+git -C "$FSMON_REPO" commit -q -m "first"
+echo "b" >> "$FSMON_REPO/file.txt"
+git -C "$FSMON_REPO" commit -q -am "second"
+
+FSMON_MARKER="$(mktemp -u)"
+rm -f "$FSMON_MARKER"
+FSMON_HOOK="$(mktemp)"
+cat > "$FSMON_HOOK" <<EOF
+#!/bin/sh
+touch "$FSMON_MARKER"
+EOF
+chmod +x "$FSMON_HOOK"
+git -C "$FSMON_REPO" config core.fsmonitor "$FSMON_HOOK"
+
+# Negative control, proving this fixture is live (not green-by-construction): RAW git, in this
+# exact same fixture repo with the exact same hook configured, MUST fire the marker. If it
+# didn't, the fixture setup itself would be broken and every "did NOT fire" assertion below
+# would be meaningless (passing for the wrong reason — no wrapper needed to get that result).
+rm -f "$FSMON_MARKER"
+( cd "$FSMON_REPO" && git status >/dev/null 2>&1 )
+if [[ -f "$FSMON_MARKER" ]]; then
+  pass "negative control: RAW git (no wrapper) DOES fire the configured fsmonitor hook on 'status' — fixture is live"
+else
+  fail "negative control FAILED: raw git did not fire the configured fsmonitor hook at all — this fixture is not exercising anything, every 'did not fire' result below is meaningless"
+fi
+
+rm -f "$FSMON_MARKER"
+( cd "$FSMON_REPO" && "$WRAPPER" status >/dev/null 2>&1 )
+if [[ -f "$FSMON_MARKER" ]]; then
+  fail "configured fsmonitor hook FIRED via a plain 'status' — core.fsmonitor=false override regression"
+else
+  pass "configured fsmonitor hook did NOT fire via 'status' — -c core.fsmonitor=false closes it"
+fi
+
+rm -f "$FSMON_MARKER"
+( cd "$FSMON_REPO" && "$WRAPPER" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
+if [[ -f "$FSMON_MARKER" ]]; then
+  fail "configured fsmonitor hook FIRED via 'diff HEAD~1...HEAD' — core.fsmonitor=false override regression"
+else
+  pass "configured fsmonitor hook did NOT fire via 'diff HEAD~1...HEAD' either"
+fi
+
+rm -f "$FSMON_MARKER" "$FSMON_HOOK"
+rm -rf "$FSMON_REPO"
 
 echo
 echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"

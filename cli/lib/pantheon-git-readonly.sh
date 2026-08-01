@@ -54,7 +54,54 @@
 # Fixed by forcing `--no-ext-diff --no-textconv` onto every `diff`/`show` invocation this
 # wrapper makes — not accepted from the model's argv (still rejected as a flag, same as any
 # other), injected by the wrapper itself, so no config or attributes state the target repo (or
-# environment) happens to carry can re-enable an external helper or content filter.
+# environment) happens to carry can re-enable an external helper or content filter. Verified
+# `--no-ext-diff` alone also covers the REPO-WIDE `diff.external` config key, not just an
+# attribute-scoped driver — one flag, both activation paths.
+#
+# Round 3 (Codex P1, fresh evidence again): a pathname-valued `core.fsmonitor` — git's own docs
+# define that as the path to an external "fsmonitor hook" command — ran on a validation-passing
+# `status`, AND on plain `diff` too (git queries the fsmonitor hook to speed up its working-tree
+# scan regardless of which read command triggered the scan), with `GIT_OPTIONAL_LOCKS=0` doing
+# nothing to stop it (a different mechanism entirely). Reproduced live by Codex, then reproduced
+# again here against a real marker-writing helper before landing the fix, on both `status` and
+# `diff`. Fixed by forcing `-c core.fsmonitor=false` as a GLOBAL override (a `-c key=value` must
+# precede the subcommand in git's own argument grammar, which is exactly why the flag-refusal
+# loop below rejects the model ever supplying one) — applied to every subcommand, not just
+# status/diff, since the hook is a property of the repository scan, not of any one subcommand.
+# `-c core.hooksPath=/dev/null` and `-c core.pager=cat`/`-c core.editor=true` ride along as the
+# same class of defense in depth, redundant with the env vars below by design (config-file state
+# and environment state are two different override surfaces; forcing both closes either being
+# bypassed independently). `-c diff.external=` (an empty value, attempted here first) was
+# REJECTED after testing: git interprets an empty `diff.external` as "run a program named
+# nothing," which errors out and breaks `diff` entirely rather than disabling it — `--no-ext-diff`
+# already fully covers that config key on its own (verified above), so no `-c` override for it
+# is needed.
+#
+# IMPORTANT distinction, since it's easy to misread the flag-refusal loop below as contradicting
+# GLOBAL_OVERRIDES: the loop rejects a `-c` (or any other flag) supplied by the CALLER's argv —
+# the model never gets to inject one. GLOBAL_OVERRIDES is a config list this wrapper writes and
+# controls itself, applied AFTER argv validation has already rejected anything the model tried to
+# smuggle in; it is trusted precisely because nothing the model supplies can reach it or alter it.
+#
+# Round 4 sweep — every git config key that names an executable, reachable from an allowlisted
+# subcommand's default behavior with NO explicit flag, checked against git's own config docs:
+#   - diff.external / diff.<driver>.command (attribute or global) -> closed by --no-ext-diff
+#   - diff.<driver>.textconv                                      -> closed by --no-textconv
+#   - core.fsmonitor                                              -> closed by -c core.fsmonitor=false
+#   - core.pager                                                  -> closed by GIT_PAGER env + -c core.pager=cat
+#   - core.editor                                                 -> closed by GIT_EDITOR env + -c core.editor=true
+#   - log.showSignature + gpg.program: tested live (log.showsignature=true + a marker-writing
+#     gpg.program, against `log`/`show` with no explicit --show-signature flag) — did NOT fire on
+#     this wrapper's target git version; forced `-c log.showSignature=false` anyway as no-cost
+#     insurance against a git version or config combination where it might.
+#   - core.sshCommand, credential.helper, protocol.*.allow: all transport/remote-operation
+#     mechanisms — NOT reachable from this wrapper, because none of the four allowlisted
+#     subcommands (diff, show, log, status) contact a remote. Deliberately not on the allowlist:
+#     fetch, pull, clone, push, ls-remote, and anything else that would make this reachability
+#     claim false. If a future change ever adds a networked subcommand to the allowlist, this
+#     reasoning needs re-auditing — it is NOT self-maintaining.
+#   - difftool.*/merge.tool: only reachable via the separate `git difftool`/`git mergetool`
+#     subcommands, neither on the allowlist.
 set -euo pipefail
 
 die() {
@@ -96,12 +143,24 @@ export GIT_SEQUENCE_EDITOR=true
 export GIT_OPTIONAL_LOCKS=0
 unset GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT 2>/dev/null || true
 
+# Global -c overrides — must precede the subcommand in git's own argument grammar (the reason
+# the flag-refusal loop above rejects the model ever supplying its own `-c`). Applied to every
+# subcommand: the fsmonitor hook is a property of git's working-tree scan, not of any one
+# subcommand, so this isn't scoped to status/diff the way --no-ext-diff/--no-textconv are.
+GLOBAL_OVERRIDES=(
+  -c core.fsmonitor=false
+  -c core.hooksPath=/dev/null
+  -c core.pager=cat
+  -c core.editor=true
+  -c log.showSignature=false
+)
+
 # --no-ext-diff/--no-textconv are diff-machinery flags: valid on diff/show (which is where a
 # configured driver or textconv filter could otherwise fire), invalid on log/status (git itself
 # rejects them there — "error: unknown option"), so this is scoped to exactly the two
 # subcommands that can trigger diff output, appended after the subcommand and before whatever
 # plain refs/paths/ranges the model supplied.
 case "$subcommand" in
-  diff | show) exec git "$subcommand" --no-ext-diff --no-textconv "$@" ;;
-  *) exec git "$subcommand" "$@" ;;
+  diff | show) exec git "${GLOBAL_OVERRIDES[@]}" "$subcommand" --no-ext-diff --no-textconv "$@" ;;
+  *) exec git "${GLOBAL_OVERRIDES[@]}" "$subcommand" "$@" ;;
 esac

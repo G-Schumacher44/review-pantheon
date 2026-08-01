@@ -177,3 +177,9 @@ jobs:
           # IS the acceptance proof for the combined-comment renderer (cli/lib/render_comment.sh):
           # a real composite-action run, on a real PR, posting the new human-first format. Was
           # "false" (mechanics-only, no comment) before the renderer existed to prove out.
+          execution: trusted # this IS the own-repo/trusted-author case execution=readonly's own
+          # docs name as the exception (DESIGN.md's "Security posture") — review-pantheon
+          # reviewing its own PRs, opened by its own maintainer, from its own checkout. readonly
+          # stays the default for every OTHER consumer of this action (reviewing someone else's
+          # fork PR), which this input does not change; it only affects this one self-test
+          # invocation, against this one repo's own PRs.
