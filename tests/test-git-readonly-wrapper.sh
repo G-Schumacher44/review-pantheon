@@ -60,11 +60,30 @@ refuse() {
 }
 
 # accept <name> <args...> — asserts the wrapper exits 0 (the real git command it wraps
-# succeeded) and its output does NOT carry the wrapper's own refusal prefix.
+# succeeded) and its output does NOT carry the wrapper's own refusal prefix. Runs in $ROOT
+# (this checkout) — fine for subcommands that don't need a specific ref to exist (status, bare
+# log/show against HEAD).
 accept() {
   local name="$1"; shift
   local out status
   out="$(cd "$ROOT" && "$WRAPPER" "$@" 2>&1)"
+  status=$?
+  if [[ $status -eq 0 ]] && ! grep -q '^pantheon-git-readonly:' <<<"$out"; then
+    pass "$name: accepted (exit 0, real git ran)"
+  else
+    fail "$name: NOT accepted (status=$status, output: $out)"
+  fi
+}
+
+# accept_in <dir> <name> <args...> — same as accept(), but runs in <dir> instead of $ROOT. Used
+# for range-based fixtures (`HEAD~1...HEAD`) that need a guaranteed-real parent commit — $ROOT is
+# whatever depth this checkout happens to be (a CI runner's default `actions/checkout@v4` is a
+# shallow, single-commit clone, so `HEAD~1` doesn't exist there even though it does on a full
+# local clone); a dedicated two-commit scratch repo makes this fixture depth-independent.
+accept_in() {
+  local dir="$1" name="$2"; shift 2
+  local out status
+  out="$(cd "$dir" && "$WRAPPER" "$@" 2>&1)"
   status=$?
   if [[ $status -eq 0 ]] && ! grep -q '^pantheon-git-readonly:' <<<"$out"; then
     pass "$name: accepted (exit 0, real git ran)"
@@ -113,9 +132,24 @@ accept "git status" status
 accept "git log (bare, no flags)" log
 accept "git log HEAD (bare ref, no flags)" log HEAD
 accept "git show HEAD:README.md (ref:path)" show "HEAD:README.md"
-accept "git diff HEAD~1...HEAD (bare range)" diff "HEAD~1...HEAD"
-accept "git diff HEAD~1...HEAD -- README.md (range + -- pathspec separator + path)" \
-  diff "HEAD~1...HEAD" -- README.md
+
+# Range-based fixtures (`HEAD~1...HEAD`) run against a dedicated two-commit scratch repo, not
+# $ROOT — see accept_in()'s own comment for why $ROOT's checkout depth can't be relied on here.
+SCRATCH_REPO="$(mktemp -d)"
+git -C "$SCRATCH_REPO" init -q
+git -C "$SCRATCH_REPO" config user.email "test@example.com"
+git -C "$SCRATCH_REPO" config user.name "test"
+echo "first" > "$SCRATCH_REPO/file.txt"
+git -C "$SCRATCH_REPO" add file.txt
+git -C "$SCRATCH_REPO" commit -q -m "first commit"
+echo "second" >> "$SCRATCH_REPO/file.txt"
+git -C "$SCRATCH_REPO" commit -q -am "second commit"
+
+accept_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD (bare range)" diff "HEAD~1...HEAD"
+accept_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD -- file.txt (range + -- pathspec separator + path)" \
+  diff "HEAD~1...HEAD" -- file.txt
+
+rm -rf "$SCRATCH_REPO"
 
 echo
 echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
