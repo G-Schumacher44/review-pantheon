@@ -438,6 +438,22 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
       `execution=trusted`'s own docs name as the exception to the readonly default. Set
       explicitly on that one invocation; every other consumer of `action.yml` (reviewing someone
       else's fork PR) is unaffected and still defaults to `readonly`.
+  - **Round 5 — trace-output-sink environment variables (Codex P2).** git's own docs define
+    `GIT_TRACE` and its siblings as trace-output sinks: set to an absolute path, git APPENDS
+    trace records there on every invocation — no flag, no config, just an inherited environment
+    variable. Reproduced live before fixing: `GIT_TRACE=<path to a tracked file>` pointed at a
+    file inside a real repo, run through the pre-fix wrapper, grew that file and left the
+    working tree dirty — a write, reachable purely from ambient environment (a debugging-enabled
+    CI runner, a shell that happened to have one of these set) rather than anything a hostile PR
+    controls directly. `GIT_TRACE2_EVENT`'s directory-sink form (a directory value creates a
+    per-process file inside it) is a distinct code path, reproduced and fixed the same way.
+    Fixed by unsetting every documented trace-output-sink variable in the wrapper's forced
+    environment: the general trace, the per-subsystem traces (fsmonitor, pack access, packet,
+    packfile, performance, refs, setup, shallow, curl and its verbose sibling
+    `GIT_CURL_VERBOSE`), and the Trace2 library's three sinks (human-readable, JSON event,
+    perf). Both trace mechanisms now carry a live fixture with a negative control (raw git DOES
+    write/create the marker; the wrapper does not), the same "not green-by-construction"
+    standard every config-driven-bypass fixture in this file already holds itself to.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is

@@ -138,10 +138,15 @@ if [[ "$DO_USER" != "true" ]]; then
   WORKFLOW_DEST="$TARGET/.github/workflows/review.yml"
   RULES_DEST="$TARGET/REVIEW_RULES.md"
   GITIGNORE_DEST="$TARGET/.gitignore"
-  # action/review.yml's claude_args hardcodes this exact path
-  # ($GITHUB_WORKSPACE/.github/review-agents/pantheon-git-readonly.sh) as the readonly tier's
-  # sole Bash prefix — see that file's "Run review agent" step comment for why a wrapper is
-  # needed instead of a bare `Bash(git diff *)`-style pattern (Codex P1 finding on this PR).
+  # action/review.yml reads this file's CONTENT from the PR's base commit (`git show
+  # $BASE_SHA:.github/review-agents/pantheon-git-readonly.sh`, its "Resolve read-only git
+  # wrapper (base-pinned)" step) into $RUNNER_TEMP, and points claude_args' readonly-tier Bash
+  # prefix at THAT resolved path, not at this checked-out-working-tree path directly — installing
+  # it here is still required (it's what gets committed and read at the PR's base), but the path
+  # itself is never the literal --allowedTools prefix. See that step's own comment for why a
+  # wrapper is needed instead of a bare `Bash(git diff *)`-style pattern (Codex P1, round 1) and
+  # why base-pinning is needed on top of the wrapper itself (Codex P1, round 2 — a bare
+  # $GITHUB_WORKSPACE-pinned prefix would let a PR replace this exact file and still be trusted).
   GIT_WRAPPER_DEST="$TARGET/.github/review-agents/pantheon-git-readonly.sh"
 
   mkdir -p "$AGENTS_DEST"

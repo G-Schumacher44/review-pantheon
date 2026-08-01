@@ -347,6 +347,14 @@ else
   pass "pantheon-git-readonly.sh does not carry the broken empty 'diff.external=' override in live code"
 fi
 
+for trace_var in GIT_TRACE GIT_TRACE2 GIT_TRACE2_EVENT GIT_TRACE2_PERF GIT_CURL_VERBOSE; do
+  if strip_comments "$WRAPPER_SCRIPT" | grep -qF "unset" && strip_comments "$WRAPPER_SCRIPT" | grep -qF "$trace_var"; then
+    pass "pantheon-git-readonly.sh unsets $trace_var"
+  else
+    fail "pantheon-git-readonly.sh no longer unsets $trace_var — the trace-output-sink write regression could recur"
+  fi
+done
+
 echo
 echo "execution-tier fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

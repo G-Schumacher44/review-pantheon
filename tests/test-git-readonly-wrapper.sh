@@ -311,6 +311,68 @@ fi
 rm -f "$FSMON_MARKER" "$FSMON_HOOK"
 rm -rf "$FSMON_REPO"
 
+# ---------------------------------------------------------------------------
+# Trace-output-sink env vars (Codex P2, round 5). git's own docs define GIT_TRACE (and its
+# siblings) as trace-output sinks — set to an absolute path, git APPENDS trace records there on
+# EVERY invocation, no flag or config needed, just an inherited environment variable. Reproduces
+# Codex's exact repro shape: point GIT_TRACE at a tracked file inside the repo and assert it does
+# NOT grow (a negative control isn't needed here — unlike the config-driven fixtures above,
+# there's no separate "did the mechanism fire at all" question; a byte-count comparison on a
+# real file directly proves whether the write happened).
+# ---------------------------------------------------------------------------
+section "Trace-output-sink env vars (GIT_TRACE and siblings must not write to a tracked file)"
+
+TRACE_REPO="$(mktemp -d)"
+git -C "$TRACE_REPO" init -q
+git -C "$TRACE_REPO" config user.email "test@example.com"
+git -C "$TRACE_REPO" config user.name "test"
+echo "tracked content" > "$TRACE_REPO/tracked-file"
+git -C "$TRACE_REPO" add tracked-file
+git -C "$TRACE_REPO" commit -q -m "first"
+
+TRACE_TARGET="$TRACE_REPO/tracked-file"
+before_size="$(wc -c < "$TRACE_TARGET" | tr -d ' ')"
+( cd "$TRACE_REPO" && GIT_TRACE="$TRACE_TARGET" "$WRAPPER" status >/dev/null 2>&1 )
+after_size="$(wc -c < "$TRACE_TARGET" | tr -d ' ')"
+
+if [[ "$before_size" == "$after_size" ]]; then
+  pass "GIT_TRACE pointed at a tracked file: wrapper-run 'status' left it byte-for-byte unchanged"
+else
+  fail "GIT_TRACE pointed at a tracked file: wrapper-run 'status' grew it ($before_size -> $after_size bytes) — trace-sink regression"
+fi
+
+rm -rf "$TRACE_REPO"
+
+# GIT_TRACE2_EVENT's directory-sink form (git docs: a directory value creates a per-process file
+# inside it) is a distinct code path from GIT_TRACE's plain-file form above — worth its own
+# fixture, with a negative control (raw git DOES create a file there) proving this one is live
+# too, matching the pattern the config-driven fixtures above use.
+TRACE2_REPO="$(mktemp -d)"
+git -C "$TRACE2_REPO" init -q
+git -C "$TRACE2_REPO" config user.email "test@example.com"
+git -C "$TRACE2_REPO" config user.name "test"
+echo "a" > "$TRACE2_REPO/f.txt"
+git -C "$TRACE2_REPO" add f.txt
+git -C "$TRACE2_REPO" commit -q -m "first"
+
+TRACE2_MARKER_DIR_RAW="$(mktemp -d)"
+( cd "$TRACE2_REPO" && GIT_TRACE2_EVENT="$TRACE2_MARKER_DIR_RAW" git status >/dev/null 2>&1 )
+if [[ -n "$(ls -A "$TRACE2_MARKER_DIR_RAW" 2>/dev/null)" ]]; then
+  pass "negative control: RAW git (no wrapper) DOES populate a GIT_TRACE2_EVENT-pointed directory — fixture is live"
+else
+  fail "negative control FAILED: raw git did not populate the GIT_TRACE2_EVENT directory at all — this fixture is not exercising anything"
+fi
+
+TRACE2_MARKER_DIR_WRAPPED="$(mktemp -d)"
+( cd "$TRACE2_REPO" && GIT_TRACE2_EVENT="$TRACE2_MARKER_DIR_WRAPPED" "$WRAPPER" status >/dev/null 2>&1 )
+if [[ -n "$(ls -A "$TRACE2_MARKER_DIR_WRAPPED" 2>/dev/null)" ]]; then
+  fail "GIT_TRACE2_EVENT populated a directory via the wrapper — trace-sink regression"
+else
+  pass "GIT_TRACE2_EVENT did NOT populate a directory via the wrapper — GIT_TRACE2_EVENT unset closes it"
+fi
+
+rm -rf "$TRACE2_REPO" "$TRACE2_MARKER_DIR_RAW" "$TRACE2_MARKER_DIR_WRAPPED"
+
 echo
 echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

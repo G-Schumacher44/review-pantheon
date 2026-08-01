@@ -143,6 +143,24 @@ export GIT_SEQUENCE_EDITOR=true
 export GIT_OPTIONAL_LOCKS=0
 unset GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT 2>/dev/null || true
 
+# Round 5 (Codex P2): git's own docs define GIT_TRACE and its siblings as trace-output sinks —
+# set to an absolute path, git APPENDS trace records to that file on every invocation, no flag
+# or config needed at all, just an inherited environment variable. Reproduced live here before
+# fixing: GIT_TRACE=<path to a tracked file> pantheon-git-readonly.sh status grew that file and
+# left the working tree dirty — a write, contradicting the readonly tier's no-mutation claim,
+# and reachable purely from ambient environment (a debugging-enabled CI runner, a shell that
+# happened to have one of these set) rather than anything the model or a hostile PR controls
+# directly. Also reproduced GIT_TRACE2_EVENT's directory-sink form (git docs: a directory value
+# creates a per-process file inside it) creating a real file pre-fix, and confirmed it creates
+# none post-fix. Unset every documented trace-output-sink variable (git-scm.com/docs/git — the
+# GIT_TRACE* / GIT_TRACE2* environment section, plus GIT_CURL_VERBOSE, the same class for curl's
+# own verbose/trace output): the general trace, the per-subsystem traces (fsmonitor, pack
+# access, packet, packfile, performance, refs, setup, shallow, curl and its verbose sibling),
+# and the Trace2 library's three sinks (human-readable, JSON event, perf).
+unset GIT_TRACE GIT_TRACE_FSMONITOR GIT_TRACE_PACK_ACCESS GIT_TRACE_PACKET GIT_TRACE_PACKFILE \
+      GIT_TRACE_PERFORMANCE GIT_TRACE_REFS GIT_TRACE_SETUP GIT_TRACE_SHALLOW GIT_TRACE_CURL \
+      GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 GIT_TRACE2_EVENT GIT_TRACE2_PERF 2>/dev/null || true
+
 # Global -c overrides — must precede the subcommand in git's own argument grammar (the reason
 # the flag-refusal loop above rejects the model ever supplying its own `-c`). Applied to every
 # subcommand: the fsmonitor hook is a property of git's working-tree scan, not of any one
