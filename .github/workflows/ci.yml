@@ -94,6 +94,12 @@ jobs:
       - name: Run state-persistence fixture tests
         run: bash tests/test-state-persistence.sh
 
+      - name: Run git-readonly-wrapper fixture tests
+        run: bash tests/test-git-readonly-wrapper.sh
+
+      - name: Run execution-tier fixture tests
+        run: bash tests/test-execution-tier.sh
+
   setup-smoke:
     # Clean-machine, real-Linux run of the setup story (see Dockerfile.smoke's header): required
     # binaries, both fixture suites above, install.sh and bootstrap.sh against fresh scratch

@@ -20,8 +20,18 @@ provider_run() {
   # PANTHEON_ALLOWED_TOOLS is computed and exported by cli/review-gate from gate.conf's
   # execution= / --execution (readonly default, trusted opt-in — see cli/lib/execution.sh and
   # DESIGN.md's "Security posture"). Falls back to the readonly tool set here too, so this
-  # provider lane still fails safe (not open) when invoked directly, outside review-gate.
-  local allowed_tools="${PANTHEON_ALLOWED_TOOLS:-Read,Grep,Glob,Bash(git diff *),Bash(git show *),Bash(git log *),Bash(git status *)}"
+  # provider lane still fails safe (not open) when invoked directly, outside review-gate — routed
+  # through the same argv-validating wrapper (cli/lib/pantheon-git-readonly.sh, resolved relative
+  # to THIS file's own location, not review-gate's) rather than a bare `Bash(git diff *)`-style
+  # prefix pattern, which can't tell a read-only git subcommand from the same subcommand carrying
+  # a writing/execution-capable flag (`--output=`, `--ext-diff`) — see that script's own header
+  # comment and cli/lib/execution.sh's for the finding this closes.
+  local allowed_tools="${PANTHEON_ALLOWED_TOOLS:-}"
+  if [[ -z "$allowed_tools" ]]; then
+    local fallback_wrapper
+    fallback_wrapper="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/pantheon-git-readonly.sh"
+    allowed_tools="Read,Grep,Glob,Bash($fallback_wrapper *)"
+  fi
 
   local -a args=(-p "$(cat "$prompt_file")" --allowedTools "$allowed_tools" --permission-mode default)
   if [[ -n "$model" ]]; then

@@ -170,13 +170,18 @@ PR opened                                   spec / design doc / proposal
   `run:` script either, it goes through `env:` indirection. House-rules/spec context files are
   read pinned to the PR's **base** commit, never its head, inside randomized per-render
   data-block fences, so a file the PR itself edits can't forge a close and smuggle content past
-  the boundary. Every persona is told explicitly that everything it reads — diff, file contents,
-  PR metadata, pinned file content — is data, not instructions, and that a directive found
-  inside it is itself a reportable finding, not something to follow. The verdict JSON is schema-
-  and type-validated, and the blocker invariant forces red whenever any finding is a blocker,
-  regardless of the stated verdict word. Tool execution defaults to a read-only tier
-  (`execution=readonly` — Bash scoped to `git diff`/`show`/`log`/`status`) so reviewing hostile
-  fork content never grants an agent arbitrary command execution. **Honest limit:** none of this
+  the boundary — **in the CLI lane and the published action** (`action.yml`); the vendored Way-A
+  workflow (`action/review.yml`) does not base-pin and reads these files from the checked-out
+  working tree instead, so a fork PR editing them there does reach the prompt on that one lane —
+  see [Lane differences](#lane-differences). Every persona is told explicitly that everything it
+  reads — diff, file contents, PR metadata, pinned file content — is data, not instructions, and
+  that a directive found inside it is itself a reportable finding, not something to follow. The
+  verdict JSON is schema- and type-validated, and the blocker invariant forces red whenever any
+  finding is a blocker, regardless of the stated verdict word. Tool execution defaults to a
+  read-only tier (`execution=readonly`) that routes Bash through an argv-validating wrapper
+  script — not a bare command-prefix pattern, which can't distinguish a read-only git subcommand
+  from the same subcommand carrying a writing/execution-capable flag — so reviewing hostile fork
+  content never grants an agent arbitrary command execution. **Honest limit:** none of this
   can eliminate a schema-valid, deceptive verdict from an agent that's been fully compromised by
   injected content — these layers make that harder to pull off and more visible when attempted
   (an injection attempt becomes its own flagged finding, not a silent verdict flip), and

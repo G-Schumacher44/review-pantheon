@@ -101,6 +101,7 @@ AGENTS_SRC="$SCRIPT_DIR/agents"
 DECIDE_SRC="$SCRIPT_DIR/action/decide_verdict.py"
 ACTION_SRC="$SCRIPT_DIR/action/review.yml"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
+GIT_WRAPPER_SRC="$SCRIPT_DIR/cli/lib/pantheon-git-readonly.sh"
 
 SKIPPED=()
 
@@ -130,12 +131,18 @@ if [[ "$DO_USER" != "true" ]]; then
   [[ -f "$DECIDE_SRC" ]] || die "missing $DECIDE_SRC"
   [[ -f "$ACTION_SRC" ]] || die "missing $ACTION_SRC"
   [[ -f "$RULES_SRC" ]] || die "missing $RULES_SRC"
+  [[ -f "$GIT_WRAPPER_SRC" ]] || die "missing $GIT_WRAPPER_SRC"
 
   AGENTS_DEST="$TARGET/.github/review-agents"
   DECIDE_DEST="$TARGET/.github/review-agents/decide_verdict.py"
   WORKFLOW_DEST="$TARGET/.github/workflows/review.yml"
   RULES_DEST="$TARGET/REVIEW_RULES.md"
   GITIGNORE_DEST="$TARGET/.gitignore"
+  # action/review.yml's claude_args hardcodes this exact path
+  # ($GITHUB_WORKSPACE/.github/review-agents/pantheon-git-readonly.sh) as the readonly tier's
+  # sole Bash prefix — see that file's "Run review agent" step comment for why a wrapper is
+  # needed instead of a bare `Bash(git diff *)`-style pattern (Codex P1 finding on this PR).
+  GIT_WRAPPER_DEST="$TARGET/.github/review-agents/pantheon-git-readonly.sh"
 
   mkdir -p "$AGENTS_DEST"
   for persona in "$AGENTS_SRC"/*.md; do
@@ -145,6 +152,8 @@ if [[ "$DO_USER" != "true" ]]; then
   install_file "$DECIDE_SRC" "$DECIDE_DEST"
   install_file "$ACTION_SRC" "$WORKFLOW_DEST"
   install_file "$RULES_SRC" "$RULES_DEST"
+  install_file "$GIT_WRAPPER_SRC" "$GIT_WRAPPER_DEST"
+  chmod +x "$GIT_WRAPPER_DEST"
 
   # .gitignore: append the state-file entry if not already present.
   if [[ -f "$GITIGNORE_DEST" ]]; then

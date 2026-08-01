@@ -51,6 +51,23 @@ assert_file "default install: personas copied to .github/review-agents" "$T1/.gi
 assert_file "default install: decide_verdict.py copied" "$T1/.github/review-agents/decide_verdict.py"
 assert_file "default install: review.yml workflow copied" "$T1/.github/workflows/review.yml"
 
+# pantheon-git-readonly.sh — action/review.yml's claude_args hardcodes this exact vendored path
+# as the readonly tier's sole Bash prefix (Codex P1 finding: a bare `Bash(git diff *)`-style
+# pattern can't tell a read-only git subcommand from the same subcommand carrying a
+# writing/execution-capable flag). Must land AND be executable, or the vendored workflow's
+# `readonly` tier is a dead reference on install.
+assert_file "default install: pantheon-git-readonly.sh copied" "$T1/.github/review-agents/pantheon-git-readonly.sh"
+if [[ -x "$T1/.github/review-agents/pantheon-git-readonly.sh" ]]; then
+  pass "default install: pantheon-git-readonly.sh is executable"
+else
+  fail "default install: pantheon-git-readonly.sh landed but is NOT executable"
+fi
+if cmp -s "$ROOT/cli/lib/pantheon-git-readonly.sh" "$T1/.github/review-agents/pantheon-git-readonly.sh"; then
+  pass "default install: pantheon-git-readonly.sh matches cli/lib/pantheon-git-readonly.sh verbatim"
+else
+  fail "default install: pantheon-git-readonly.sh differs from cli/lib/pantheon-git-readonly.sh"
+fi
+
 if [[ ! -e "$T1/.claude" && ! -e "$T1/.cursor" && ! -e "$T1/.agents" && ! -e "$T1/.gemini" ]]; then
   pass "default install: no editor/CLI dirs created without flags"
 else
@@ -174,6 +191,7 @@ FIXTURE_ROOT="$(mktemp -d)"
 mkdir -p "$FIXTURE_ROOT/agents"
 cp "$INSTALL" "$FIXTURE_ROOT/install.sh"
 ln -s "$ROOT/action" "$FIXTURE_ROOT/action"
+ln -s "$ROOT/cli" "$FIXTURE_ROOT/cli"
 cp "$ROOT/REVIEW_RULES.example.md" "$FIXTURE_ROOT/REVIEW_RULES.example.md"
 cp "$ROOT"/agents/*.md "$FIXTURE_ROOT/agents/"
 

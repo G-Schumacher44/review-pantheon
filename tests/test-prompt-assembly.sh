@@ -296,7 +296,13 @@ FIXTURE_NO_SPEC="$(mktemp -d)"
 
 # Shared context for every build_prompt() call below — read by the sourced build_prompt()
 # function (extracted above), which shellcheck can't see through (hence this file's top-level
-# SC2034 disable).
+# SC2034 disable). EXECUTION/PANTHEON_GIT_WRAPPER mirror what cli/review-gate itself sets as
+# globals before ever calling build_prompt() (see its own "Tiered execution" block) — this
+# extracted-function harness has to set the same globals build_prompt() now reads, or every call
+# below aborts under `set -u` the instant build_prompt() references $EXECUTION unset (exactly
+# what broke here once, caught by this repo's own tests/test-setup-smoke.sh run).
+# shellcheck disable=SC1091
+source "$ROOT/cli/lib/execution.sh"
 PR_NUMBER="1"
 PR_TITLE="test pr"
 DIFF_RANGE="refs/review-gate/base...refs/review-gate/head"
@@ -304,6 +310,8 @@ BASE_REF="main"
 FOLLOWUP_NOTE=""
 CFG_RULES_FILE=""
 WORKDIR="$WORKDIR_A"
+EXECUTION="readonly"
+PANTHEON_GIT_WRAPPER="$ROOT/cli/lib/pantheon-git-readonly.sh"
 
 # build_prompt() always writes to the fixed path $WORKDIR/<agent>.prompt.md (same name every
 # call) — copy each result out under its own name immediately, or the next case's call

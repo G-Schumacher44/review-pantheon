@@ -223,7 +223,17 @@ check "pathological-all-braces-no-json" "artemis" \
 # document, identically to Python, instead of trusting `jq -e`'s truthy-on-last-value check.
 # ---------------------------------------------------------------------------
 
-check "multi-doc-json-stream-two-objects" "artemis" \
+# Baseline/sanity coverage, NOT a repro of the divergence above — an honest Apollo finding on
+# this PR's own self-review: extract_last_json's backward scan for the LAST `{` in the text
+# already isolates `{"b":2}` as a clean, self-contained single-document candidate before
+# _pantheon_single_json's multi-doc check ever runs, so this exact fixture passes identically
+# against the pre-fix code too (plain `jq -e '.'` was never the problem here — the problem was
+# only ever a candidate whose trailing content ISN'T reachable by scanning for a fresh `{`,
+# which is exactly what the two fixtures below are). Kept as coverage that "two full JSON
+# objects, last one wins" still holds post-fix (same case tests/test-verdict-decision.sh's
+# earlier "two-json-objects-last-wins" fixture covers) — not counted as evidence for the
+# cross-runtime divergence fix; the two fixtures immediately below are what actually exercise it.
+check "multi-doc-json-stream-two-objects (baseline — does not exercise the fix; see comment above)" "artemis" \
   '{"a":1} {"b":2}' \
   "unverified" "false"
 

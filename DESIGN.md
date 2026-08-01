@@ -300,23 +300,49 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
   `github_token` input is supplied.
 - **Tiered tool execution — read-only by default.** Every provider invocation's tool set is
   scoped by an `execution` setting: `readonly` (the default — `gate.conf`'s `execution=`, the
-  CLI's `--execution` flag, or `action.yml`'s `execution` input) restricts Bash to a read-only
-  git allowlist (`Bash(git diff *)`, `Bash(git show *)`, `Bash(git log *)`,
-  `Bash(git status *)` — that's Claude Code's own permission-rule syntax, a tool name plus a
-  parenthesized command-prefix pattern; Read/Grep/Glob stay unrestricted, they're already
-  read-only by nature). `trusted` restores full Bash, the pre-existing v1 behavior. Reviewing a
-  fork PR's diff means reviewing 100%-attacker-controlled content; an agent that prompt
-  injection can steer into running an arbitrary shell command is a code-execution primitive, not
-  a review gate, so `readonly` is the default on every surface that invokes a provider
-  (`cli/providers/claude.sh`, `action.yml`, `action/review.yml`) — `trusted` is an explicit,
-  documented opt-in for own-repo/trusted-author use only, never for reviewing a fork PR you
-  don't control. `action/review.yml` (the vendored, no-config-surface lane — see "Lane
-  differences") hardcodes `readonly` with no override, matching how it already hardcodes its
-  provider and rules/spec paths; a Way-A installer who genuinely needs `trusted` there edits
-  that vendored file directly. Codex, Gemini, and Cursor's provider lanes have no equivalent
-  tool-scoping flag in their own CLIs as of v1, so this tiering currently applies to the Claude
-  lane — the only integration-tested one — across all three surfaces that invoke it; that gap is
-  disclosed, not silently assumed closed.
+  CLI's `--execution` flag, or `action.yml`'s `execution` input) restricts Bash to exactly one
+  Claude Code permission-rule prefix — `Bash(<pantheon-git-readonly.sh's path> *)` — with
+  Read/Grep/Glob left unrestricted (already read-only by nature). `trusted` restores full Bash,
+  the pre-existing v1 behavior. Reviewing a fork PR's diff means reviewing 100%-attacker-
+  controlled content; an agent that prompt injection can steer into running an arbitrary shell
+  command is a code-execution primitive, not a review gate, so `readonly` is the default on
+  every surface that invokes a provider (`cli/providers/claude.sh`, `action.yml`,
+  `action/review.yml`) — `trusted` is an explicit, documented opt-in for own-repo/trusted-author
+  use only, never for reviewing a fork PR you don't control.
+  - **Round 1 (bare prefix) → round 2 (wrapper) — a real finding, self-caught.** The first
+    version of this tier used bare `Bash(git diff *)` / `Bash(git show *)` / `Bash(git log *)` /
+    `Bash(git status *)` patterns. A Codex review on this PR caught that a command-prefix match
+    has no understanding of git's own argument grammar: `Bash(git diff *)` also permits
+    `git diff --output=tracked-file` (git's own docs describe `--output <file>` as writing to a
+    file) and `git diff --ext-diff` (spawns an arbitrary external helper) — neither read-only in
+    any sense that matters, and a prefix match on a command the MODEL chose to type is not a
+    boundary when prompt injection is exactly what's steering the model. Fixed by routing
+    `readonly` through `cli/lib/pantheon-git-readonly.sh` instead: it validates the FULL argv
+    itself (subcommand must be exactly `diff`/`show`/`log`/`status`; every remaining argument
+    must be a plain ref/path/range — no flags of any kind, not even a per-subcommand "safe" list)
+    before ever calling real `git`, and forces a pager/editor/external-diff-free environment on
+    top. See that script's own header comment for the full rationale, including what it does and
+    does not claim to fix (Claude Code's own Bash-permission handling of CHAINED shell commands —
+    `cmd1 && cmd2`, `;`, `|` — is a property of the `claude` CLI itself, tracked upstream, not
+    something a wrapper script run from inside one permitted invocation can patch; this tier is
+    defense in depth on top of whatever the installed `claude` CLI provides there, not a
+    substitute for it).
+  - The CLI lane's wrapper ships alongside `cli/lib/execution.sh` and is picked up automatically
+    (`bootstrap.sh` and `install.sh` both vendor it — see "Layout" below). `action.yml` reads it
+    from its own checkout (`github.action_path`, no vendoring needed). `action/review.yml` (the
+    vendored, no-config-surface lane — see "Lane differences") hardcodes the vendored copy's
+    path with no override, matching how it already hardcodes its provider and rules/spec paths;
+    a Way-A installer who genuinely needs `trusted` there edits that vendored file directly.
+  - Every runtime's generated per-run prompt tells the agent to call the wrapper in place of raw
+    `git` when `readonly` is active (`cli/lib/execution.sh`'s `pantheon_execution_context_note`,
+    templated into all three prompt-builders — `cli/review-gate`'s `build_prompt()`,
+    `action/lib/build_prompt.sh`, and `action/review.yml`'s inline copy) — the persona files
+    themselves stay install-agnostic (DESIGN.md rule 4) and can't embed a path that differs per
+    install, so the per-run context block is where that substitution is told.
+  - Codex, Gemini, and Cursor's provider lanes have no equivalent tool-scoping mechanism in
+    their own CLIs as of v1, so this tiering currently applies to the Claude lane — the only
+    integration-tested one — across all three surfaces that invoke it; that gap is disclosed,
+    not silently assumed closed.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is
@@ -430,7 +456,13 @@ cli/lib/render_comment.sh  the combined-comment renderer — sourced by cli/revi
                            action/lib/combine_verdicts.sh (see "Combined PR comment" below)
 cli/lib/execution.sh       tiered tool-execution policy (readonly default, trusted opt-in) —
                            sourced by cli/review-gate, exported to cli/providers/claude.sh via
-                           PANTHEON_ALLOWED_TOOLS (see "Security posture" above)
+                           PANTHEON_ALLOWED_TOOLS; also sourced by action/lib/build_prompt.sh
+                           for the per-run execution context note (see "Security posture" above)
+cli/lib/pantheon-git-readonly.sh  the argv-validating read-only git wrapper the readonly tier
+                           routes Bash through instead of a bare command-prefix pattern —
+                           vendored by bootstrap.sh (CLI lane) and install.sh
+                           (.github/review-agents/, for action/review.yml); read in place by
+                           action.yml from its own checkout (see "Security posture" above)
 cli/providers/             provider lanes (claude, codex, gemini, cursor)
 action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
                            artifact-based result passing, fail-closed decision step
@@ -462,7 +494,12 @@ tests/                     tests/test-verdict-decision.sh — cross-runner fixtu
                            five-persona "Untrusted data" wording-identity check;
                            tests/test-state-persistence.sh — extracts cli/review-gate's
                            update_review_gate_state() verbatim and proves state is written only
-                           for a green/yellow outcome, never for red/unverified
+                           for a green/yellow outcome, never for red/unverified;
+                           tests/test-git-readonly-wrapper.sh — hostile/legit argv fixtures for
+                           cli/lib/pantheon-git-readonly.sh;
+                           tests/test-execution-tier.sh — unit + cross-surface-consistency
+                           fixtures for cli/lib/execution.sh and every file that computes an
+                           --allowedTools value
 install.sh                 idempotent installer into a target repo (refuses to clobber
                            customized files); does not install gate.conf; --claude/--cursor/
                            --codex/--gemini generate per-tool projections of agents/*.md for

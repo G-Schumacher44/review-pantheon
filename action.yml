@@ -230,9 +230,17 @@ runs:
         # DESIGN.md's "Security posture"). Fail loud on an unrecognized value rather than
         # silently coercing to a guess — this is a security default, same posture as the
         # auth-input assertion step above.
+        #
+        # readonly is routed through cli/lib/pantheon-git-readonly.sh (this action's own
+        # checkout at $ACTION_PATH — no vendoring needed, unlike action/review.yml below), not a
+        # bare `Bash(git diff *)`-style prefix pattern: a prefix match can't tell a read-only git
+        # subcommand from the same subcommand carrying a writing/execution-capable flag
+        # (`--output=`, `--ext-diff`) — a real Codex finding on this PR. See that script's own
+        # header comment and cli/lib/execution.sh's for the finding this closes.
+        GIT_WRAPPER="$ACTION_PATH/cli/lib/pantheon-git-readonly.sh"
         case "$EXECUTION" in
           readonly)
-            ALLOWED_TOOLS='Read,Grep,Glob,Bash(git diff *),Bash(git show *),Bash(git log *),Bash(git status *)'
+            ALLOWED_TOOLS="Read,Grep,Glob,Bash($GIT_WRAPPER *)"
             ;;
           trusted)
             ALLOWED_TOOLS='Read,Grep,Glob,Bash'
@@ -242,6 +250,8 @@ runs:
             exit 1
             ;;
         esac
+        echo "execution=$EXECUTION" >> "$GITHUB_OUTPUT"
+        echo "git_wrapper_path=$GIT_WRAPPER" >> "$GITHUB_OUTPUT"
 
         if [ -z "$PERSONAS_PATH" ]; then
           PERSONAS_DIR="$ACTION_PATH/agents"
@@ -353,6 +363,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/artemis-prompt.md"
@@ -414,6 +426,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
         SPEC_FILE: ${{ steps.resolve.outputs.spec_file }}
         SPEC_PRESENT: ${{ steps.resolve.outputs.spec_present }}
         SPEC_CONTENT_PATH: ${{ steps.resolve.outputs.spec_content_path }}
@@ -475,6 +489,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/socrates-prompt.md"
@@ -528,6 +544,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/diogenes-prompt.md"
@@ -581,6 +599,8 @@ runs:
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
+        EXECUTION: ${{ steps.resolve.outputs.execution }}
+        GIT_WRAPPER_PATH: ${{ steps.resolve.outputs.git_wrapper_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/plato-prompt.md"

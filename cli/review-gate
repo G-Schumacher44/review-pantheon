@@ -221,8 +221,9 @@ done
 EXECUTION="${OPT_EXECUTION:-$CFG_EXECUTION}"
 pantheon_validate_execution "$EXECUTION" \
   || die "unknown execution tier '$EXECUTION' (must be 'readonly' or 'trusted')"
+PANTHEON_GIT_WRAPPER="$PANTHEON_ROOT/cli/lib/pantheon-git-readonly.sh"
 export PANTHEON_ALLOWED_TOOLS
-PANTHEON_ALLOWED_TOOLS="$(pantheon_allowed_tools_for "$EXECUTION")"
+PANTHEON_ALLOWED_TOOLS="$(pantheon_allowed_tools_for "$EXECUTION" "$PANTHEON_GIT_WRAPPER")"
 
 # ---------------------------------------------------------------------------
 # PR number validation — untrusted input starts here (PR metadata is
@@ -398,6 +399,7 @@ build_prompt() {
     echo "- PR: #$PR_NUMBER — $PR_TITLE"
     echo "- Diff range (read-only git refs, already fetched): $DIFF_RANGE"
     echo "- Base branch: $BASE_REF"
+    pantheon_execution_context_note "$EXECUTION" "$PANTHEON_GIT_WRAPPER"
     if [[ "$rules_present" == "true" ]]; then
       local rules_fence_id
       rules_fence_id="$(pantheon_fence_id_for "$rules_content")"
@@ -433,9 +435,16 @@ build_prompt() {
       echo "- $FOLLOWUP_NOTE"
     fi
     echo
-    echo "You are running inside the target repo's working tree. Use \`git diff $DIFF_RANGE\`,"
-    echo "\`git show <ref>:path\`, and \`git log\` to inspect the change — those two ref names are"
-    echo "fetched specifically for this review; don't treat them as ordinary branch names."
+    if [[ "$EXECUTION" == "trusted" ]]; then
+      echo "You are running inside the target repo's working tree. Use \`git diff $DIFF_RANGE\`,"
+      echo "\`git show <ref>:path\`, and \`git log\` to inspect the change — those two ref names are"
+      echo "fetched specifically for this review; don't treat them as ordinary branch names."
+    else
+      echo "You are running inside the target repo's working tree. Use the read-only git wrapper"
+      echo "named above (not raw \`git\`) with \`$DIFF_RANGE\` as the diff range to inspect the"
+      echo "change — those two ref names are fetched specifically for this review; don't treat"
+      echo "them as ordinary branch names."
+    fi
     echo
     echo "## Output contract"
     echo "End your response with exactly one JSON verdict object, per your persona instructions"

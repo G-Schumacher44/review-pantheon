@@ -176,14 +176,24 @@ fi
 [[ -f "$SRC_ROOT/cli/lib/verdict.sh" ]] || die "missing $SRC_ROOT/cli/lib/verdict.sh"
 [[ -f "$SRC_ROOT/cli/lib/render_comment.sh" ]] || die "missing $SRC_ROOT/cli/lib/render_comment.sh"
 [[ -f "$SRC_ROOT/cli/lib/execution.sh" ]] || die "missing $SRC_ROOT/cli/lib/execution.sh"
+[[ -f "$SRC_ROOT/cli/lib/pantheon-git-readonly.sh" ]] || die "missing $SRC_ROOT/cli/lib/pantheon-git-readonly.sh"
 [[ -d "$SRC_ROOT/cli/providers" ]] || die "missing $SRC_ROOT/cli/providers"
 [[ -d "$SRC_ROOT/agents" ]] || die "missing $SRC_ROOT/agents"
 
 # ---------------------------------------------------------------------------
 # Install — mirrors the source layout under $PREFIX (cli/review-gate, cli/lib/verdict.sh,
-# cli/lib/render_comment.sh, cli/lib/execution.sh, cli/providers/*.sh, agents/*.md) so
-# review-gate's own PANTHEON_ROOT-relative path resolution (agents/ and cli/providers/ next to
-# it) works unmodified from the prefix, exactly as it does from an in-repo checkout.
+# cli/lib/render_comment.sh, cli/lib/execution.sh, cli/lib/pantheon-git-readonly.sh,
+# cli/providers/*.sh, agents/*.md) so review-gate's own PANTHEON_ROOT-relative path resolution
+# (agents/ and cli/providers/ next to it) works unmodified from the prefix, exactly as it does
+# from an in-repo checkout.
+#
+# This manifest (the required-file checks above and the install_file calls below) is
+# hand-maintained and has already gone stale once — cli/lib/execution.sh landed without being
+# added here, so every bootstrap install broke at `source cli/lib/execution.sh` until a
+# follow-up commit caught it (a Codex P1 finding on this PR). tests/test-setup-smoke.sh's
+# Stage 4a now derives its own expected file list directly from cli/review-gate's `source`
+# lines (never hand-copied) and asserts every one of them landed in a fresh bootstrap prefix, so
+# the NEXT new cli/lib/*.sh file this repo adds fails CI here instead of silently recurring.
 # ---------------------------------------------------------------------------
 SKIPPED=()
 
@@ -211,6 +221,8 @@ chmod +x "$PREFIX/cli/review-gate"
 install_file "$SRC_ROOT/cli/lib/verdict.sh" "$PREFIX/cli/lib/verdict.sh"
 install_file "$SRC_ROOT/cli/lib/render_comment.sh" "$PREFIX/cli/lib/render_comment.sh"
 install_file "$SRC_ROOT/cli/lib/execution.sh" "$PREFIX/cli/lib/execution.sh"
+install_file "$SRC_ROOT/cli/lib/pantheon-git-readonly.sh" "$PREFIX/cli/lib/pantheon-git-readonly.sh"
+chmod +x "$PREFIX/cli/lib/pantheon-git-readonly.sh"
 
 for f in "$SRC_ROOT"/cli/providers/*.sh; do
   install_file "$f" "$PREFIX/cli/providers/$(basename "$f")"
