@@ -12,28 +12,31 @@
 #
 # Usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>
 # Reads from env: REPO_NAME, PR_NUMBER, PR_TITLE, BASE_SHA, HEAD_SHA, BASE_REF, RULES_FILE,
-# RULES_PRESENT (true/false), RULES_CONTENT, and — apollo only — SPEC_FILE, SPEC_PRESENT
-# (true/false), SPEC_CONTENT. The non-apollo build-prompt steps in action.yml don't set
-# SPEC_FILE/SPEC_PRESENT/SPEC_CONTENT at all, so all three default to empty/false below rather
-# than tripping `set -u`.
+# RULES_PRESENT (true/false), RULES_CONTENT_PATH, and — apollo only — SPEC_FILE, SPEC_PRESENT
+# (true/false), SPEC_CONTENT_PATH. The non-apollo build-prompt steps in action.yml don't set
+# SPEC_FILE/SPEC_PRESENT/SPEC_CONTENT_PATH at all, so all three default to empty/false below
+# rather than tripping `set -u`.
 #
-# RULES_CONTENT/SPEC_CONTENT are already-fetched file content, resolved ONCE by action.yml's
-# "Resolve gate configuration" step via `git show <base-sha>:<path>` against the PR's BASE
-# commit — never read from disk here, and never from the checked-out working tree, which on a
-# fork PR is attacker-controlled head content (DESIGN.md's "Security posture" — "Base-SHA-
-# pinned context file reads"). This script only templates what it's handed; it has no
-# filesystem access to REVIEW_RULES.md/DESIGN.md of its own, by design — there's structurally
-# no path here for head content to reach the prompt.
+# RULES_CONTENT_PATH/SPEC_CONTENT_PATH are PATHS to already-fetched file content (under
+# $RUNNER_TEMP), resolved ONCE by action.yml's "Resolve gate configuration" step via
+# `git show <base-sha>:<path>` against the PR's BASE commit — never read from disk here directly,
+# and never from the checked-out working tree, which on a fork PR is attacker-controlled head
+# content (DESIGN.md's "Security posture" — "Base-SHA-pinned context file reads"). Content
+# travels as a file path, not the content itself, because a large base spec/rules file blew past
+# the OS's per-step environment size limit when it rode along as a plain env var — a file has no
+# such ceiling. This script only cats what it's handed; it has no filesystem access to
+# REVIEW_RULES.md/DESIGN.md of its own, by design — there's structurally no path here for head
+# content to reach the prompt.
 set -euo pipefail
 
 AGENT_NAME="${1:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
 PERSONAS_DIR="${2:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
 PROMPT_FILE="${3:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
 
-RULES_CONTENT="${RULES_CONTENT:-}"
+RULES_CONTENT_PATH="${RULES_CONTENT_PATH:-}"
 SPEC_FILE="${SPEC_FILE:-}"
 SPEC_PRESENT="${SPEC_PRESENT:-false}"
-SPEC_CONTENT="${SPEC_CONTENT:-}"
+SPEC_CONTENT_PATH="${SPEC_CONTENT_PATH:-}"
 
 PERSONA="$PERSONAS_DIR/${AGENT_NAME}.md"
 if [ ! -f "$PERSONA" ]; then
@@ -61,7 +64,9 @@ awk '
     echo "  Pinned to the PR's base commit (${BASE_SHA}), not its head - this is the only copy to"
     echo "  trust, even if you notice a different one while inspecting the working tree."
     echo '  ```'
-    printf '  %s\n' "$RULES_CONTENT"
+    if [ -n "$RULES_CONTENT_PATH" ] && [ -f "$RULES_CONTENT_PATH" ]; then
+      printf '  %s\n' "$(cat "$RULES_CONTENT_PATH")"
+    fi
     echo '  ```'
   else
     echo "- House rules file: $RULES_FILE (not present at base ${BASE_SHA} - not applied)"
@@ -75,7 +80,9 @@ awk '
     echo "  Pinned to the PR's base commit (${BASE_SHA}), not its head - this is the only copy to"
     echo "  trust, even if you notice a different one while inspecting the working tree."
     echo '  ```'
-    printf '  %s\n' "$SPEC_CONTENT"
+    if [ -n "$SPEC_CONTENT_PATH" ] && [ -f "$SPEC_CONTENT_PATH" ]; then
+      printf '  %s\n' "$(cat "$SPEC_CONTENT_PATH")"
+    fi
     echo '  ```'
   fi
   echo

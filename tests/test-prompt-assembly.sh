@@ -108,6 +108,39 @@ common_env env SPEC_FILE="DESIGN.md" SPEC_PRESENT="true" \
   bash "$BUILD_PROMPT_SH" artemis "$AGENTS_DIR" "$A3_OUT" >/dev/null
 assert_absent "build_prompt.sh: artemis + spec present -> line absent (apollo-only)" "$A3_OUT"
 
+# A4/A5 — content travels as a FILE PATH (RULES_CONTENT_PATH/SPEC_CONTENT_PATH), never as raw
+# content in an env var. This is the fix for a real Codex finding on this PR: a large base
+# spec/rules file passed as env-var content blew past the OS's per-step environment size limit
+# ("Argument list too long"), killing the whole build-prompt step (and, since it isn't
+# continue-on-error, the entire gate run + combined comment) before build_prompt.sh ever ran.
+# See action.yml's "Resolve gate configuration" step and DESIGN.md's Security posture.
+A4_OUT="$WORKDIR_A/a4.prompt.md"
+A4_SPEC_CONTENT_FILE="$WORKDIR_A/a4-spec-content.txt"
+echo "BASE-SPEC-CONTENT-MARKER" > "$A4_SPEC_CONTENT_FILE"
+common_env env SPEC_FILE="DESIGN.md" SPEC_PRESENT="true" SPEC_CONTENT_PATH="$A4_SPEC_CONTENT_FILE" \
+  bash "$BUILD_PROMPT_SH" apollo "$AGENTS_DIR" "$A4_OUT" >/dev/null
+if grep -q "BASE-SPEC-CONTENT-MARKER" "$A4_OUT" 2>/dev/null; then
+  pass "build_prompt.sh: spec content reaches the prompt via SPEC_CONTENT_PATH (path-based, not raw env content)"
+else
+  fail "build_prompt.sh: spec content did not reach the prompt via SPEC_CONTENT_PATH"
+fi
+if grep -q "$A4_SPEC_CONTENT_FILE" "$A4_OUT" 2>/dev/null; then
+  fail "build_prompt.sh: the raw SPEC_CONTENT_PATH string leaked into the prompt instead of the file's content"
+else
+  pass "build_prompt.sh: only the referenced file's content reached the prompt, not the path string itself"
+fi
+
+A5_OUT="$WORKDIR_A/a5.prompt.md"
+A5_RULES_CONTENT_FILE="$WORKDIR_A/a5-rules-content.txt"
+echo "BASE-RULES-CONTENT-MARKER" > "$A5_RULES_CONTENT_FILE"
+common_env env RULES_PRESENT="true" RULES_CONTENT_PATH="$A5_RULES_CONTENT_FILE" \
+  bash "$BUILD_PROMPT_SH" artemis "$AGENTS_DIR" "$A5_OUT" >/dev/null
+if grep -q "BASE-RULES-CONTENT-MARKER" "$A5_OUT" 2>/dev/null; then
+  pass "build_prompt.sh: rules content reaches the prompt via RULES_CONTENT_PATH (path-based, not raw env content)"
+else
+  fail "build_prompt.sh: rules content did not reach the prompt via RULES_CONTENT_PATH"
+fi
+
 # ---------------------------------------------------------------------------
 # Part B — cli/review-gate's build_prompt(), extracted verbatim from the live script (the CLI
 # lane's own copy of this logic — not a separate file, see DESIGN.md's "Layout"). Extracting
@@ -340,12 +373,17 @@ rm -rf "$FIXTURE_WITH_SPEC" "$FIXTURE_NO_SPEC"
 # ---------------------------------------------------------------------------
 # Part D — action.yml's "Resolve gate configuration" step (the published-action lane). Part B2
 # above proves the CLI lane end-to-end with real fixture repos; action/lib/build_prompt.sh
-# (Part A) takes already-resolved RULES_CONTENT/SPEC_CONTENT as plain env vars and has no
-# filesystem access of its own to REVIEW_RULES.md/DESIGN.md, so the base-pinned fetch for THIS
-# lane lives entirely in action.yml's own embedded shell — checked structurally here the same
-# way Part C checks review.yml's inline step, since it's YAML-embedded and keyed off
-# `github.event.pull_request.base.sha` at real-workflow-run time, not something this test can
-# source and execute directly.
+# (Part A/A4/A5) takes already-resolved RULES_CONTENT_PATH/SPEC_CONTENT_PATH — file paths, not
+# raw content — and has no filesystem access of its own to REVIEW_RULES.md/DESIGN.md, so the
+# base-pinned fetch for THIS lane lives entirely in action.yml's own embedded shell — checked
+# structurally here the same way Part C checks review.yml's inline step, since it's YAML-
+# embedded and keyed off `github.event.pull_request.base.sha` at real-workflow-run time, not
+# something this test can source and execute directly. Also checks that pinned content travels
+# as a file path, not a raw-content env var/GITHUB_OUTPUT value — a real Codex finding on this
+# PR: a large base spec/rules file blew past the OS's per-step environment size limit
+# ("Argument list too long") when it rode along as env-var content, killing the whole
+# build-prompt step (and, since it isn't continue-on-error, the entire gate run) before
+# build_prompt.sh ever ran.
 # ---------------------------------------------------------------------------
 section "Part D: action.yml's Resolve-gate-configuration step (published-action lane)"
 
@@ -380,6 +418,40 @@ if grep -q -- '-f "\$GITHUB_WORKSPACE/\$RULES_FILE"' <<<"$resolve_step" || grep 
   fail "action.yml's Resolve-gate-configuration step still reads rules/spec presence from the checked-out working tree (fork-PR injection re-opened)"
 else
   pass "action.yml's Resolve-gate-configuration step no longer checks rules/spec presence on the working tree"
+fi
+
+# Pinned content must travel as a file path (under $RUNNER_TEMP), never as raw content in a
+# GITHUB_OUTPUT/env var — regression coverage for the Codex "Argument list too long" finding.
+# shellcheck disable=SC2016
+if [[ -n "$resolve_step" ]] \
+     && grep -q 'rules_content_path=' <<<"$resolve_step" \
+     && grep -q 'spec_content_path=' <<<"$resolve_step" \
+     && grep -qE 'RULES_CONTENT_FILE="\$RUNNER_TEMP' <<<"$resolve_step" \
+     && grep -qE 'SPEC_CONTENT_FILE="\$RUNNER_TEMP' <<<"$resolve_step"; then
+  pass "action.yml's Resolve-gate-configuration step writes rules/spec content to \$RUNNER_TEMP files and outputs their paths"
+else
+  fail "action.yml's Resolve-gate-configuration step no longer writes rules/spec content to \$RUNNER_TEMP files with path outputs — check for a regression back to inline content"
+fi
+
+if grep -qE 'rules_content<<|spec_content<<' <<<"$resolve_step"; then
+  fail "action.yml's Resolve-gate-configuration step still emits rules/spec CONTENT via a multiline GITHUB_OUTPUT value (the exact pattern that overflowed the env size limit)"
+else
+  pass "action.yml's Resolve-gate-configuration step no longer emits rules/spec content via GITHUB_OUTPUT"
+fi
+
+full_action_yml="$(cat "$ACTION_YML")"
+# shellcheck disable=SC2016
+if grep -q 'RULES_CONTENT_PATH: \${{ steps.resolve.outputs.rules_content_path }}' <<<"$full_action_yml" \
+     && grep -q 'SPEC_CONTENT_PATH: \${{ steps.resolve.outputs.spec_content_path }}' <<<"$full_action_yml"; then
+  pass "action.yml's build-prompt steps pass RULES_CONTENT_PATH/SPEC_CONTENT_PATH (a path), not raw content, to build_prompt.sh"
+else
+  fail "action.yml's build-prompt steps are missing RULES_CONTENT_PATH/SPEC_CONTENT_PATH env wiring"
+fi
+
+if grep -qE '^\s+RULES_CONTENT: |^\s+SPEC_CONTENT: ' <<<"$full_action_yml"; then
+  fail "action.yml still passes RULES_CONTENT/SPEC_CONTENT (raw content) to a build-prompt step's env — should be the _PATH variant"
+else
+  pass "action.yml has no remaining RULES_CONTENT/SPEC_CONTENT (raw content) env bindings"
 fi
 
 echo
