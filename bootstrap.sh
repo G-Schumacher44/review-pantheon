@@ -102,9 +102,18 @@ detect_local_src() {
 }
 
 # ---------------------------------------------------------------------------
-# fetch_tarball — the curl-pipe path, dev-HEAD lane (no --version given). GitHub's codeload
-# "HEAD" ref resolves to whatever the repo's current default branch is, so this doesn't need to
-# know or hardcode a branch name.
+# fetch_tarball <work> — the curl-pipe path, dev-HEAD lane (no --version given). GitHub's
+# codeload "HEAD" ref resolves to whatever the repo's current default branch is, so this doesn't
+# need to know or hardcode a branch name.
+#
+# <work> is a scratch dir the CALLER creates (main(), via `mktemp -d`, into the FETCH_WORKDIR
+# global) rather than one this function creates and assigns to FETCH_WORKDIR itself: this
+# function only ever runs inside `SRC_ROOT="$(fetch_tarball "$FETCH_WORKDIR")"` — a command
+# substitution, which bash runs in a SUBSHELL — so an assignment to FETCH_WORKDIR made in here
+# would only ever update that subshell's copy, never the parent shell's, and the EXIT trap
+# (which runs in the parent) would see it empty and leak this directory (a Codex finding on this
+# PR: every fetch, success or failure, left its temp dir behind under /tmp). Setting it in main()
+# BEFORE the subshell starts sidesteps the scoping problem entirely.
 #
 # Only works once review-pantheon is public: verified while writing this against the real
 # repo — both https://codeload.github.com/G-Schumacher44/review-pantheon/tar.gz/HEAD and the
@@ -112,13 +121,10 @@ detect_local_src() {
 # failure is caught below and reported with a clear next step, not masked as success.
 # ---------------------------------------------------------------------------
 fetch_tarball() {
+  local work="$1"
   local url="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/HEAD"
   command -v curl >/dev/null 2>&1 || { echo "bootstrap.sh: curl is required to bootstrap without a local checkout" >&2; return 1; }
   command -v tar >/dev/null 2>&1 || { echo "bootstrap.sh: tar is required to bootstrap without a local checkout" >&2; return 1; }
-
-  local work
-  work="$(mktemp -d)" || return 1
-  FETCH_WORKDIR="$work"
 
   echo "bootstrap.sh: no local checkout detected — fetching $REPO_OWNER/$REPO_NAME from $url" >&2
 
@@ -232,15 +238,19 @@ verify_checksum() {
 }
 
 # ---------------------------------------------------------------------------
-# fetch_release_tarball <version> — the curl-pipe path when --version is given: pulls the
+# fetch_release_tarball <work> <version> — the curl-pipe path when --version is given: pulls the
 # RELEASE tarball release.yml built for that tag, plus its SHA256SUMS, and verifies the
 # tarball's checksum BEFORE any extraction (verify_checksum's failure return is checked and
 # returned from BEFORE assert_safe_tar_listing/tar -xzf run — a checksum mismatch never reaches
 # the archive). See this file's header comment for why this only applies to the --version lane
 # (fetch_tarball's dev-HEAD codeload tarball has no equivalent published checksum to pin to).
+#
+# <work> is caller-created, same reason as fetch_tarball's <work> parameter above (this
+# function also only ever runs inside a command-substitution subshell) — see that function's
+# comment for the full explanation.
 # ---------------------------------------------------------------------------
 fetch_release_tarball() {
-  local version="$1"
+  local work="$1" version="$2"
   local tarball_name tarball_url sums_url
   tarball_name="$(release_tarball_name "$version")"
   tarball_url="$(release_tarball_url "$version")"
@@ -248,10 +258,6 @@ fetch_release_tarball() {
 
   command -v curl >/dev/null 2>&1 || { echo "bootstrap.sh: curl is required to bootstrap without a local checkout" >&2; return 1; }
   command -v tar >/dev/null 2>&1 || { echo "bootstrap.sh: tar is required to bootstrap without a local checkout" >&2; return 1; }
-
-  local work
-  work="$(mktemp -d)" || return 1
-  FETCH_WORKDIR="$work"
 
   echo "bootstrap.sh: fetching release $version — $tarball_url" >&2
 
@@ -356,10 +362,17 @@ main() {
     note "installing from local checkout: $SRC_ROOT"
     [[ -z "$VERSION" ]] || note "--version $VERSION ignored — running from a local checkout, nothing to fetch"
   elif [[ -n "$VERSION" ]]; then
-    SRC_ROOT="$(fetch_release_tarball "$VERSION")" || die "remote release install failed (see above)"
+    # FETCH_WORKDIR (the global the EXIT trap's cleanup() cleans up) is created HERE, in main()'s
+    # own scope, not inside fetch_release_tarball — that function runs inside the command
+    # substitution below, which bash executes in a subshell; an assignment made there would never
+    # reach this shell's copy of FETCH_WORKDIR. See fetch_tarball's header comment for the full
+    # explanation (a Codex finding on this PR).
+    FETCH_WORKDIR="$(mktemp -d)" || die "mktemp -d failed"
+    SRC_ROOT="$(fetch_release_tarball "$FETCH_WORKDIR" "$VERSION")" || die "remote release install failed (see above)"
     note "installing from fetched release $VERSION: $SRC_ROOT"
   else
-    SRC_ROOT="$(fetch_tarball)" || die "remote install failed (see above)"
+    FETCH_WORKDIR="$(mktemp -d)" || die "mktemp -d failed"
+    SRC_ROOT="$(fetch_tarball "$FETCH_WORKDIR")" || die "remote install failed (see above)"
     note "installing from fetched tarball (tracking dev): $SRC_ROOT"
   fi
 

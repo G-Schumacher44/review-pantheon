@@ -168,10 +168,19 @@ jobs:
           # into a release tarball. This list is the "review-gate CLI surface" contract: the
           # runner, the personas, both installers, and the example config/rules/license/readme a
           # fresh install needs. Keep it in sync by hand if that surface changes.
+          #
+          # action/decide_verdict.py and action/review.yml (only those two — NOT action/lib/,
+          # which is action.yml's composite-action runtime, not something install.sh reads) are
+          # included because install.sh's default (no --user) mode requires them at
+          # $SCRIPT_DIR/action/... and dies loud if they're missing (a Codex P1 finding on this
+          # PR: without them, install.sh from an extracted release tarball always failed).
           cp -R cli "$STAGE/cli"
           cp -R agents "$STAGE/agents"
           cp bootstrap.sh "$STAGE/bootstrap.sh"
           cp install.sh "$STAGE/install.sh"
+          mkdir -p "$STAGE/action"
+          cp action/decide_verdict.py "$STAGE/action/decide_verdict.py"
+          cp action/review.yml "$STAGE/action/review.yml"
           cp REVIEW_RULES.example.md "$STAGE/REVIEW_RULES.example.md"
           cp gate.conf.example "$STAGE/gate.conf.example"
           cp LICENSE "$STAGE/LICENSE"

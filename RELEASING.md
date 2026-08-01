@@ -25,9 +25,10 @@ access. Doc index: [docs/README.md](docs/README.md). Binding contract: [DESIGN.m
       would be unfetchable by that lane. Once that passes, it re-runs the same lint/fixture suite
       `ci.yml`'s `lint-and-test` job runs (pinned at the tag, not a branch head), then — only if
       that passes — builds `review-pantheon-vX.Y.Z.tar.gz` (the CLI surface: `cli/`, `agents/`,
-      `bootstrap.sh`, `install.sh`, `REVIEW_RULES.example.md`, `gate.conf.example`, `LICENSE`,
-      `README.md`), generates `SHA256SUMS`, and publishes both as a GitHub Release with
-      auto-generated notes.
+      `bootstrap.sh`, `install.sh`, `action/decide_verdict.py`, `action/review.yml` — the two
+      `action/` files `install.sh`'s default mode requires — `REVIEW_RULES.example.md`,
+      `gate.conf.example`, `LICENSE`, `README.md`), generates `SHA256SUMS`, and publishes both as
+      a GitHub Release with auto-generated notes.
 - [ ] **Verify the release workflow went green and both files attached** before announcing
       anything: `gh run list --workflow=release.yml --limit 1` and
       `gh release view vX.Y.Z` (confirm `review-pantheon-vX.Y.Z.tar.gz` AND `SHA256SUMS` are

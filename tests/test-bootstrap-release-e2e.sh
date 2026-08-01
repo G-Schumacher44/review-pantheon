@@ -48,6 +48,9 @@ cp -R "$ROOT/cli" "$STAGE/cli"
 cp -R "$ROOT/agents" "$STAGE/agents"
 cp "$ROOT/bootstrap.sh" "$STAGE/bootstrap.sh"
 cp "$ROOT/install.sh" "$STAGE/install.sh"
+mkdir -p "$STAGE/action"
+cp "$ROOT/action/decide_verdict.py" "$STAGE/action/decide_verdict.py"
+cp "$ROOT/action/review.yml" "$STAGE/action/review.yml"
 cp "$ROOT/REVIEW_RULES.example.md" "$STAGE/REVIEW_RULES.example.md"
 cp "$ROOT/gate.conf.example" "$STAGE/gate.conf.example"
 cp "$ROOT/LICENSE" "$STAGE/LICENSE"
@@ -69,6 +72,30 @@ else
   ( cd "$ASSETS" && shasum -a 256 "$TARBALL_NAME" > SHA256SUMS )
 fi
 pass "generated real SHA256SUMS for the fixture tarball"
+
+# ---------------------------------------------------------------------------
+# Regression check for a Codex P1 finding on this PR: install.sh's default (no --user) mode
+# reads $SCRIPT_DIR/action/decide_verdict.py and $SCRIPT_DIR/action/review.yml and dies loud if
+# either is missing — a release tarball that ships install.sh without action/ ships a broken
+# installer. Runs install.sh straight from the STAGED tree (pre-tar, same layout a real
+# extraction produces) against a fresh scratch target, proving the manifest above is not just
+# "the files are present" but "the shipped install.sh actually works."
+# ---------------------------------------------------------------------------
+section "install.sh runs successfully from the staged release tree (default mode)"
+
+SCRATCH_TARGET="$WORKDIR/install-target"
+mkdir -p "$SCRATCH_TARGET"
+if install_out="$("$STAGE/install.sh" "$SCRATCH_TARGET" 2>&1)"; then
+  pass "packaged install.sh exits 0 against a fresh scratch target"
+else
+  fail "packaged install.sh exited nonzero: $install_out"
+fi
+
+if [[ -f "$SCRATCH_TARGET/.github/review-agents/decide_verdict.py" && -f "$SCRATCH_TARGET/.github/workflows/review.yml" ]]; then
+  pass "packaged install.sh installed decide_verdict.py and review.yml from the packaged action/ files"
+else
+  fail "packaged install.sh did not install the expected gate files: $install_out"
+fi
 
 # ---------------------------------------------------------------------------
 # Standalone copy of bootstrap.sh (no sibling cli/agents dirs) — forces detect_local_src() to
