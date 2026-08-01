@@ -4,7 +4,8 @@ This is the CLI-first walkthrough: get `review-gate` installed, run it once agai
 without spending a token, then run it for real. For the zero-footprint, Action-only lane (no
 CLI, no files in your repo), see
 [Way C](#way-c--published-action-zero-repo-footprint-action-only) below. Binding contract:
-`DESIGN.md`. Doc index: [docs/README.md](README.md).
+`DESIGN.md`. Doc index: [docs/README.md](README.md). Full flag/`gate.conf` reference once
+you're past first run: [CLI.md](CLI.md).
 
 ## Prerequisites
 
