@@ -209,6 +209,35 @@ check "pathological-all-braces-no-json" "artemis" \
   "unverified" "false"
 
 # ---------------------------------------------------------------------------
+# Extractor round 3 — cross-runtime multi-document divergence (a carried finding from PR #4's
+# final review round). jq's stream parser accepts multiple whitespace-separated top-level JSON
+# documents and `jq -e '.'` bases its exit status on only the LAST one — so a candidate that's a
+# well-formed verdict object immediately followed by a second, unrelated JSON document (an
+# array, a bare number — a REAL second document, not malformed prose) read as "valid" to the
+# pre-fix bash extractor even though Python's json.loads() already rejects it via "Extra data".
+# Left unfixed, this corrupted decide_verdict()'s --argjson calls (each requires exactly one
+# JSON value) and crashed the calling shell into empty output under `set -e` instead of
+# returning a clean UNVERIFIED — reproduced live against the pre-fix code before landing this
+# fix (`jq: invalid JSON text passed to --argjson`, decide_verdict producing empty stdout).
+# cli/lib/verdict.sh's `_pantheon_single_json` is the fix: bash now requires exactly one JSON
+# document, identically to Python, instead of trusting `jq -e`'s truthy-on-last-value check.
+# ---------------------------------------------------------------------------
+
+check "multi-doc-json-stream-two-objects" "artemis" \
+  '{"a":1} {"b":2}' \
+  "unverified" "false"
+
+check "verdict-followed-by-second-json-doc-trailing-array" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}
+["not","expected"]' \
+  "unverified" "false"
+
+check "verdict-followed-by-second-json-doc-trailing-scalar" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}
+42' \
+  "unverified" "false"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

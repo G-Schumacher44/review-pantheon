@@ -156,6 +156,18 @@ inputs:
       either way.
     required: false
     default: "true"
+  execution:
+    description: >-
+      Tool-execution tier for every underlying claude-code-action invocation: "readonly" (the
+      default) restricts Bash to a read-only git allowlist (diff/show/log/status) — Read/Grep/
+      Glob stay unrestricted, they're already read-only by nature. Reviewing a PR diff is
+      reviewing content that's 100% attacker-controlled on a fork, so this is the mechanical
+      backstop behind the personas' own "read-only" instructions (which prompt injection can
+      defeat, being prose). "trusted" restores full Bash, the pre-existing behavior — reserve it
+      for own-repo/trusted-author use only, never for reviewing a fork PR you don't control. See
+      DESIGN.md's "Security posture".
+    required: false
+    default: "readonly"
 
 runs:
   using: "composite"
@@ -208,10 +220,28 @@ runs:
         RULES_FILE: ${{ inputs.rules_file }}
         SPEC_FILE: ${{ inputs.spec_file }}
         MODEL: ${{ inputs.model }}
+        EXECUTION: ${{ inputs.execution }}
         ACTION_PATH: ${{ github.action_path }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
+
+        # Tiered execution (HIGH-1 fix — see the `execution` input's own description and
+        # DESIGN.md's "Security posture"). Fail loud on an unrecognized value rather than
+        # silently coercing to a guess — this is a security default, same posture as the
+        # auth-input assertion step above.
+        case "$EXECUTION" in
+          readonly)
+            ALLOWED_TOOLS='Read,Grep,Glob,Bash(git diff *),Bash(git show *),Bash(git log *),Bash(git status *)'
+            ;;
+          trusted)
+            ALLOWED_TOOLS='Read,Grep,Glob,Bash'
+            ;;
+          *)
+            echo "::error::review-pantheon: unknown execution tier '$EXECUTION' (must be 'readonly' or 'trusted')"
+            exit 1
+            ;;
+        esac
 
         if [ -z "$PERSONAS_PATH" ]; then
           PERSONAS_DIR="$ACTION_PATH/agents"
@@ -267,8 +297,9 @@ runs:
         JSON_SCHEMA='{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
         # JSON_SCHEMA above contains only double quotes, never a single quote, so wrapping it
-        # in single quotes here (for the CLI arg) needs no further escaping.
-        CLAUDE_ARGS="--allowedTools \"Read,Grep,Glob,Bash\"
+        # in single quotes here (for the CLI arg) needs no further escaping. ALLOWED_TOOLS
+        # (computed above from the execution tier) never contains a double quote either.
+        CLAUDE_ARGS="--allowedTools \"$ALLOWED_TOOLS\"
         --json-schema '$JSON_SCHEMA'"
         if [ -n "$MODEL" ]; then
           CLAUDE_ARGS="$CLAUDE_ARGS

@@ -50,19 +50,55 @@ PROVIDERS_DIR="$PANTHEON_ROOT/cli/providers"
 source "$PANTHEON_ROOT/cli/lib/verdict.sh"
 # shellcheck disable=SC1091
 source "$PANTHEON_ROOT/cli/lib/render_comment.sh"
+# shellcheck disable=SC1091
+source "$PANTHEON_ROOT/cli/lib/execution.sh"
 
 AGENT_TIMEOUT_SECS="${REVIEW_GATE_TIMEOUT:-600}"
 
 die() { echo "review-gate: $*" >&2; exit 1; }
 note() { echo "review-gate: $*" >&2; }
 
+# update_review_gate_state <overall> <pr_number> <head_sha> <state_file> <workdir>
+#
+# Records this head SHA as reviewed ONLY for a green/yellow overall outcome. A carried finding
+# (from an external reviewer's finding on a sibling system, treated as our own): the pre-fix
+# version of this write ran unconditionally after any successful `gh pr comment` post,
+# regardless of the computed verdict — so an UNVERIFIED result (a transient provider timeout, a
+# malformed model response, anything that legitimately deserves a full retry) still marked the
+# head reviewed, and a follow-up run would then only re-review the incremental diff since that
+# poisoned state instead of retrying the whole review. Fail-closed follow-up mode requires the
+# opposite: a red or unverified outcome must leave the state file exactly as it was, so the next
+# run reviews the full PR again, not just what changed since a run that never actually gated
+# anything. No dependency on `gh`/network — pure jq + mv on a local file — so this is directly
+# unit-testable without mocking the GitHub calls the rest of this script makes (see
+# tests/test-state-persistence.sh, which extracts this function verbatim, the same pattern
+# tests/test-prompt-assembly.sh uses for build_prompt()).
+update_review_gate_state() {
+  local overall="$1" pr_number="$2" head_sha="$3" state_file="$4" workdir="$5"
+  if [[ "$overall" == "green" || "$overall" == "yellow" ]]; then
+    local tmp_state="$workdir/state.json"
+    if jq --arg pr "$pr_number" --arg sha "$head_sha" '.[$pr] = {"reviewed_sha": $sha}' "$state_file" > "$tmp_state"; then
+      mv "$tmp_state" "$state_file"
+    else
+      note "warning: comment posted but failed to update $state_file"
+    fi
+  else
+    note "overall verdict is $overall — leaving $state_file untouched so the next run retries the full PR (fail-closed: an UNVERIFIED/red result must never mark this head reviewed)"
+  fi
+}
+
 usage() {
   cat <<'EOF'
-Usage: review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"] [--dry-run]
+Usage: review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"]
+                    [--execution readonly|trusted] [--dry-run]
 
   --pr <number>       PR number to review (required).
   --provider <lane>   Provider lane in cli/providers/ (default: gate.conf, else claude).
   --agents "a b c"    Space-separated agent list (default: gate.conf, else "artemis apollo").
+  --execution <tier>  Tool-execution tier: "readonly" (default) restricts Bash to a read-only
+                       git allowlist (diff/show/log/status); "trusted" grants full Bash —
+                       own-repo/trusted-author use only, never for reviewing a fork PR you don't
+                       control. (default: gate.conf's execution=, else readonly)
   --dry-run           Build prompts and print the would-be comment; call no provider.
   -h, --help          Show this help.
 EOF
@@ -108,6 +144,7 @@ run_with_timeout() {
 PR_NUMBER=""
 OPT_PROVIDER=""
 OPT_AGENTS=""
+OPT_EXECUTION=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -115,6 +152,7 @@ while [[ $# -gt 0 ]]; do
     --pr) PR_NUMBER="${2:-}"; shift 2 ;;
     --provider) OPT_PROVIDER="${2:-}"; shift 2 ;;
     --agents) OPT_AGENTS="${2:-}"; shift 2 ;;
+    --execution) OPT_EXECUTION="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown argument: $1" ;;
@@ -143,6 +181,7 @@ CFG_BASE_BRANCH="main"
 CFG_RULES_FILE="REVIEW_RULES.md"
 CFG_SPEC_FILE="DESIGN.md"
 CFG_AGENTS="artemis apollo"
+CFG_EXECUTION="readonly"
 
 if [[ -f "$REPO_ROOT/gate.conf" ]]; then
   while IFS= read -r cfg_line; do
@@ -156,6 +195,7 @@ if [[ -f "$REPO_ROOT/gate.conf" ]]; then
       rules_file) CFG_RULES_FILE="$cfg_val" ;;
       spec_file) CFG_SPEC_FILE="$cfg_val" ;;
       agents) CFG_AGENTS="$cfg_val" ;;
+      execution) CFG_EXECUTION="$cfg_val" ;;
     esac
   done < "$REPO_ROOT/gate.conf"
 fi
@@ -173,6 +213,16 @@ for agent in $AGENTS_LIST; do
     *) die "unknown agent '$agent' (known: artemis apollo diogenes plato socrates)" ;;
   esac
 done
+
+# Tiered execution (HIGH-1 fix — see cli/lib/execution.sh and DESIGN.md's "Security posture"):
+# readonly is the default everywhere; trusted (full Bash) is an explicit opt-in. Fail-closed on
+# an unrecognized value, same posture as an unknown provider/agent above — this is a security
+# default, not something to silently coerce to a guess.
+EXECUTION="${OPT_EXECUTION:-$CFG_EXECUTION}"
+pantheon_validate_execution "$EXECUTION" \
+  || die "unknown execution tier '$EXECUTION' (must be 'readonly' or 'trusted')"
+export PANTHEON_ALLOWED_TOOLS
+PANTHEON_ALLOWED_TOOLS="$(pantheon_allowed_tools_for "$EXECUTION")"
 
 # ---------------------------------------------------------------------------
 # PR number validation — untrusted input starts here (PR metadata is
@@ -503,15 +553,7 @@ fi
 gh pr comment "$PR_NUMBER" --body-file "$COMMENT_FILE" \
   || die "gh pr comment failed — verdict computed but NOT posted, state not updated"
 
-# ---------------------------------------------------------------------------
-# Update state only after a successful post.
-# ---------------------------------------------------------------------------
-TMP_STATE="$WORKDIR/state.json"
-if jq --arg pr "$PR_NUMBER" --arg sha "$HEAD_SHA" '.[$pr] = {"reviewed_sha": $sha}' "$STATE_FILE" > "$TMP_STATE"; then
-  mv "$TMP_STATE" "$STATE_FILE"
-else
-  note "warning: comment posted but failed to update $STATE_FILE"
-fi
+update_review_gate_state "$OVERALL" "$PR_NUMBER" "$HEAD_SHA" "$STATE_FILE" "$WORKDIR"
 
 case "$OVERALL" in
   green|yellow) exit 0 ;;

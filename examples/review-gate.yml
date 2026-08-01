@@ -28,3 +28,8 @@ jobs:
           # OIDC passthrough here; see docs/SETUP.md's Way C if you need pure cloud-provider auth.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # execution: trusted   # DANGER: grants every agent full Bash instead of the default
+          #                      # read-only git allowlist (diff/show/log/status). Own-repo/
+          #                      # trusted-author use only — never for reviewing a fork PR you
+          #                      # don't control. Default is "readonly"; leave this commented
+          #                      # out unless you have a specific reason to change it.

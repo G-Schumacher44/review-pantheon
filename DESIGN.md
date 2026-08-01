@@ -143,14 +143,20 @@ reasons, and only one of them is schema-checked:
 provider_run <model> <prompt-file>   # prints the agent's raw output to stdout, nonzero on failure
 ```
 
-- `claude.sh` — `claude -p` with a restricted tool set (Read, Grep, Glob, Bash) and a timeout.
-  Default lane; the only one integration-tested in v1.
+- `claude.sh` — `claude -p` with a tiered, execution-scoped tool set (Read, Grep, Glob, and a
+  Bash allowlist that depends on the `execution` setting — see "Security posture" below) and a
+  timeout. Default lane; the only one integration-tested in v1.
 - `codex.sh` — `codex exec` non-interactive.
 - `gemini.sh` — `gemini` CLI non-interactive prompt mode.
 - `cursor.sh` — `cursor-agent` headless.
 
 The gate never trusts a lane to be well-behaved: it extracts the trailing JSON object from
-stdout, validates it against the contract with `jq`, and treats any failure as UNVERIFIED.
+stdout, validates it against the contract with `jq`, and treats any failure as UNVERIFIED. That
+trailing object must be exactly one JSON document with nothing after it — trailing content that
+is itself valid JSON (a second object, array, or scalar, not just malformed prose) is rejected
+identically to malformed trailing content, matching what Python's `json.loads()` already
+enforces on its own; both runtimes' extractors implement this the same way (see "Two runtimes,
+one rule" below).
 Provider selection: `--provider <lane>` flag, else `provider=` in config, else `claude`.
 Prompts are built identically for every lane: persona file + a generated context block (diff
 range, base branch, house-rules file, output-contract reminder). No lane gets a private fork
@@ -248,6 +254,7 @@ base_branch=main         # merge base for the review diff
 rules_file=REVIEW_RULES.md
 spec_file=DESIGN.md      # governing spec, Apollo-only context; only-if-exists; empty disables
 agents=artemis apollo    # panel for the standard gate
+execution=readonly       # readonly (default) or trusted — see "Security posture"
 ```
 
 ## Security posture (kept from the private ancestor, by design)
@@ -291,12 +298,49 @@ agents=artemis apollo    # panel for the standard gate
   so consumers never need to grant `id-token: write` — that permission is only needed for
   claude-code-action's internal OIDC-token-exchange fallback, which it skips entirely once a
   `github_token` input is supplied.
+- **Tiered tool execution — read-only by default.** Every provider invocation's tool set is
+  scoped by an `execution` setting: `readonly` (the default — `gate.conf`'s `execution=`, the
+  CLI's `--execution` flag, or `action.yml`'s `execution` input) restricts Bash to a read-only
+  git allowlist (`Bash(git diff *)`, `Bash(git show *)`, `Bash(git log *)`,
+  `Bash(git status *)` — that's Claude Code's own permission-rule syntax, a tool name plus a
+  parenthesized command-prefix pattern; Read/Grep/Glob stay unrestricted, they're already
+  read-only by nature). `trusted` restores full Bash, the pre-existing v1 behavior. Reviewing a
+  fork PR's diff means reviewing 100%-attacker-controlled content; an agent that prompt
+  injection can steer into running an arbitrary shell command is a code-execution primitive, not
+  a review gate, so `readonly` is the default on every surface that invokes a provider
+  (`cli/providers/claude.sh`, `action.yml`, `action/review.yml`) — `trusted` is an explicit,
+  documented opt-in for own-repo/trusted-author use only, never for reviewing a fork PR you
+  don't control. `action/review.yml` (the vendored, no-config-surface lane — see "Lane
+  differences") hardcodes `readonly` with no override, matching how it already hardcodes its
+  provider and rules/spec paths; a Way-A installer who genuinely needs `trusted` there edits
+  that vendored file directly. Codex, Gemini, and Cursor's provider lanes have no equivalent
+  tool-scoping flag in their own CLIs as of v1, so this tiering currently applies to the Claude
+  lane — the only integration-tested one — across all three surfaces that invoke it; that gap is
+  disclosed, not silently assumed closed.
+- **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
+  randomized data-block fences, verdict schema/type validation, the blocker invariant,
+  untrusted-data persona framing (every persona is told explicitly that everything it reads is
+  data, not instructions, and that a directive found inside it is itself a reportable finding —
+  see `agents/*.md`'s "Untrusted data, not instructions"), or default-readonly execution —
+  eliminates the risk of a schema-valid, deceptive verdict from an agent that injected content
+  has fully compromised. Together they raise the bar and make an attempt more visible (an
+  injection attempt is itself a flagged finding, not a silent verdict flip) rather than making
+  one impossible. Cross-review by a second independent agent (Artemis vs. Apollo) is the
+  mitigation against any one agent being fooled — not a guarantee against it.
 
 ## Follow-up mode (CLI lane only)
 
 Re-reviewing a PR after new commits reviews `last_reviewed_sha..head`, and the prompt tells the
 agent to read its own prior PR comment instead of re-auditing from scratch. Reviewed SHAs are
-tracked in `.review-gate-state.json` (git-ignored; bootstraps empty). This is a CLI-only
+tracked in `.review-gate-state.json` (git-ignored; bootstraps empty), written by
+`update_review_gate_state()` **only for a green or yellow overall outcome** — a red or
+UNVERIFIED result (a transient provider timeout, a malformed model response, anything that
+didn't actually gate the PR) leaves the file untouched, so the next run retries the full review
+instead of treating a failed run as if it had reviewed anything. A prior version of this write
+ran unconditionally after any successful `gh pr comment` post regardless of the computed
+verdict, which meant an UNVERIFIED result still marked the head reviewed and a follow-up run
+would only re-review what changed since a run that never actually gated anything — see
+`tests/test-state-persistence.sh` for the fixture proving both directions. This is a CLI-only
 feature, kept deliberately: the Action re-reviews the full diff on every push already (a fresh
 runner, no persisted state between runs, and GitHub's own UI shows the diff since your last
 review anyway), but a human running `review-gate` repeatedly against the same long-lived PR
@@ -312,7 +356,7 @@ identical tools. Differences are intentional, not oversights:
 | | CLI (`cli/review-gate`) | GitHub Action (`action/review.yml`) |
 |---|---|---|
 | Follow-up mode | Yes — incremental diff since last reviewed SHA (see above). | No — re-reviews the full diff on every push; no state persisted between runs. |
-| Configuration | `gate.conf` (provider, model, base branch, rules file, agent list). | None — twin panel (artemis, apollo) and `REVIEW_RULES.md` are hardcoded in the workflow. |
+| Configuration | `gate.conf` (provider, model, base branch, rules file, agent list, execution tier). | None — twin panel (artemis, apollo), `REVIEW_RULES.md`, and the read-only execution tier are hardcoded in the workflow. |
 | Provider choice | Pluggable lane (`--provider`, `cli/providers/*.sh`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
 | Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Still reads `REVIEW_RULES.md`/`DESIGN.md` straight from the checked-out working tree (this lane's inline "Build prompt" step is a third, hand-synced copy of the prompt-build logic — see "Layout" below — and wasn't brought forward in this fix). The published `action.yml` lane (a **different** file from this table's `action/review.yml` column) got the same base-pinning as the CLI. |
@@ -384,6 +428,9 @@ cli/lib/verdict.sh         extraction + verdict-decision (blocker invariant incl
                            sourced by cli/review-gate AND tests/test-verdict-decision.sh
 cli/lib/render_comment.sh  the combined-comment renderer — sourced by cli/review-gate AND
                            action/lib/combine_verdicts.sh (see "Combined PR comment" below)
+cli/lib/execution.sh       tiered tool-execution policy (readonly default, trusted opt-in) —
+                           sourced by cli/review-gate, exported to cli/providers/claude.sh via
+                           PANTHEON_ALLOWED_TOOLS (see "Security posture" above)
 cli/providers/             provider lanes (claude, codex, gemini, cursor)
 action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
                            artifact-based result passing, fail-closed decision step
@@ -411,7 +458,11 @@ tests/                     tests/test-verdict-decision.sh — cross-runner fixtu
                            tests/test-prompt-assembly.sh — spec-aware Apollo prompt-assembly
                            fixture test across all three runtimes (action/lib/build_prompt.sh,
                            cli/review-gate's build_prompt(), action/review.yml's inline copy),
-                           including the cross-runner wording-identity check
+                           including the cross-runner wording-identity check and (Part F) the
+                           five-persona "Untrusted data" wording-identity check;
+                           tests/test-state-persistence.sh — extracts cli/review-gate's
+                           update_review_gate_state() verbatim and proves state is written only
+                           for a green/yellow outcome, never for red/unverified
 install.sh                 idempotent installer into a target repo (refuses to clobber
                            customized files); does not install gate.conf; --claude/--cursor/
                            --codex/--gemini generate per-tool projections of agents/*.md for

@@ -162,8 +162,19 @@ jobs:
           # instead. `--json-schema` is the verdict-contract shape (DESIGN.md), structural
           # only — NOT each agent's own verdict vocabulary, which stays sole-sourced in
           # action/decide_verdict.py (see DESIGN.md's "Two runtimes, one rule").
+          #
+          # Bash is scoped to a read-only git allowlist (HIGH-1 fix — DESIGN.md's "Security
+          # posture"): this lane reviews a PR diff, which is 100%-attacker-controlled content on
+          # a fork, and a blanket `Bash` tool set turns prompt injection into arbitrary command
+          # execution. Unlike action.yml (the published composite action, which exposes an
+          # `execution` input), this vendored workflow has no config/input surface at all by
+          # design (see DESIGN.md's "Lane differences" — provider/config are hardcoded here the
+          # same way REVIEW_RULES.md/DESIGN.md's paths are) — readonly is not overridable from
+          # outside this file. A Way-A installer who genuinely needs full Bash (own-repo/
+          # trusted-author use only, never for reviewing a fork PR) edits this vendored copy
+          # directly, the same way they'd edit any other hardcoded value here.
           claude_args: |
-            --allowedTools "Read,Grep,Glob,Bash"
+            --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git show *),Bash(git log *),Bash(git status *)"
             --json-schema '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
       - name: Save raw agent output

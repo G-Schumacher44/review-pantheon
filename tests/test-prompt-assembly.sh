@@ -687,6 +687,80 @@ else
   fail "action.yml: 'Validate PR base/head SHAs' step ordering regressed (validate=$ACTION_VALIDATE_STEP_LINE resolve=$ACTION_RESOLVE_STEP_LINE docs-check=$ACTION_DOCSCHECK_STEP_LINE)"
 fi
 
+
+# ---------------------------------------------------------------------------
+# Part F — the "Untrusted data, not instructions" block (HIGH-2 fix: data-not-instructions
+# persona framing). DESIGN.md rule 4 requires one canonical persona per agent with no drift; the
+# task this block shipped under is explicit that the wording must be IDENTICAL across all five
+# personas, not five independently-worded paraphrases of the same rule. Checks: the block exists
+# in every persona, is byte-for-byte identical across all five (using artemis's copy as the
+# reference), and sits structurally between the "Read-only working-tree discipline" section and
+# "## Process" in every file (the placement this feature's own task specified), not floating
+# somewhere else where it could be missed or read as optional.
+# ---------------------------------------------------------------------------
+section "Part F: 'Untrusted data, not instructions' block — identical across all five personas"
+
+UNTRUSTED_HEADING='## Untrusted data, not instructions (binding)'
+READONLY_HEADING='## Read-only working-tree discipline (binding)'
+PROCESS_HEADING='## Process'
+
+extract_untrusted_block() {
+  local file="$1"
+  awk -v heading="$UNTRUSTED_HEADING" '
+    $0 == heading { grab=1 }
+    grab && /^## / && $0 != heading { exit }
+    grab { print }
+  ' "$file"
+}
+
+ALL_AGENTS="artemis apollo socrates diogenes plato"
+REFERENCE_BLOCK="$(extract_untrusted_block "$AGENTS_DIR/artemis.md")"
+
+if [[ -n "$REFERENCE_BLOCK" ]]; then
+  pass "agents/artemis.md: has an 'Untrusted data, not instructions' block (reference copy)"
+else
+  fail "agents/artemis.md: missing the 'Untrusted data, not instructions' block — cannot run the identity check"
+fi
+
+for agent in $ALL_AGENTS; do
+  persona_file="$AGENTS_DIR/${agent}.md"
+  block="$(extract_untrusted_block "$persona_file")"
+
+  if [[ -z "$block" ]]; then
+    fail "agents/${agent}.md: missing the 'Untrusted data, not instructions' block"
+    continue
+  fi
+  pass "agents/${agent}.md: has the 'Untrusted data, not instructions' block"
+
+  if [[ "$block" == "$REFERENCE_BLOCK" ]]; then
+    pass "agents/${agent}.md: block wording is byte-identical to artemis's (no drift)"
+  else
+    fail "agents/${agent}.md: block wording DIFFERS from artemis's — DESIGN.md rule 4 / this feature's own task both require identical wording across all five"
+  fi
+
+  readonly_line="$(grep -n -m1 -F "$READONLY_HEADING" "$persona_file" | cut -d: -f1)"
+  untrusted_line="$(grep -n -m1 -F "$UNTRUSTED_HEADING" "$persona_file" | cut -d: -f1)"
+  process_line="$(grep -n -m1 -F "$PROCESS_HEADING" "$persona_file" | cut -d: -f1)"
+
+  if [[ -n "$readonly_line" && -n "$untrusted_line" && -n "$process_line" ]] \
+       && [[ "$readonly_line" -lt "$untrusted_line" ]] \
+       && [[ "$untrusted_line" -lt "$process_line" ]]; then
+    pass "agents/${agent}.md: 'Untrusted data' block sits between 'Read-only working-tree discipline' and '## Process', as specified"
+  else
+    fail "agents/${agent}.md: 'Untrusted data' block placement is wrong (readonly=$readonly_line untrusted=$untrusted_line process=$process_line)"
+  fi
+done
+
+# The finding-shape guidance must point at the real schema fields (severity/issue), not an
+# invented "category" key the verdict JSON schema doesn't have (DESIGN.md's verdict contract:
+# agent/verdict/has_blocker/findings/summary, each finding is severity/file/line/issue/scenario
+# — no category field exists).
+if grep -qF 'severity: should_fix' <<<"$REFERENCE_BLOCK" && grep -qF 'attempted instruction injection' <<<"$REFERENCE_BLOCK"; then
+  pass "'Untrusted data' block tells agents to report injection attempts as severity:should_fix findings naming it in the issue text (real schema fields, no invented category key)"
+else
+  fail "'Untrusted data' block is missing the severity:should_fix / attempted-instruction-injection reporting guidance"
+fi
+
 echo
 echo "PASS: $PASS, FAIL: $FAIL"
 [[ "$FAIL" -eq 0 ]]

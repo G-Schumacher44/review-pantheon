@@ -65,6 +65,12 @@ else
   fail "tests/test-prompt-assembly.sh"
 fi
 
+if bash "$ROOT/tests/test-state-persistence.sh"; then
+  pass "tests/test-state-persistence.sh"
+else
+  fail "tests/test-state-persistence.sh"
+fi
+
 # ---------------------------------------------------------------------------
 # Stage 3 — install.sh, all four flags, against a freshly git-init'ed scratch repo (not this
 # repo's own checkout — a clean-machine install has no relationship to review-pantheon's tree).
