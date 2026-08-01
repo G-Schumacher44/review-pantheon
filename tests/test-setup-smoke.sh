@@ -122,6 +122,8 @@ fi
 for f in \
   "cli/review-gate" \
   "cli/lib/verdict.sh" \
+  "cli/lib/render_comment.sh" \
+  "cli/lib/execution.sh" \
   "cli/providers/claude.sh" \
   "agents/artemis.md"
 do
