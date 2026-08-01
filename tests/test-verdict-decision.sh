@@ -116,6 +116,72 @@ check "blocker-severity-with-has-blocker-false" "apollo" \
   "red" "true"
 
 # ---------------------------------------------------------------------------
+# Type-strict validation surface — presence-only validation (has("has_blocker") etc.) let a
+# malformed field THROUGH the schema check as long as the key existed, regardless of its type.
+# jq's `==` / Python's `is`/`==` comparisons in the blocker invariant are type-strict, so
+# `"has_blocker": "true"` (a string) never matched `== true` and the invariant silently never
+# fired — a malformed verdict could read as a clean, ungated green. Every fixture below must
+# come back unverified (never green — a malformed object earns no trust either way) with the
+# invariant NOT firing (type-strict failure is checked before the blocker invariant, so there's
+# no reliable blocker signal to trust in an object that isn't type-shaped correctly).
+# ---------------------------------------------------------------------------
+check "has-blocker-is-a-string-not-boolean" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":"true","findings":[],"summary":"clean pass, nothing to report"}' \
+  "unverified" "false"
+
+check "findings-is-an-object-not-an-array" "artemis" \
+  '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":{"severity":"should_fix","file":"a","line":1,"issue":"x","scenario":"y"},"summary":"one note"}' \
+  "unverified" "false"
+
+check "finding-severity-is-numeric-not-a-string" "artemis" \
+  '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":2,"file":"a","line":1,"issue":"x","scenario":"y"}],"summary":"one note"}' \
+  "unverified" "false"
+
+check "finding-severity-out-of-vocabulary" "artemis" \
+  '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"critical","file":"a","line":1,"issue":"x","scenario":"y"}],"summary":"one note"}' \
+  "unverified" "false"
+
+check "verdict-field-is-a-number-not-a-string" "artemis" \
+  '{"agent":"artemis","verdict":5,"has_blocker":false,"findings":[],"summary":"clean pass"}' \
+  "unverified" "false"
+
+# ---------------------------------------------------------------------------
+# Extractor hardening — leading whitespace before the trailing JSON object, and an unindented
+# `{` belonging to a NESTED object inside an otherwise valid pretty-printed verdict, must not
+# defeat extraction (the old `/^\{/`-anchored version reset on both). Fail-closed behavior for
+# genuinely malformed output is unaffected — covered above and by the pre-existing fixtures.
+# ---------------------------------------------------------------------------
+check "leading-whitespace-before-json-object" "artemis" \
+  '  {"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}' \
+  "green" "false"
+
+check "pretty-printed-with-nested-unindented-brace" "artemis" \
+  '{
+"agent": "artemis",
+"verdict": "STOP",
+"has_blocker": true,
+"findings": [
+{
+"severity": "blocker",
+"file": "src/gate.sh",
+"line": 42,
+"issue": "unquoted variable in rm path",
+"scenario": "a branch name containing a space deletes the wrong path"
+}
+],
+"summary": "one real blocker"
+}' \
+  "red" "false"
+
+# shellcheck disable=SC2016
+# The backtick below is fixture DATA (single-quoted, so bash never interprets it as command
+# substitution) — not shell syntax shellcheck needs to warn about.
+check "stray-brace-in-prose-before-the-real-verdict" "artemis" \
+  'Note: the config format uses `{key}` placeholders, not <angle> brackets.
+{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}' \
+  "green" "false"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

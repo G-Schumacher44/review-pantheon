@@ -185,6 +185,7 @@ runs:
         SPEC_FILE: ${{ inputs.spec_file }}
         MODEL: ${{ inputs.model }}
         ACTION_PATH: ${{ github.action_path }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
 
@@ -196,19 +197,43 @@ runs:
         [ -d "$PERSONAS_DIR" ] || { echo "::error::review-pantheon: personas directory not found: $PERSONAS_DIR (check the personas_path input)"; exit 1; }
         echo "personas_dir=$PERSONAS_DIR" >> "$GITHUB_OUTPUT"
 
-        if [ -n "$RULES_FILE" ] && [ -f "$GITHUB_WORKSPACE/$RULES_FILE" ]; then
+        # Rules/spec files are read from the PR's BASE commit (`git show $BASE_SHA:path`),
+        # never the checked-out working tree — on a fork PR the working tree holds the PR
+        # author's own (attacker-controlled) head content, and a rules/spec file read from
+        # there would be prompt-injectable by whoever opened the PR. A file that only exists on
+        # head (the PR itself adds or edits it) is never read; if it's absent at base, this
+        # falls back to omitting it — see DESIGN.md's "Security posture" — "Base-SHA-pinned
+        # context file reads" — and action/lib/build_prompt.sh's per-agent handling of
+        # rules_present/spec_present below for the loud-vs-silent distinction between the two.
+        RULES_CONTENT=""
+        if [ -n "$RULES_FILE" ] && RULES_CONTENT="$(git show "${BASE_SHA}:${RULES_FILE}" 2>/dev/null)"; then
           echo "rules_present=true" >> "$GITHUB_OUTPUT"
         else
+          RULES_CONTENT=""
           echo "rules_present=false" >> "$GITHUB_OUTPUT"
         fi
         echo "rules_file=$RULES_FILE" >> "$GITHUB_OUTPUT"
+        delim_rules="pantheon_$(openssl rand -hex 16)"
+        {
+          echo "rules_content<<$delim_rules"
+          printf '%s\n' "$RULES_CONTENT"
+          echo "$delim_rules"
+        } >> "$GITHUB_OUTPUT"
 
-        if [ -n "$SPEC_FILE" ] && [ -f "$GITHUB_WORKSPACE/$SPEC_FILE" ]; then
+        SPEC_CONTENT=""
+        if [ -n "$SPEC_FILE" ] && SPEC_CONTENT="$(git show "${BASE_SHA}:${SPEC_FILE}" 2>/dev/null)"; then
           echo "spec_present=true" >> "$GITHUB_OUTPUT"
         else
+          SPEC_CONTENT=""
           echo "spec_present=false" >> "$GITHUB_OUTPUT"
         fi
         echo "spec_file=$SPEC_FILE" >> "$GITHUB_OUTPUT"
+        delim_spec="pantheon_$(openssl rand -hex 16)"
+        {
+          echo "spec_content<<$delim_spec"
+          printf '%s\n' "$SPEC_CONTENT"
+          echo "$delim_spec"
+        } >> "$GITHUB_OUTPUT"
 
         # The verdict-contract JSON schema (DESIGN.md's "Verdict contract") — structural only,
         # deliberately NOT enforcing each agent's own verdict vocabulary here (that would be a
@@ -272,6 +297,7 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT: ${{ steps.resolve.outputs.rules_content }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/artemis-prompt.md"
@@ -332,8 +358,10 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT: ${{ steps.resolve.outputs.rules_content }}
         SPEC_FILE: ${{ steps.resolve.outputs.spec_file }}
         SPEC_PRESENT: ${{ steps.resolve.outputs.spec_present }}
+        SPEC_CONTENT: ${{ steps.resolve.outputs.spec_content }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/apollo-prompt.md"
@@ -391,6 +419,7 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT: ${{ steps.resolve.outputs.rules_content }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/socrates-prompt.md"
@@ -443,6 +472,7 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT: ${{ steps.resolve.outputs.rules_content }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/diogenes-prompt.md"
@@ -495,6 +525,7 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT: ${{ steps.resolve.outputs.rules_content }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/plato-prompt.md"

@@ -17,15 +17,45 @@
 # to abort the caller's shell on a bad candidate (a bad candidate is exactly the input this
 # code exists to classify, not something that should kill the process).
 
-# Last `^{`-anchored block in the output through EOF — resets on every match, so it ends up
-# holding only the final JSON object (or garbage, which decide_verdict correctly classifies
-# as unverified). Handles "trailing prose after JSON" (prose after the last `{` line still
-# gets swept into buf, so a real trailing-JSON case must have the JSON as the true tail) and
-# "two JSON objects" (last one wins) the same way.
+# Last top-level JSON object in the output through EOF — resets the candidate buffer every
+# time a `{` is seen while brace-depth is 0 (a genuinely new top-level object starting), so it
+# ends up holding only the final one (or garbage, which decide_verdict correctly classifies as
+# unverified). Handles "trailing prose after JSON" (prose after a closed object still gets
+# swept into buf — depth is back to 0 by then, and only a fresh `{` resets — so a real
+# trailing-JSON case must have the JSON as the true tail, same contract as before) and "two
+# JSON objects" (last one wins) the same way as the previous column-0-anchored version.
+#
+# Two hardenings over the old `/^\{/`-anchored version (mirrored in action/decide_verdict.py's
+# extract_last_json — keep both in sync, same as everywhere else in this file):
+#   - Leading whitespace before the object no longer defeats detection — depth-tracking finds
+#     the `{` wherever it sits on the line, not just at column 0.
+#   - A `{` seen while ALREADY inside an open top-level object (e.g. a pretty-printed verdict
+#     whose nested `findings[]` element also happens to have its own `{` unindented, at column
+#     0) no longer falsely resets the buffer and truncates the real object — only a `{` at
+#     depth 0 counts as a new candidate's start.
+# Not a full JSON tokenizer: brace-counting here isn't string-aware, so a `{`/`}` character
+# sitting inside a JSON string value (e.g. `"issue": "the object needs a { here"`) is counted
+# like any other brace. That's an accepted, documented limitation ("brace-counting, not a
+# parser") — a stray brace in prose ahead of the real verdict is only handled correctly if it's
+# balanced within the line(s) it appears on; jq's own parse of the resulting candidate is still
+# the final fail-closed backstop either way.
 extract_last_json() {
   awk '
-    /^\{/ { buf = "" }
-    { buf = buf $0 "\n" }
+    {
+      line = $0
+      len = length(line)
+      linestart = 1
+      for (i = 1; i <= len; i++) {
+        c = substr(line, i, 1)
+        if (c == "{") {
+          if (depth == 0) { buf = ""; linestart = i }
+          depth++
+        } else if (c == "}") {
+          if (depth > 0) depth--
+        }
+      }
+      buf = buf substr(line, linestart) "\n"
+    }
     END { printf "%s", buf }
   '
 }
@@ -57,15 +87,27 @@ agent_color() {
 # result worse, never better):
 #   1. Candidate must parse as JSON -> else unverified, verdict_json={}.
 #   2. Parsed object must have all five required keys -> else unverified.
-#   3. Look up color from the agent+verdict vocabulary; agent-field mismatch or an
+#   3. Type-strict validation of the invariant-read surface only — verdict must be a string,
+#      has_blocker must be strictly boolean, findings must be strictly an array, and every
+#      findings[].severity must be a string in {blocker, should_fix, note} -> else unverified.
+#      This is the fix for a real gap: presence-only validation (step 2) let a malformed
+#      `"has_blocker": "true"` (a string) through, and jq's type-strict `==` comparison in the
+#      blocker invariant below then silently never fired for it — a malformed verdict could
+#      read as a clean green. Display fields (file/line/issue/scenario/summary) are
+#      deliberately NOT checked here; DESIGN.md's "Validation surface" section is the contract
+#      for why (the render layer, cli/lib/render_comment.sh, sanitizes those at render time).
+#   4. Look up color from the agent+verdict vocabulary; agent-field mismatch or an
 #      out-of-vocabulary verdict -> unverified (but keeps verdict_json, since we can still
 #      check it for a blocker below).
-#   4. Blocker invariant: if has_blocker==true OR any finding has severity=="blocker", and
+#   5. Blocker invariant: if has_blocker==true OR any finding has severity=="blocker", and
 #      the color so far isn't already red, force color=red and invariant_fired=true. This
-#      is deliberately checked regardless of whether step 3 landed on a valid vocabulary
-#      color OR on unverified — a blocker finding is unambiguous even when the rest of the
-#      object is malformed, and red is the fail-closed direction (it blocks merge; unverified
-#      would only flag "not gated," which is a weaker signal than a known blocker deserves).
+#      is deliberately checked regardless of whether step 4 landed on a valid vocabulary
+#      color OR on unverified — a blocker finding is unambiguous even when the verdict WORD
+#      itself is malformed (typo'd/out-of-vocabulary), and red is the fail-closed direction (it
+#      blocks merge; unverified would only flag "not gated," a weaker signal than a known
+#      blocker deserves). An object that fails step 3's type-strict check never reaches this
+#      step at all — there's no reliable blocker signal to trust in an object that isn't even
+#      type-shaped correctly, so that case stays unverified, never red.
 decide_verdict() {
   local expected_agent="$1" candidate="$2"
   local verdict_json
@@ -82,6 +124,26 @@ decide_verdict() {
         <<<"$verdict_json" >/dev/null 2>&1; then
     jq -nc --arg agent "$expected_agent" \
       --arg reason "verdict JSON missing required keys" \
+      --argjson vj "$verdict_json" \
+      '{agent:$agent, color:"unverified", verdict:"UNVERIFIED", reason:$reason,
+        invariant_fired:false, top_finding:$reason, verdict_json:$vj}'
+    return 0
+  fi
+
+  # Type-strict validation surface — see decision-order comment above and DESIGN.md's
+  # "Validation surface". Deliberately scoped to verdict/has_blocker/findings/severity only.
+  if ! jq -e '
+        (.verdict | type) == "string"
+        and (.has_blocker | type) == "boolean"
+        and (.findings | type) == "array"
+        and (.findings | all(
+              type == "object"
+              and (.severity | type) == "string"
+              and (.severity | IN("blocker","should_fix","note"))
+            ))
+      ' <<<"$verdict_json" >/dev/null 2>&1; then
+    jq -nc --arg agent "$expected_agent" \
+      --arg reason "verdict JSON failed type-strict validation on the invariant-read surface (verdict must be a string, has_blocker must be boolean, findings must be an array, every findings[].severity must be a string in {blocker,should_fix,note})" \
       --argjson vj "$verdict_json" \
       '{agent:$agent, color:"unverified", verdict:"UNVERIFIED", reason:$reason,
         invariant_fired:false, top_finding:$reason, verdict_json:$vj}'

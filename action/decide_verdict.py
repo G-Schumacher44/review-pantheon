@@ -47,15 +47,31 @@ VOCAB = {
 REQUIRED_KEYS = {"agent", "verdict", "has_blocker", "findings", "summary"}
 
 
-def extract_last_json(raw: str):
-    """Same rule as cli/lib/verdict.sh's extract_last_json: the last `{`-anchored block
-    through EOF. Returns the candidate text (possibly empty)."""
-    lines = raw.splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        if line.startswith("{"):
-            start = i
-    return "\n".join(lines[start:]) if start is not None else ""
+def extract_last_json(raw: str) -> str:
+    """Same rule as cli/lib/verdict.sh's extract_last_json: track brace depth across the whole
+    text (not string-aware — a documented, accepted limitation, same as the bash twin) so a `{`
+    seen while ALREADY inside an open top-level object (e.g. a pretty-printed nested findings[]
+    element whose own `{` isn't indented) never falsely resets the candidate, while a `{` seen
+    at depth 0 — anywhere on a line, not just column 0 — always starts a fresh candidate at
+    that character. The candidate always runs from that point through EOF (never stops early at
+    the matching `}`), so trailing prose after a genuinely closed object still makes the whole
+    candidate fail to parse — same 'nothing after the JSON' fail-closed contract as before this
+    fix, just no longer defeated by leading whitespace or an unindented nested `{`."""
+    depth = 0
+    buf_lines: list[str] = []
+    for line in raw.splitlines():
+        linestart = 0
+        for i, c in enumerate(line):
+            if c == "{":
+                if depth == 0:
+                    buf_lines = []
+                    linestart = i
+                depth += 1
+            elif c == "}":
+                if depth > 0:
+                    depth -= 1
+        buf_lines.append(line[linestart:])
+    return "\n".join(buf_lines)
 
 
 def top_finding_of(verdict_obj) -> str:
@@ -78,9 +94,46 @@ def blocker_present(verdict_obj) -> bool:
     return False
 
 
+TYPE_STRICT_REASON = (
+    "verdict JSON failed type-strict validation on the invariant-read surface (verdict must be "
+    "a string, has_blocker must be boolean, findings must be an array, every findings[].severity "
+    "must be a string in {blocker,should_fix,note})"
+)
+
+
+def type_strict_ok(verdict_obj: dict) -> bool:
+    """Type-strict check of the invariant-read surface only — mirrors cli/lib/verdict.sh's
+    equivalent jq check exactly (same fields, same order of evaluation). Fixes a real gap:
+    presence-only validation let a malformed `"has_blocker": "true"` (a string, not a bool)
+    through, and `is True` / `== True` comparisons below never fire for it — a malformed
+    verdict could silently read as a clean green. Display fields (file/line/issue/scenario/
+    summary) are deliberately NOT checked here — see DESIGN.md's "Validation surface"."""
+    if not isinstance(verdict_obj.get("verdict"), str):
+        return False
+    if not isinstance(verdict_obj.get("has_blocker"), bool):
+        return False
+    findings = verdict_obj.get("findings")
+    if not isinstance(findings, list):
+        return False
+    for f in findings:
+        if not isinstance(f, dict):
+            return False
+        if not isinstance(f.get("severity"), str) or f.get("severity") not in (
+            "blocker",
+            "should_fix",
+            "note",
+        ):
+            return False
+    return True
+
+
 def decide(expected_agent: str, raw: str) -> dict:
     """Same decision order as cli/lib/verdict.sh's decide_verdict: parse -> required keys ->
-    vocabulary lookup -> blocker invariant (checked last, can only make the result worse)."""
+    type-strict validation of the invariant-read surface -> vocabulary lookup -> blocker
+    invariant (checked last, can only make the result worse). An object that fails the
+    type-strict check never reaches the blocker invariant — there's no reliable blocker signal
+    to trust in an object that isn't even type-shaped correctly, so that case stays unverified,
+    never red."""
     candidate = extract_last_json(raw)
     if not candidate:
         return {
@@ -109,6 +162,15 @@ def decide(expected_agent: str, raw: str) -> dict:
             "invariant_fired": False,
             "top_finding": "verdict JSON missing required keys",
             "verdict_json": verdict_obj if isinstance(verdict_obj, dict) else {},
+        }
+
+    if not type_strict_ok(verdict_obj):
+        return {
+            "agent": expected_agent, "color": "unverified", "verdict": "UNVERIFIED",
+            "reason": TYPE_STRICT_REASON,
+            "invariant_fired": False,
+            "top_finding": TYPE_STRICT_REASON,
+            "verdict_json": verdict_obj,
         }
 
     agent_field = verdict_obj.get("agent")

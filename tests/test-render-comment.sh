@@ -342,6 +342,49 @@ assert_contains "completeness" "@-mentions neutralized to the fullwidth lookalik
 assert_contains "completeness" "pipes escaped, table structure not fractured" "$human_readable" '\|'
 
 # ---------------------------------------------------------------------------
+# Fixture: _pantheon_truncate is character-safe, not byte-safe (a prior-review nit). Byte-offset
+# slicing (`${text:0:N}`) is only character-safe when the CALLER's locale happens to be
+# UTF-8-aware; under a `C`/POSIX locale (a bare-bones container with no locale configured, for
+# instance) both `${#text}` and `${text:a:b}` become byte-oriented, and a cut landing mid-way
+# through a multi-byte UTF-8 character corrupts it into an invalid, dangling byte sequence. The
+# fix reuses jq (already a hard requirement for this whole file) for the length/slice, since
+# jq's strings are always UTF-8 codepoint sequences, independent of the C library locale.
+# ---------------------------------------------------------------------------
+MB_PREFIX_88="$(printf 'x%.0s' $(seq 1 88))"
+MB_SUFFIX_20="$(printf 'y%.0s' $(seq 1 20))"
+
+# Case 1: the multi-byte character (→, a 3-byte UTF-8 codepoint) sits exactly AT the cut —
+# it's the 89th character, i.e. still inside the kept `max - 1` = 89 characters. Must be kept
+# whole, immediately followed by the ellipsis, never split into a broken byte sequence.
+mb_text_1="${MB_PREFIX_88}→${MB_SUFFIX_20}"
+truncated_1="$(_pantheon_truncate "$mb_text_1" 90)"
+if [[ "$truncated_1" == "${MB_PREFIX_88}→…" ]]; then
+  pass "truncate: multi-byte char sitting exactly at the cut boundary is kept whole, not split"
+else
+  fail "truncate: multi-byte char sitting exactly at the cut boundary is kept whole, not split" "got '$truncated_1'"
+fi
+
+# Case 2: the same character sits one position further out (the 90th character) — now past the
+# kept 89 characters. Must be dropped whole (never split into a dangling lead byte).
+MB_PREFIX_89="$(printf 'x%.0s' $(seq 1 89))"
+mb_text_2="${MB_PREFIX_89}→${MB_SUFFIX_20}"
+truncated_2="$(_pantheon_truncate "$mb_text_2" 90)"
+if [[ "$truncated_2" == "${MB_PREFIX_89}…" ]]; then
+  pass "truncate: multi-byte char just past the cut boundary is dropped whole, not split"
+else
+  fail "truncate: multi-byte char just past the cut boundary is dropped whole, not split" "got '$truncated_2'"
+fi
+
+# Case 3: the same hostile-content-style check, but through the full render path (a top-finding
+# table cell), the way this helper is actually invoked in production.
+reset_agent_env
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="no findings"
+ARTEMIS_FINDINGS="$(jq -nc --arg issue "$mb_text_1" '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"note","file":"a.sh","line":1,"issue":$issue,"scenario":"n/a"}],"summary":"multi-byte truncation check"}')"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+out="$(pantheon_render_comment "$HEAD_SHA" artemis)"
+assert_contains "multi-byte-truncation" "the table cell keeps the boundary character whole" "$out" "${MB_PREFIX_88}→…"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

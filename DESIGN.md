@@ -98,8 +98,42 @@ Every agent run must end with a single JSON object (and nothing after it):
   forced to red regardless of the stated `verdict` field, and the gate logs that the
   invariant fired. An object where the verdict and the findings disagree is treated as red,
   not trusted at face value — see "Two runtimes, one rule" below for how both deciders stay
-  in sync on this.
+  in sync on this. A finding with `severity: "blocker"` (or `has_blocker: true`) forces red
+  even when the stated `verdict` word itself is invalid — a typo'd or out-of-vocabulary
+  `verdict` still gets overridden to red if a genuine blocker is present, rather than landing
+  on the weaker "not gated" signal. That override needs an object that's at least
+  type-shaped correctly first, though — see "Validation surface" below for the line between
+  "malformed enough to override" and "malformed enough to distrust outright."
 - A docs-only diff (only `*.md` / `docs/**` changed) may skip Apollo with a loud 🟡 skip note.
+
+### Validation surface
+
+Both deciders validate two different things about a verdict object, for two different
+reasons, and only one of them is schema-checked:
+
+- **The invariant-read surface — type-strict, fail-closed.** `verdict`, `has_blocker`,
+  `findings`, and every `findings[].severity` are the fields the blocker invariant and the
+  vocabulary lookup actually reason over — a decision gets made by comparing them, not just
+  displaying them. Both deciders check their *types*, not just their presence: `verdict` must
+  be a string, `has_blocker` must be strictly boolean, `findings` must be strictly an array,
+  and every `findings[].severity` must be a string in `{blocker, should_fix, note}`. Any miss
+  is UNVERIFIED, never green. This closes a real gap the presence-only check (`has("has_blocker")`
+  etc.) left open: `"has_blocker": "true"` (a string) satisfied presence validation, and since
+  both jq's `==` and Python's `is`/`==` comparisons are type-strict, the blocker invariant
+  compared a string against the boolean `true` and silently never fired — a malformed verdict
+  with a smuggled-in string `has_blocker` could read as a clean, ungated green. Named
+  precisely: this repo has exactly two implementations of this check, `cli/lib/verdict.sh`'s
+  `decide_verdict()` and `action/decide_verdict.py`'s `type_strict_ok()` — see "Two runtimes,
+  one rule" for how they stay in sync.
+- **The display surface — deliberately NOT schema-validated.** `file`, `line`, `issue`,
+  `scenario`, and `summary` never get compared against anything or branched on — they only get
+  *shown*. Validating their types here would just be a second copy of a check the render layer
+  already owns: `cli/lib/render_comment.sh` sanitizes every one of these fields at render time
+  (`_pantheon_sanitize_inline`, plus `.line`'s numeric-or-`?` coercion) precisely because
+  they're untrusted model output reaching a Markdown/HTML surface, regardless of what the
+  decider validated or didn't about that same data. The two layers check different things for
+  different reasons — decision-surface types here, render-surface safety there — and neither
+  substitutes for the other.
 
 ## Provider lanes
 
@@ -223,6 +257,19 @@ agents=artemis apollo    # panel for the standard gate
   or a shell command. Unsafe metadata → UNVERIFIED, not a crash.
 - Model output is never interpolated into shell (`run:`) directly — it travels via files and
   env vars.
+- **Base-SHA-pinned context file reads.** `REVIEW_RULES.md` and the spec file (`DESIGN.md` by
+  default) are read via `git show <base-sha>:<path>` — the PR's BASE commit — never from the
+  checked-out working tree. This closes a fork-PR instruction-injection class: on a fork PR,
+  the working tree at review time can hold the PR author's own edits to those files, and a
+  rules/spec file read from there would let whoever opened the PR inject content straight into
+  the reviewing agents' prompts (e.g. a house "rule" that tells the reviewer to wave everything
+  through). A file the PR itself adds or edits only on its head is never read for this purpose;
+  when it's absent at the base commit, the CLI lane (`cli/review-gate`'s `build_prompt()`) and
+  the published action lane (`action.yml`'s "Resolve gate configuration" step +
+  `action/lib/build_prompt.sh`) fall back to omitting it — a loud "not present at base — not
+  applied" note for the always-on house-rules file, the same pre-existing silent skip as when
+  it's absent entirely for the only-if-exists spec file. `action/review.yml` (the vendored,
+  install.sh-Way-A workflow) is not part of this fix — see "Lane differences" below.
 - The GitHub Action checks out with `persist-credentials: false` and fails loud (not skip)
   when its token secret is absent. It pins `anthropics/claude-code-action` to a full commit
   SHA — `be7b93b1907a4abad570368f3c74b6fe3807510b` (v1.0.183) — read directly from that
@@ -263,6 +310,7 @@ identical tools. Differences are intentional, not oversights:
 | Configuration | `gate.conf` (provider, model, base branch, rules file, agent list). | None — twin panel (artemis, apollo) and `REVIEW_RULES.md` are hardcoded in the workflow. |
 | Provider choice | Pluggable lane (`--provider`, `cli/providers/*.sh`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
+| Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Still reads `REVIEW_RULES.md`/`DESIGN.md` straight from the checked-out working tree (this lane's inline "Build prompt" step is a third, hand-synced copy of the prompt-build logic — see "Layout" below — and wasn't brought forward in this fix). The published `action.yml` lane (a **different** file from this table's `action/review.yml` column) got the same base-pinning as the CLI. |
 
 ## Published action
 
