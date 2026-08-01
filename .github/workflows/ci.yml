@@ -73,7 +73,7 @@ jobs:
           pip install --quiet pyyaml
           python3 -c "
           import yaml
-          for f in ('action/review.yml', '.github/workflows/ci.yml'):
+          for f in ('action/review.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
               with open(f) as fh:
                   yaml.safe_load(fh)
               print(f + ': OK')
@@ -102,6 +102,15 @@ jobs:
 
       - name: Run execution-tier fixture tests
         run: bash tests/test-execution-tier.sh
+
+      - name: Run bootstrap release/checksum fixture tests
+        run: bash tests/test-bootstrap-release.sh
+
+      - name: Run bootstrap release fetch/install end-to-end fixture tests
+        run: bash tests/test-bootstrap-release-e2e.sh
+
+      - name: Run release.yml tag-validation gate fixture tests
+        run: bash tests/test-release-tag-gates.sh
 
   setup-smoke:
     # Clean-machine, real-Linux run of the setup story (see Dockerfile.smoke's header): required
