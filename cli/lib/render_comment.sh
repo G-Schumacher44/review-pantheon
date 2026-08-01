@@ -34,6 +34,20 @@
 # Two public entry points:
 #   pantheon_overall_color <agent...>            -> prints green|yellow|red|unverified
 #   pantheon_render_comment <head_sha> <agent...> -> prints the full comment markdown to stdout
+#
+# Sanitize-at-render (the two-layer contract): every value this file reads out of an agent's
+# JSON, or derives from one, is untrusted model output — verdict, summary, and each finding's
+# severity/file/line/issue/scenario — and gets routed through _pantheon_sanitize_inline (or a
+# stricter variant, e.g. .line's numeric-or-"?" coercion) before it reaches the human-readable
+# section of the comment. That's the DISPLAY half of the contract: this file's job is to make
+# sure no byte of model-controlled input can fracture the comment's markdown/HTML structure,
+# regardless of what the decision layer upstream (cli/lib/verdict.sh, decide_verdict.py) did or
+# didn't validate about that same data on the invariant-read surface (verdict/has_blocker/
+# findings/severity — the fields the blocker invariant and vocabulary lookup actually reason
+# over). The two layers check different things for different reasons and neither substitutes
+# for the other. The ONE deliberate exception is the machine tail (the nested "Raw verdict
+# JSON" block near the end of pantheon_render_comment) — it prints the untouched JSON on
+# purpose, because that's the whole point of keeping a machine-readable copy.
 set -u 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
@@ -56,6 +70,9 @@ set -u 2>/dev/null || true
 #     rule, one function, rather than a second bespoke sanitizer just for code-span contexts.
 #   - Angle brackets: HTML-escaped (&lt;/&gt;), so a value can't be mistaken for (or rendered
 #     as) an HTML tag in GitHub's comment renderer.
+#   - @: replaced with the fullwidth lookalike ＠ (U+FF20). A raw `@name` in a posted GitHub
+#     comment is a real notification ping, not just a markdown-structure risk — this is about
+#     not letting a model's text page an arbitrary user/team, not about rendering.
 _pantheon_sanitize_inline() {
   local s="$1"
   s="${s//$'\n'/ }"
@@ -63,6 +80,7 @@ _pantheon_sanitize_inline() {
   s="${s//\`/\'}"
   s="${s//</\&lt;}"
   s="${s//>/\&gt;}"
+  s="${s//@/＠}"
   printf '%s' "$s"
 }
 
@@ -89,7 +107,11 @@ _pantheon_severity_badge() {
     blocker) printf '**blocker**' ;;
     should_fix) printf 'should_fix' ;;
     note) printf 'note' ;;
-    *) printf '%s' "$1" ;;
+    # An out-of-enum severity is still model output, interpolated raw here until this fix —
+    # sanitize it like every other model-controlled field, AND wrap it in a literal label so
+    # it reads as "the gate doesn't recognize this," not as a fourth kind of legitimate badge
+    # sitting next to blocker/should_fix/note. Visible, not pretty, on purpose.
+    *) printf 'unrecognized-severity(%s)' "$(_pantheon_sanitize_inline "$1")" ;;
   esac
 }
 

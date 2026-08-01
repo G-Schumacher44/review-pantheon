@@ -275,6 +275,73 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Fixture: COMPLETENESS — every field of a verdict object (verdict, severity, file, line,
+# issue, scenario, summary — plus the invariant-override reason and the fallback "top" text)
+# carries a markdown/HTML-hostile payload (backticks, pipes, angle brackets, a raw `<details>`
+# tag, an @-mention, and a non-numeric line), all at once. This is the completeness check for
+# the audit in cli/lib/render_comment.sh's header comment ("sanitize-at-render" contract): NO
+# byte of model-controlled input should reach the human-readable section unsanitized, in ANY
+# field, not just the ones earlier fixtures happened to cover one at a time. Regression
+# coverage for three rounds of the same bug class this repo's own gate found on itself on PR
+# #3: round 1 was .file/.line in the itemized list, round 2 was the renderer's OWN formatting
+# backticks getting corrupted by the round-1 fix, round 3 was _pantheon_severity_badge's
+# out-of-enum default branch.
+#
+# The one deliberate exception: the machine tail (nested "Raw verdict JSON") ships the
+# untouched JSON on purpose (that's the whole point of keeping a machine-readable copy) — the
+# "no raw hostile token" assertions below are scoped to the human-readable section only, the
+# same way the earlier "hostile-content" fixture's checks are.
+# ---------------------------------------------------------------------------
+# Every literal backtick from here through ARTEMIS_REASON below is fixture DATA (single-quoted,
+# so bash never interprets it as command substitution) — not shell syntax the linter needs to
+# warn about. Same rationale as the file-header disable note above, repeated per-line below
+# because the linter's inline directives apply per-line, not to a whole block.
+reset_agent_env
+ARTEMIS_COLOR=red
+# shellcheck disable=SC2016
+ARTEMIS_VERDICT='SHIP`<script>|@here'
+# shellcheck disable=SC2016
+ARTEMIS_TOP='fallback `top` <b>text</b> | @mention'
+# shellcheck disable=SC2016
+ARTEMIS_FINDINGS='{"agent":"artemis`<x>|@evil","verdict":"SHIP`<script>|@here","has_blocker":true,"findings":[{"severity":"totally_bogus`<sev>|@x","file":"src/`file`.sh<img>|pipe@x","line":"not-a-number`<ln>","issue":"issue `backtick` <b>tag</b> | pipe @mention","scenario":"scenario `backtick` <i>tag</i> | pipe @mention <details><summary>x</summary></details>"}],"summary":"summary `backtick` <script>alert(1)</script> | pipe @mention <details><summary>x</summary></details>"}'
+ARTEMIS_INVARIANT=true
+# shellcheck disable=SC2016
+ARTEMIS_REASON='blocker finding present (severity=blocker or has_blocker=true) — forcing red regardless of stated verdict `SHIP`<script>|@here`'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS ARTEMIS_INVARIANT ARTEMIS_REASON
+
+out="$(pantheon_render_comment "$HEAD_SHA" artemis)"
+human_readable="${out%%<summary>Raw verdict JSON*}"
+
+# --- structural validity ---
+# Counts are scoped to $human_readable, not the full $out: the raw JSON machine tail is
+# deliberately UNSANITIZED (see this fixture's header comment), so the hostile payload's own
+# literal "<details>" text legitimately appears again inside the pretty-printed JSON dump —
+# counting on $out would conflate that expected, by-design content with a real structural bug.
+assert_contains "completeness" "table header survives" "$human_readable" "| Agent | Verdict | Top finding |"
+assert_contains "completeness" "the agent's table row is present and 3-column" "$human_readable" "| artemis | \`"
+# Exactly two REAL <details> tags belong in the human-readable slice: the outer findings fold
+# (forced open) and the bare opening tag of the nested machine-tail fold (the slice cuts right
+# after it, at <summary>Raw verdict JSON). Any more than two means a hostile payload leaked an
+# unescaped structural tag into the output instead of being neutralized to &lt;details&gt;.
+assert_count "completeness" "exactly two real <details> tags in the human-readable section" "$human_readable" "<details" 2
+assert_contains "completeness" "outer fold forced open on red" "$human_readable" "<details open>"
+assert_contains "completeness" "the identity line and its SHA code span survive" "$human_readable" "**artemis** @ \`$SHORT_SHA\` —"
+assert_contains "completeness" "out-of-enum severity is normalized, visually distinct" "$human_readable" "unrecognized-severity("
+assert_contains "completeness" "non-numeric line degrades to the placeholder" "$human_readable" ":?\`"
+
+# --- no raw hostile token anywhere in the human-readable section ---
+for token in '<script>' '<b>tag' '<i>tag' '<img' '<details><summary>' '</details></details>' '@here' '@mention' '@evil' '@x'; do
+  assert_not_contains "completeness" "no raw '$token' in the human-readable section" "$human_readable" "$token"
+done
+
+# --- the hostile payloads are neutralized, not silently dropped (content still visible) ---
+assert_contains "completeness" "backticks neutralized to a straight quote" "$human_readable" "SHIP'"
+assert_contains "completeness" "angle brackets HTML-escaped" "$human_readable" "&lt;script&gt;"
+assert_contains "completeness" "the raw <details> payload is escaped, not rendered as a real nested fold" "$human_readable" "&lt;details&gt;&lt;summary&gt;"
+assert_contains "completeness" "@-mentions neutralized to the fullwidth lookalike" "$human_readable" "＠here"
+assert_contains "completeness" "pipes escaped, table structure not fractured" "$human_readable" '\|'
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo
