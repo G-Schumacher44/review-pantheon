@@ -1,0 +1,235 @@
+# .github/workflows/release.yml — builds and publishes a tagged GitHub Release.
+#
+# Fires on push of a `vX.Y.Z` tag (the operator's ceremony — see RELEASING.md at repo root for
+# the actual promotion-then-tag flow; this workflow never creates tags itself, only reacts to
+# one that already landed). Two jobs:
+#
+#   1. test    — the SAME suite ci.yml's `lint-and-test` job runs (bash -n, shellcheck,
+#                py_compile, YAML-parse, all seven fixture suites), re-run at the tagged commit
+#                as the release gate. A release built from a commit that fails this suite is
+#                worse than no release, so this job blocking `build-and-publish` (via `needs:`)
+#                is the whole point — deliberately NOT the full ci.yml (no Docker setup-smoke,
+#                no composite-action-self-check) since those need a Docker daemon / PR context
+#                this tag-push trigger doesn't have; the fixture+lint suite below is the part of
+#                ci.yml that's meaningful to re-run against an arbitrary tagged commit. Its first
+#                two steps gate everything else: the tag must be a strict semver AND its commit
+#                must be reachable from origin/main (i.e. RELEASING.md's dev->main promotion
+#                ceremony was actually followed, not a stray tag cut from dev or elsewhere).
+#   2. build-and-publish — stages the CLI surface (explicit file list, no globs — see the step
+#                below for why), tars it as review-pantheon-<tag>.tar.gz, generates SHA256SUMS,
+#                and creates the GitHub Release with `gh release create`, notes auto-generated.
+#
+# Permissions are set at the job level, not workflow level, so the `test` job (which needs
+# nothing beyond reading the checkout) doesn't inherit the write scope `build-and-publish` needs.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  test:
+    # Re-run of ci.yml's lint-and-test job shape, pinned at the tag instead of a branch head —
+    # see this file's header comment for why this is a SUBSET of ci.yml (not the whole thing).
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # only needs to read the tagged checkout
+    steps:
+      # GitHub's `v*.*.*` tag-filter trigger above is a GLOB, not a semver validator — `*`
+      # matches any non-`/` characters, so e.g. `v1.2.3-rc1` or `vfoo.bar.baz` also fire this
+      # workflow (Codex finding on this PR). bootstrap.sh's `--version` flag only ever accepts
+      # the strict `^v[0-9]+\.[0-9]+\.[0-9]+$` shape (see its header comment), so without this
+      # check the workflow could publish a Release that lane can never fetch. Fail fast, before
+      # spending any CI time on a tag that will never be consumable.
+      - name: Validate tag is a strict vX.Y.Z semantic version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$TAG' matched this workflow's 'v*.*.*' glob trigger but is NOT a strict vX.Y.Z semantic version (no pre-release/build suffix, digits only). bootstrap.sh's --version flag requires exactly this shape and would refuse to fetch a release built from this tag — see RELEASING.md. Delete this tag and re-tag with a strict vX.Y.Z."
+            exit 1
+          fi
+          echo "tag '$TAG' is a valid vX.Y.Z release tag"
+
+      - name: Checkout
+        uses: actions/checkout@v4 # matches ci.yml's pin — checks out the pushed tag by default
+        with:
+          fetch-depth: 0 # full history — the ancestry check below needs origin/main's real
+          # history, not the shallow single-commit checkout actions/checkout@v4 does by default
+
+      - name: Verify tag is reachable from main (the promotion ceremony was actually followed)
+        run: |
+          set -euo pipefail
+          # RELEASING.md's ceremony is dev -> (promotion PR) -> protected main -> tag main's
+          # commit. Nothing before this enforced that ORDER — a well-formed vX.Y.Z tag cut
+          # straight from dev (or any commit never promoted to main) passed the semver check
+          # above and would otherwise build and publish a release anyway (Codex finding on this
+          # PR). Refuse unless the tagged commit is an ancestor of origin/main.
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::tag '${GITHUB_REF_NAME}' (commit ${GITHUB_SHA}) is NOT reachable from origin/main. RELEASING.md requires promoting dev to main via PR BEFORE tagging — this commit was never promoted (or main has since moved past a point that would make it so). Refusing to build a release from it; see RELEASING.md's checklist."
+            exit 1
+          fi
+          echo "tag '${GITHUB_REF_NAME}' (commit ${GITHUB_SHA}) is reachable from origin/main — promotion ceremony was followed"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+
+      - name: bash -n on every shell script
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' f; do
+            echo "bash -n $f"
+            bash -n "$f" || status=1
+          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          exit "$status"
+
+      - name: shellcheck on every shell script
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' f; do
+            echo "shellcheck $f"
+            shellcheck "$f" || status=1
+          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          exit "$status"
+
+      - name: py_compile every Python file
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' f; do
+            echo "py_compile $f"
+            python3 -m py_compile "$f" || status=1
+          done < <(find . -type f -name '*.py' -not -path './.git/*' -print0)
+          exit "$status"
+
+      - name: YAML-parse the workflows
+        run: |
+          pip install --quiet pyyaml
+          python3 -c "
+          import yaml
+          for f in ('action/review.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
+              with open(f) as fh:
+                  yaml.safe_load(fh)
+              print(f + ': OK')
+          "
+
+      - name: Run verdict-decision fixture tests
+        run: bash tests/test-verdict-decision.sh
+
+      - name: Run base-pinned-read fixture tests (symlink-safe resolution)
+        run: bash tests/test-base-pinned-read.sh
+
+      - name: Run combined-comment renderer fixture tests
+        run: bash tests/test-render-comment.sh
+
+      - name: Run install.sh fixture tests
+        run: bash tests/test-install.sh
+
+      - name: Run prompt-assembly fixture tests
+        run: bash tests/test-prompt-assembly.sh
+
+      - name: Run state-persistence fixture tests
+        run: bash tests/test-state-persistence.sh
+
+      - name: Run git-readonly-wrapper fixture tests
+        run: bash tests/test-git-readonly-wrapper.sh
+
+      - name: Run execution-tier fixture tests
+        run: bash tests/test-execution-tier.sh
+
+      - name: Run bootstrap release/checksum fixture tests
+        run: bash tests/test-bootstrap-release.sh
+
+      - name: Run bootstrap release fetch/install end-to-end fixture tests
+        run: bash tests/test-bootstrap-release-e2e.sh
+
+      - name: Run release.yml tag-validation gate fixture tests
+        run: bash tests/test-release-tag-gates.sh
+
+  build-and-publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      # contents: write is the ONLY elevated scope this workflow needs — `gh release create`
+      # both creates the Release object and uploads assets under the contents API. Everything
+      # else (pull-requests, issues, packages, actions, ...) stays at its implicit "none" here
+      # since this job never touches them; scoping tight rather than relying on the repo's
+      # default token permissions is the point of declaring this block at all.
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4 # checks out the pushed tag by default — this job doesn't
+        # need test tooling (shellcheck/python), just the tree contents to package.
+
+      - name: Build versioned tarball
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          NAME="review-pantheon-${TAG}"
+          STAGE_ROOT="$(mktemp -d)"
+          STAGE="${STAGE_ROOT}/${NAME}"
+          mkdir -p "$STAGE"
+
+          # Explicit, enumerated CLI-surface manifest — deliberately NOT a glob (`cp -R ./*` or
+          # similar) so an untracked or build-only file sitting in the checkout can never leak
+          # into a release tarball. This list is the "review-gate CLI surface" contract: the
+          # runner, the personas, both installers, and the example config/rules/license/readme a
+          # fresh install needs. Keep it in sync by hand if that surface changes.
+          #
+          # action/decide_verdict.py and action/review.yml (only those two — NOT action/lib/,
+          # which is action.yml's composite-action runtime, not something install.sh reads) are
+          # included because install.sh's default (no --user) mode requires them at
+          # $SCRIPT_DIR/action/... and dies loud if they're missing (a Codex P1 finding on this
+          # PR: without them, install.sh from an extracted release tarball always failed).
+          cp -R cli "$STAGE/cli"
+          cp -R agents "$STAGE/agents"
+          cp bootstrap.sh "$STAGE/bootstrap.sh"
+          cp install.sh "$STAGE/install.sh"
+          mkdir -p "$STAGE/action"
+          cp action/decide_verdict.py "$STAGE/action/decide_verdict.py"
+          cp action/review.yml "$STAGE/action/review.yml"
+          cp REVIEW_RULES.example.md "$STAGE/REVIEW_RULES.example.md"
+          cp gate.conf.example "$STAGE/gate.conf.example"
+          cp LICENSE "$STAGE/LICENSE"
+          cp README.md "$STAGE/README.md"
+
+          TARBALL="${NAME}.tar.gz"
+          tar -czf "$TARBALL" -C "$STAGE_ROOT" "$NAME"
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          echo "built $TARBALL:"
+          tar -tzf "$TARBALL"
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          # sha256sum (GNU coreutils, this runner) — bootstrap.sh's own checksum verification
+          # handles the shasum-only (stock macOS) case on the consuming side; this side only
+          # ever runs on ubuntu-latest, so sha256sum alone is sufficient here.
+          sha256sum "$TARBALL" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            "$TARBALL" \
+            SHA256SUMS \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
