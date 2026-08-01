@@ -2,7 +2,8 @@
 # review-gate — provider-agnostic PR review runner for review-pantheon.
 #
 # Usage:
-#   review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"] [--dry-run]
+#   review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"]
+#               [--execution readonly|trusted] [--dry-run]
 #
 # Run from inside the target repo (the repo whose PR you're gating) — it locates that repo
 # via `git rev-parse --show-toplevel`. Requires `gh` and `jq`. See ../DESIGN.md for the
