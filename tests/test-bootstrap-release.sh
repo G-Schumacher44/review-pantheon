@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # tests/test-bootstrap-release.sh — fixture test for bootstrap.sh's --version / release-fetch
 # additions: the release-asset URL builders, sha256_of/verify_checksum (checksum verification
-# that must refuse BEFORE any extraction on mismatch — this closes the security audit's LOW on
-# unpinned/unverified remote fetches), and --version flag parsing/validation. Everything here
+# that must refuse BEFORE any extraction on mismatch — the curl-pipe lane otherwise installs
+# whatever an unauthenticated HTTP response contains, with nothing to catch a truncated
+# download or a tampered/stale response), and --version flag parsing/validation. Everything here
 # runs OFFLINE — no real network call is made or required, including the "fails loud without
 # network" case, which stubs `curl` to simulate a failure deterministically rather than
-# depending on the sandbox's actual connectivity.
+# depending on the sandbox's actual connectivity. See tests/test-bootstrap-release-e2e.sh for the
+# happy-path integration test (real checksum match through to files landing in --prefix) this
+# file deliberately does NOT cover — kept separate so a slow/flaky integration case can't block
+# the fast, always-run unit suite below.
 #
 # bootstrap.sh is written so its function/constant definitions are sourceable (main() only runs
 # when the script is EXECUTED, guarded by a BASH_SOURCE-vs-$0 check at the bottom of the file) —

@@ -106,6 +106,9 @@ jobs:
       - name: Run bootstrap release/checksum fixture tests
         run: bash tests/test-bootstrap-release.sh
 
+      - name: Run bootstrap release fetch/install end-to-end fixture tests
+        run: bash tests/test-bootstrap-release-e2e.sh
+
   setup-smoke:
     # Clean-machine, real-Linux run of the setup story (see Dockerfile.smoke's header): required
     # binaries, both fixture suites above, install.sh and bootstrap.sh against fresh scratch

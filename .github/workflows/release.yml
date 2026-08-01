@@ -136,6 +136,9 @@ jobs:
       - name: Run bootstrap release/checksum fixture tests
         run: bash tests/test-bootstrap-release.sh
 
+      - name: Run bootstrap release fetch/install end-to-end fixture tests
+        run: bash tests/test-bootstrap-release-e2e.sh
+
   build-and-publish:
     needs: test
     runs-on: ubuntu-latest

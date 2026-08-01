@@ -21,14 +21,15 @@
 # cut): pulls the RELEASE tarball .github/workflows/release.yml built and published for that
 # tag (review-pantheon-<tag>.tar.gz), instead of a fresh tarball of the current dev HEAD. It
 # also fetches that release's SHA256SUMS and verifies the tarball's checksum BEFORE extracting
-# anything — die loud on mismatch, refusing to touch the archive. This closes the security
-# audit's LOW finding on unpinned/unverified remote fetches: --version pins to an immutable,
-# checksummed artifact instead of trusting whatever a moving ref currently resolves to. Omit
-# --version and the remote-fetch path keeps its original behavior — a fresh tarball of dev's
-# current HEAD via GitHub's codeload endpoint, i.e. it TRACKS dev, unpinned and unchecksummed
-# (codeload doesn't publish a checksum manifest for arbitrary-ref tarballs the way a Release
-# does). A local-checkout run (form 1 above) ignores --version entirely — you already have a
-# real checkout at whatever commit it's at, there's nothing to fetch.
+# anything — die loud on mismatch, refusing to touch the archive. Without this, the curl-pipe
+# lane installs whatever bytes an unauthenticated HTTP response happens to contain, with nothing
+# to catch a truncated download, a mirror/CDN serving stale content, or a tampered response —
+# --version pins to an immutable, checksum-verified artifact instead of trusting that response
+# outright. Omit --version and the remote-fetch path keeps its original behavior — a fresh
+# tarball of dev's current HEAD via GitHub's codeload endpoint, i.e. it TRACKS dev, unpinned and
+# unchecksummed (codeload doesn't publish a checksum manifest for arbitrary-ref tarballs the way
+# a Release does). A local-checkout run (form 1 above) ignores --version entirely — you already
+# have a real checkout at whatever commit it's at, there's nothing to fetch.
 #
 # Idempotent: re-running with the same --prefix only touches files that changed. Same cmp-and-
 # skip contract as install.sh's install_file — a destination file that differs from the
