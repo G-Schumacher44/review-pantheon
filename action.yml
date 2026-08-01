@@ -233,6 +233,13 @@ runs:
       run: |
         set -euo pipefail
 
+        # shellcheck disable=SC1091
+        # pantheon_base_pinned_read (issue #6, round-2 Codex P2 finding) — symlink-safe
+        # base-pinned reads (see that file's own header for the full contract). Sourced from
+        # this action's own trusted checkout at $ACTION_PATH, same pattern
+        # action/lib/build_prompt.sh already uses for cli/lib/execution.sh.
+        source "$ACTION_PATH/cli/lib/pantheon-base-pin.sh"
+
         # Tiered execution (HIGH-1 fix — see the `execution` input's own description and
         # DESIGN.md's "Security posture"). Fail loud on an unrecognized value rather than
         # silently coercing to a guess — this is a security default, same posture as the
@@ -270,19 +277,33 @@ runs:
           # posture"): a fork PR's own head can edit a file at that path, and the working tree
           # ($GITHUB_WORKSPACE) at review time IS that fork PR's content. Base-pinned the same
           # way: resolve each of the five fixed persona names from the PR's BASE commit via
-          # `git show`, into $RUNNER_TEMP, never $GITHUB_WORKSPACE. A persona absent at base
-          # (e.g. only introduced by this PR's own head) is simply not written — build_prompt.sh
-          # already fails loud per-agent on a missing persona file, the same behavior a bundled-
-          # personas install already has for an unsupported agent name.
+          # pantheon_base_pinned_read (sourced above), into $RUNNER_TEMP, never $GITHUB_WORKSPACE.
+          # A persona absent at base (e.g. only introduced by this PR's own head) is simply not
+          # written — build_prompt.sh already fails loud per-agent on a missing persona file, the
+          # same behavior a bundled-personas install already has for an unsupported agent name.
+          # Routed through pantheon_base_pinned_read rather than a bare `git show` so a
+          # SYMLINKED custom persona (a real, legitimate pattern — e.g.
+          # `.github/custom-personas/artemis.md -> ../../agents/artemis.md`) resolves to its
+          # target's content instead of git show's raw link-target pathname on a mode-120000
+          # blob (round-2 Codex P2 finding on this repo's own PR #8, the same class this whole
+          # input closes). Its return codes are distinct: 2 is ordinary absence (this persona
+          # just isn't provided under personas_path, handled below the same as before); 1 is a
+          # REFUSED resolution (an escaping or pathologically deep symlink chain) and must never
+          # be silently treated as absence — it fails the whole run loud.
           PERSONAS_DIR="$RUNNER_TEMP/pantheon-personas"
           mkdir -p "$PERSONAS_DIR"
           any_persona_resolved=false
           for persona_name in artemis apollo socrates diogenes plato; do
-            if git show "${BASE_SHA}:${PERSONAS_PATH}/${persona_name}.md" > "$PERSONAS_DIR/${persona_name}.md" 2>/dev/null; then
-              any_persona_resolved=true
-            else
-              rm -f "$PERSONAS_DIR/${persona_name}.md"
-            fi
+            persona_rc=0
+            pantheon_base_pinned_read "$BASE_SHA" "${PERSONAS_PATH}/${persona_name}.md" "$PERSONAS_DIR/${persona_name}.md" || persona_rc=$?
+            case "$persona_rc" in
+              0) any_persona_resolved=true ;;
+              1)
+                echo "::error::review-pantheon: refused to resolve persona '$persona_name' under personas_path '$PERSONAS_PATH' at base $BASE_SHA — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
+                exit 1
+                ;;
+              *) rm -f "$PERSONAS_DIR/${persona_name}.md" ;;
+            esac
           done
           if [ "$any_persona_resolved" != "true" ]; then
             echo "::error::review-pantheon: personas_path '$PERSONAS_PATH' has no persona file resolvable at the PR's base commit (${BASE_SHA}) — checked for artemis/apollo/socrates/diogenes/plato.md there. A file that exists only on this PR's own head is refused by design (base-pinning) — see DESIGN.md's 'Security posture'. If this is the PR that first adds these files, merge it via another path first, then personas_path will resolve normally on every PR after it."
@@ -292,14 +313,18 @@ runs:
         [ -d "$PERSONAS_DIR" ] || { echo "::error::review-pantheon: personas directory not found: $PERSONAS_DIR (check the personas_path input)"; exit 1; }
         echo "personas_dir=$PERSONAS_DIR" >> "$GITHUB_OUTPUT"
 
-        # Rules/spec files are read from the PR's BASE commit (`git show $BASE_SHA:path`),
-        # never the checked-out working tree — on a fork PR the working tree holds the PR
-        # author's own (attacker-controlled) head content, and a rules/spec file read from
+        # Rules/spec files are read from the PR's BASE commit via pantheon_base_pinned_read
+        # (sourced above; symlink-safe — see that file's header and issue #6's round-2 Codex P2
+        # finding), never the checked-out working tree — on a fork PR the working tree holds the
+        # PR author's own (attacker-controlled) head content, and a rules/spec file read from
         # there would be prompt-injectable by whoever opened the PR. A file that only exists on
-        # head (the PR itself adds or edits it) is never read; if it's absent at base, this
-        # falls back to omitting it — see DESIGN.md's "Security posture" — "Base-SHA-pinned
-        # context file reads" — and action/lib/build_prompt.sh's per-agent handling of
-        # rules_present/spec_present below for the loud-vs-silent distinction between the two.
+        # head (the PR itself adds or edits it) is never read; if it's absent at base (return
+        # code 2 — ordinary absence), this falls back to omitting it — see DESIGN.md's "Security
+        # posture" — "Base-SHA-pinned context file reads" — and action/lib/build_prompt.sh's
+        # per-agent handling of rules_present/spec_present below for the loud-vs-silent
+        # distinction between the two. A REFUSED resolution (return code 1 — an escaping or
+        # pathologically deep symlink chain) is never folded into that same silent-absence path;
+        # it fails the whole run loud instead.
         #
         # Content travels to the build-prompt steps as a FILE PATH under $RUNNER_TEMP, never as
         # an env var or a GITHUB_OUTPUT value carrying the raw content — a large base spec/rules
@@ -311,22 +336,40 @@ runs:
         # file itself (action/lib/build_prompt.sh) — this is the only place in this repo that
         # carries pinned file content across a GitHub Actions step boundary.
         RULES_CONTENT_FILE="$RUNNER_TEMP/pantheon-rules-content.txt"
-        if [ -n "$RULES_FILE" ] && git show "${BASE_SHA}:${RULES_FILE}" > "$RULES_CONTENT_FILE" 2>/dev/null; then
-          echo "rules_present=true" >> "$GITHUB_OUTPUT"
+        : > "$RULES_CONTENT_FILE"
+        rules_rc=0
+        if [ -n "$RULES_FILE" ]; then
+          pantheon_base_pinned_read "$BASE_SHA" "$RULES_FILE" "$RULES_CONTENT_FILE" || rules_rc=$?
         else
-          : > "$RULES_CONTENT_FILE"
-          echo "rules_present=false" >> "$GITHUB_OUTPUT"
+          rules_rc=2
         fi
+        case "$rules_rc" in
+          0) echo "rules_present=true" >> "$GITHUB_OUTPUT" ;;
+          2) : > "$RULES_CONTENT_FILE"; echo "rules_present=false" >> "$GITHUB_OUTPUT" ;;
+          *)
+            echo "::error::review-pantheon: refused to resolve $RULES_FILE at base $BASE_SHA — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
+            exit 1
+            ;;
+        esac
         echo "rules_file=$RULES_FILE" >> "$GITHUB_OUTPUT"
         echo "rules_content_path=$RULES_CONTENT_FILE" >> "$GITHUB_OUTPUT"
 
         SPEC_CONTENT_FILE="$RUNNER_TEMP/pantheon-spec-content.txt"
-        if [ -n "$SPEC_FILE" ] && git show "${BASE_SHA}:${SPEC_FILE}" > "$SPEC_CONTENT_FILE" 2>/dev/null; then
-          echo "spec_present=true" >> "$GITHUB_OUTPUT"
+        : > "$SPEC_CONTENT_FILE"
+        spec_rc=0
+        if [ -n "$SPEC_FILE" ]; then
+          pantheon_base_pinned_read "$BASE_SHA" "$SPEC_FILE" "$SPEC_CONTENT_FILE" || spec_rc=$?
         else
-          : > "$SPEC_CONTENT_FILE"
-          echo "spec_present=false" >> "$GITHUB_OUTPUT"
+          spec_rc=2
         fi
+        case "$spec_rc" in
+          0) echo "spec_present=true" >> "$GITHUB_OUTPUT" ;;
+          2) : > "$SPEC_CONTENT_FILE"; echo "spec_present=false" >> "$GITHUB_OUTPUT" ;;
+          *)
+            echo "::error::review-pantheon: refused to resolve $SPEC_FILE at base $BASE_SHA — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
+            exit 1
+            ;;
+        esac
         echo "spec_file=$SPEC_FILE" >> "$GITHUB_OUTPUT"
         echo "spec_content_path=$SPEC_CONTENT_FILE" >> "$GITHUB_OUTPUT"
 

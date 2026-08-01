@@ -330,6 +330,34 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
   | Prompt-builder shell (`cli/lib/execution.sh`, `action/lib/build_prompt.sh`, `action/lib/combine_verdicts.sh`) | ✅ this repo's own file | ✅ `$ACTION_PATH/...` | ✅ inline in the workflow file itself (this repo's own committed YAML, not the target repo's content) |
   | The diff / file contents under review | untrusted **by design** — this is the data the gate exists to evaluate; never treated as instructions (`agents/*.md`'s "Untrusted data, not instructions") | same | same |
 
+  **Round 2 — a real gap in "base-pinned," self-caught (Codex P2 on this class's own PR #8).**
+  Base-pinning a read as `git show $BASE_SHA:path` is correct for a regular file, but git stores
+  a tracked **symlink** as a mode-120000 blob whose "content" IS the link target string — `git
+  show` on a symlinked path therefore returned a pathname, not the referenced file's content, for
+  every ✅ row above that touches personas, the decider, or rules/spec. A target repo using a
+  symlinked custom persona (a real pattern: `.github/custom-personas/artemis.md ->
+  ../../agents/artemis.md`) got a broken prompt where the pre-base-pinning checkout-based read
+  had worked. `cli/lib/pantheon-base-pin.sh`'s `pantheon_base_pinned_read` closes this: it
+  detects the mode-120000 case via `git ls-tree`, resolves the target relative to the symlink's
+  own directory, normalizes the result using pure string manipulation (no filesystem access — a
+  git-tree-relative path isn't something `realpath` can resolve), refuses (loud, `git show`'d
+  path never falls back to the working tree) any resolution that escapes the repository root or
+  has an absolute target, bounds the chain depth at 32 hops (the same convention
+  `cli/review-gate`'s `resolve_real_dir` and `bootstrap.sh` already use for symlink-following
+  elsewhere), and only then `git show`'s the resolved in-repo path at BASE. Every base-pinned
+  read this section's matrix marks ✅ now routes through this function — `cli/review-gate`
+  (sourced), `action.yml` (sourced from `$ACTION_PATH/cli/lib/`), and `action/review.yml` (a
+  hand-synced inline copy of the same two functions — this lane can't `source` anything, the
+  same reason it already hand-syncs its prompt-build logic). Its two failure modes are
+  distinguished by return code on purpose — 2 is ordinary absence (unchanged: an only-if-exists
+  file like `DESIGN.md` silently falls back to "not applied"), 1 is REFUSED (an escaping or
+  over-deep chain) and is never folded into that same silent path — a caller that conflated the
+  two would turn a hostile symlink into a quiet no-op instead of a loud failure. Fixtures:
+  `tests/test-base-pinned-read.sh` (unit-level, including a fixture-sanity check that
+  reproduces the raw-pathname bug with a bare `git show` before asserting the fix), plus
+  symlink-aware cases added to the existing `action/review.yml`/`action.yml` integration
+  fixtures in `tests/test-prompt-assembly.sh`.
+
   **Honest limit on the sweep.** `.review-gate-state.json` (git-ignored, CLI-lane-only — see
   "Follow-up mode" below) is read from the target repo's working tree to decide the incremental
   diff range for a follow-up review. In the specific scenario where a maintainer runs `gh pr
@@ -668,6 +696,13 @@ cli/lib/pantheon-git-readonly.sh  the argv-validating read-only git wrapper the 
                            vendored by bootstrap.sh (CLI lane) and install.sh
                            (.github/review-agents/, for action/review.yml); read in place by
                            action.yml from its own checkout (see "Security posture" above)
+cli/lib/pantheon-base-pin.sh  symlink-safe base-pinned reads (issue #6's class, round-2:
+                           a bare `git show $BASE_SHA:path` on a symlinked path returns the
+                           link-target STRING, not the target's content) — sourced by
+                           cli/review-gate and by action.yml's "Resolve gate configuration"
+                           step; action/review.yml carries its own hand-synced inline copy (a
+                           target repo never gets cli/lib/ — same reason as the prompt-build
+                           logic it already hand-syncs, see "Lane differences" below)
 cli/providers/             provider lanes (claude, codex, gemini, cursor)
 action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
                            artifact-based result passing, fail-closed decision step

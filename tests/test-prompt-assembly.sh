@@ -303,6 +303,11 @@ FIXTURE_NO_SPEC="$(mktemp -d)"
 # what broke here once, caught by this repo's own tests/test-setup-smoke.sh run).
 # shellcheck disable=SC1091
 source "$ROOT/cli/lib/execution.sh"
+# shellcheck disable=SC1091
+# pantheon_base_pinned_read (issue #6 round-2) — build_prompt() now routes its rules/spec reads
+# through this instead of a bare `git show`; the extracted-function harness needs it too, same
+# reason it needs cli/lib/execution.sh above.
+source "$ROOT/cli/lib/pantheon-base-pin.sh"
 PR_NUMBER="1"
 PR_TITLE="test pr"
 DIFF_RANGE="refs/review-gate/base...refs/review-gate/head"
@@ -530,12 +535,26 @@ else
 fi
 
 # shellcheck disable=SC2016
+# Round-2 (issue #6): rules/spec resolution now routes through the symlink-safe
+# pantheon_base_pinned_read (cli/lib/pantheon-base-pin.sh, sourced by this step) instead of a
+# bare `git show "${BASE_SHA}:${path}"` call directly in this step — see Part H above for the
+# functional (execute-the-real-step) coverage of that helper's own base-pinning + symlink
+# handling. This check now looks for the call sites, not the literal git-show text.
 if [[ -n "$resolve_step" ]] \
-     && grep -q 'git show "\${BASE_SHA}:\${RULES_FILE}"' <<<"$resolve_step" \
-     && grep -q 'git show "\${BASE_SHA}:\${SPEC_FILE}"' <<<"$resolve_step"; then
-  pass "action.yml resolves rules_content/spec_content via 'git show \$BASE_SHA:path' (base-pinned)"
+     && grep -qF 'pantheon_base_pinned_read "$BASE_SHA" "$RULES_FILE" "$RULES_CONTENT_FILE"' <<<"$resolve_step" \
+     && grep -qF 'pantheon_base_pinned_read "$BASE_SHA" "$SPEC_FILE" "$SPEC_CONTENT_FILE"' <<<"$resolve_step"; then
+  pass "action.yml resolves rules_content/spec_content via pantheon_base_pinned_read (base-pinned, symlink-safe)"
 else
-  fail "action.yml's Resolve-gate-configuration step no longer reads rules/spec via base-pinned git show — check for a regression back to a working-tree '-f \$GITHUB_WORKSPACE/...' presence check"
+  fail "action.yml's Resolve-gate-configuration step no longer reads rules/spec via pantheon_base_pinned_read — check for a regression back to a working-tree '-f \$GITHUB_WORKSPACE/...' presence check or a bare, symlink-unsafe git show"
+fi
+
+# shellcheck disable=SC2016
+# The step must source the shared library (never re-implement symlink resolution inline) —
+# action.yml, unlike action/review.yml, has cli/lib/ available at $ACTION_PATH and should use it.
+if [[ -n "$resolve_step" ]] && grep -qF 'source "$ACTION_PATH/cli/lib/pantheon-base-pin.sh"' <<<"$resolve_step"; then
+  pass "action.yml's Resolve-gate-configuration step sources cli/lib/pantheon-base-pin.sh from its own trusted checkout"
+else
+  fail "action.yml's Resolve-gate-configuration step does not source cli/lib/pantheon-base-pin.sh"
 fi
 
 # shellcheck disable=SC2016
@@ -873,7 +892,61 @@ else
   fail "action/review.yml: the PR-introduced persona content leaked into the resolved output despite being absent at base"
 fi
 
-rm -rf "$FIXTURE_G" "$FIXTURE_G2" "$G1_RUNNER_TEMP" "$G2_RUNNER_TEMP"
+# G2.5 — the vendored lane's INLINED symlink-resolution copy (round-2, issue #6's class): a
+# `.github/review-agents/artemis.md` that's a symlink to another in-repo file must resolve to
+# that file's content, never a bare `git show`'s raw link-target pathname (Codex's exact
+# example, adapted to this lane's fixed persona path). Exercises the step's own hand-synced
+# functions directly, not just the shared library — an inline copy can drift independently.
+FIXTURE_G3="$(mktemp -d)"
+mkdir -p "$FIXTURE_G3/.github/review-agents" "$FIXTURE_G3/shared"
+echo "SHARED-REAL-PERSONA-CONTENT" > "$FIXTURE_G3/shared/real-artemis.md"
+echo "BASE-DECIDER-MARKER" > "$FIXTURE_G3/.github/review-agents/decide_verdict.py"
+( cd "$FIXTURE_G3/.github/review-agents" && ln -s ../../shared/real-artemis.md artemis.md )
+FIXTURE_G3_BASE_SHA="$(git_fixture_repo "$FIXTURE_G3")"
+
+G3_RUNNER_TEMP="$(mktemp -d)"
+G3_GITHUB_OUTPUT="$WORKDIR_A/g3-github-output.txt"
+: > "$G3_GITHUB_OUTPUT"
+if (cd "$FIXTURE_G3" && BASE_SHA="$FIXTURE_G3_BASE_SHA" AGENT_NAME="artemis" RUNNER_TEMP="$G3_RUNNER_TEMP" GITHUB_OUTPUT="$G3_GITHUB_OUTPUT" bash "$RESOLVE_SCRIPTS_SH"); then
+  pass "action/review.yml: 'Resolve gate scripts' resolves a symlinked persona (rc=0)"
+else
+  fail "action/review.yml: 'Resolve gate scripts' failed to resolve a symlinked persona"
+fi
+if grep -q "SHARED-REAL-PERSONA-CONTENT" "$G3_RUNNER_TEMP/artemis.md" 2>/dev/null; then
+  pass "action/review.yml: symlinked persona resolves to the TARGET file's content (inlined copy, not just the library)"
+else
+  fail "action/review.yml: symlinked persona did NOT resolve to the target's content"
+fi
+if grep -qF "../../shared/real-artemis.md" "$G3_RUNNER_TEMP/artemis.md" 2>/dev/null; then
+  fail "action/review.yml: symlinked persona's resolved content still contains the raw link-target pathname (round-2 regression)"
+else
+  pass "action/review.yml: symlinked persona's resolved content does NOT contain the raw link-target pathname"
+fi
+
+# G2.6 — the same lane's escaping-symlink refusal (inlined copy).
+FIXTURE_G4="$(mktemp -d)"
+mkdir -p "$FIXTURE_G4/.github/review-agents"
+echo "BASE-DECIDER-MARKER" > "$FIXTURE_G4/.github/review-agents/decide_verdict.py"
+( cd "$FIXTURE_G4/.github/review-agents" && ln -s ../../../../../etc/passwd artemis.md )
+FIXTURE_G4_BASE_SHA="$(git_fixture_repo "$FIXTURE_G4")"
+
+G4_RUNNER_TEMP="$(mktemp -d)"
+G4_GITHUB_OUTPUT="$WORKDIR_A/g4-github-output.txt"
+: > "$G4_GITHUB_OUTPUT"
+if (cd "$FIXTURE_G4" && BASE_SHA="$FIXTURE_G4_BASE_SHA" AGENT_NAME="artemis" RUNNER_TEMP="$G4_RUNNER_TEMP" GITHUB_OUTPUT="$G4_GITHUB_OUTPUT" bash "$RESOLVE_SCRIPTS_SH" 2>/dev/null); then
+  fail "action/review.yml: 'Resolve gate scripts' should refuse a persona symlink escaping the repo root, but it succeeded"
+else
+  pass "action/review.yml: 'Resolve gate scripts' refuses a persona symlink escaping the repo root (inlined copy)"
+fi
+if [[ ! -s "$G4_RUNNER_TEMP/artemis.md" ]]; then
+  pass "action/review.yml: no content was written for the refused escaping persona symlink"
+else
+  fail "action/review.yml: content was written despite the escaping persona symlink being refused"
+fi
+
+for _dir in "$FIXTURE_G" "$FIXTURE_G2" "$FIXTURE_G3" "$FIXTURE_G4" "$G1_RUNNER_TEMP" "$G2_RUNNER_TEMP" "$G3_RUNNER_TEMP" "$G4_RUNNER_TEMP"; do
+  rm -rf "$_dir"
+done
 
 # G3 — structural: the "Build prompt" and "Decide verdict" steps must read the RESOLVED path
 # (persona_path/decider_path outputs), never $GITHUB_WORKSPACE/.github/review-agents/... — a
@@ -1019,7 +1092,67 @@ else
   fail "action.yml: personas_path unset resolved to '$DEFAULT_PERSONAS_DIR', expected '$ROOT/agents' (regression)"
 fi
 
-rm -rf "$FIXTURE_H" "$H1_RUNNER_TEMP" "$H2_RUNNER_TEMP"
+# H3 — round-2 (issue #6's class): a personas_path persona that's a SYMLINK to another in-repo
+# file must resolve to that file's content, not a bare `git show`'s raw link-target pathname —
+# Codex's own example (`.github/custom-personas/artemis.md -> ../../agents/artemis.md`),
+# exercised through action.yml's real "Resolve gate configuration" step (sources the real
+# cli/lib/pantheon-base-pin.sh at $ACTION_PATH, ACTION_PATH="$ROOT" in this harness).
+FIXTURE_H3="$(mktemp -d)"
+mkdir -p "$FIXTURE_H3/.github/custom-personas" "$FIXTURE_H3/shared"
+echo "SHARED-REAL-PERSONA-CONTENT" > "$FIXTURE_H3/shared/real-artemis.md"
+for h3_name in apollo socrates diogenes plato; do
+  echo "BASE-${h3_name}-MARKER" > "$FIXTURE_H3/.github/custom-personas/${h3_name}.md"
+done
+( cd "$FIXTURE_H3/.github/custom-personas" && ln -s ../../shared/real-artemis.md artemis.md )
+FIXTURE_H3_BASE_SHA="$(git_fixture_repo "$FIXTURE_H3")"
+
+H3_RUNNER_TEMP="$(mktemp -d)"
+H3_GITHUB_OUTPUT="$WORKDIR_A/h3-github-output.txt"
+: > "$H3_GITHUB_OUTPUT"
+if (cd "$FIXTURE_H3" && \
+    PERSONAS_PATH=".github/custom-personas" RULES_FILE="REVIEW_RULES.md" SPEC_FILE="DESIGN.md" \
+    MODEL="" EXECUTION="readonly" ACTION_PATH="$ROOT" BASE_SHA="$FIXTURE_H3_BASE_SHA" \
+    RUNNER_TEMP="$H3_RUNNER_TEMP" GITHUB_OUTPUT="$H3_GITHUB_OUTPUT" \
+    bash "$RESOLVE_CONFIG_SH"); then
+  pass "action.yml: 'Resolve gate configuration' resolves a symlinked personas_path persona (rc=0)"
+else
+  fail "action.yml: 'Resolve gate configuration' failed to resolve a symlinked personas_path persona"
+fi
+H3_PERSONAS_DIR="$(grep '^personas_dir=' "$H3_GITHUB_OUTPUT" 2>/dev/null | tail -1 | cut -d= -f2-)"
+if [[ -n "$H3_PERSONAS_DIR" ]] && grep -q "SHARED-REAL-PERSONA-CONTENT" "$H3_PERSONAS_DIR/artemis.md" 2>/dev/null; then
+  pass "action.yml: symlinked personas_path persona resolves to the TARGET file's content"
+else
+  fail "action.yml: symlinked personas_path persona did NOT resolve to the target's content (personas_dir=$H3_PERSONAS_DIR)"
+fi
+if [[ -n "$H3_PERSONAS_DIR" ]] && grep -qF "../../shared/real-artemis.md" "$H3_PERSONAS_DIR/artemis.md" 2>/dev/null; then
+  fail "action.yml: symlinked personas_path persona's resolved content still contains the raw link-target pathname (round-2 regression)"
+else
+  pass "action.yml: symlinked personas_path persona's resolved content does NOT contain the raw link-target pathname"
+fi
+
+# H4 — the same lane's escaping-symlink refusal.
+FIXTURE_H4="$(mktemp -d)"
+mkdir -p "$FIXTURE_H4/.github/custom-personas"
+echo "BASE-apollo-MARKER" > "$FIXTURE_H4/.github/custom-personas/apollo.md"
+( cd "$FIXTURE_H4/.github/custom-personas" && ln -s ../../../../../etc/passwd artemis.md )
+FIXTURE_H4_BASE_SHA="$(git_fixture_repo "$FIXTURE_H4")"
+
+H4_RUNNER_TEMP="$(mktemp -d)"
+H4_GITHUB_OUTPUT="$WORKDIR_A/h4-github-output.txt"
+: > "$H4_GITHUB_OUTPUT"
+if (cd "$FIXTURE_H4" && \
+    PERSONAS_PATH=".github/custom-personas" RULES_FILE="REVIEW_RULES.md" SPEC_FILE="DESIGN.md" \
+    MODEL="" EXECUTION="readonly" ACTION_PATH="$ROOT" BASE_SHA="$FIXTURE_H4_BASE_SHA" \
+    RUNNER_TEMP="$H4_RUNNER_TEMP" GITHUB_OUTPUT="$H4_GITHUB_OUTPUT" \
+    bash "$RESOLVE_CONFIG_SH" 2>/dev/null); then
+  fail "action.yml: 'Resolve gate configuration' should refuse a personas_path symlink escaping the repo root, but it succeeded"
+else
+  pass "action.yml: 'Resolve gate configuration' refuses a personas_path symlink escaping the repo root"
+fi
+
+for _dir in "$FIXTURE_H" "$FIXTURE_H3" "$FIXTURE_H4" "$H1_RUNNER_TEMP" "$H2_RUNNER_TEMP" "$H3_RUNNER_TEMP" "$H4_RUNNER_TEMP"; do
+  rm -rf "$_dir"
+done
 
 echo
 echo "PASS: $PASS, FAIL: $FAIL"
