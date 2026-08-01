@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/banner.png" alt="review-pantheon — a fail-closed AI review gate and counsel panel for spec-driven development" width="100%"/>
+<img src="docs/assets/banner.png" alt="review-pantheon — Spec Driven AI Coding toolkit" width="100%"/>
 
 
 [![CI](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml/badge.svg)](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml)
@@ -10,7 +10,7 @@
 
 </div>
 
-# review-pantheon — a fail-closed AI review gate and counsel panel for spec-driven development
+# review-pantheon — Spec Driven AI Coding toolkit
 
 - AI-assisted, spec-driven development produces work faster than a human can independently
   verify it — the bottleneck moves from writing the change to trusting the report of it.
