@@ -253,8 +253,13 @@ agents=artemis apollo    # panel for the standard gate
 ## Security posture (kept from the private ancestor, by design)
 
 - PR metadata is attacker-controlled on forks: the gate validates PR number (`^[0-9]+$`),
-  branch names (`^[A-Za-z0-9._/-]+$`), and head SHA (hex) before any of them touch a prompt
-  or a shell command. Unsafe metadata → UNVERIFIED, not a crash.
+  branch names (`^[A-Za-z0-9._/-]+$`), and head/base SHA (hex) before any of them touch a
+  prompt or a shell command. Unsafe metadata → UNVERIFIED, not a crash. The CLI lane
+  (`cli/review-gate`) validates HEAD_SHA and BASE_SHA before either is used; the published
+  action (`action.yml`) validates both PR event-context SHAs in its own dedicated step, before
+  the base-pinned rules/spec reads or the docs-only diff check ever run — a `git show`/`git
+  diff` call built from an unvalidated SHA is exactly the shell-command-injection surface this
+  rule exists to close.
 - Model output is never interpolated into shell (`run:`) directly — it travels via files and
   env vars.
 - **Base-SHA-pinned context file reads.** `REVIEW_RULES.md` and the spec file (`DESIGN.md` by

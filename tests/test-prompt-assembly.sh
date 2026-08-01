@@ -36,6 +36,14 @@
 #     only templates already-resolved content; it has no filesystem access of its own to
 #     REVIEW_RULES.md/DESIGN.md). Same structural-check approach as Part C, for the same reason
 #     (YAML-embedded, keyed off real workflow-run context).
+#   - Part E: BASE_SHA validation (a real Artemis finding on this PR: the base-pinning path
+#     added `git show`/`git diff` calls built from BASE_SHA before validating it looked like a
+#     SHA at all). CLI lane: extracts the real SHA_RE regex from cli/review-gate and proves it
+#     rejects a shell-metacharacter payload and a short non-hex string while accepting a real
+#     SHA, plus a structural line-order check that the validation runs before BASE_SHA's first
+#     use. Action lane: extracts and actually EXECUTES the real "Validate PR base/head SHAs"
+#     step body against the same fixture values, plus a structural check that step runs before
+#     both steps that use BASE_SHA in a shell command.
 #
 # No test framework — plain bash, `bash tests/test-prompt-assembly.sh` is the whole invocation.
 #
@@ -561,6 +569,122 @@ if grep -qE '^\s+RULES_CONTENT: |^\s+SPEC_CONTENT: ' <<<"$full_action_yml"; then
   fail "action.yml still passes RULES_CONTENT/SPEC_CONTENT (raw content) to a build-prompt step's env — should be the _PATH variant"
 else
   pass "action.yml has no remaining RULES_CONTENT/SPEC_CONTENT (raw content) env bindings"
+fi
+
+# ---------------------------------------------------------------------------
+# Part E — BASE_SHA validation (Artemis finding on this PR): the base-pinning path this PR
+# added reads PR event-context BASE_SHA straight into `git show`/`git diff` — PR metadata is
+# attacker-controlled on forks (DESIGN.md's "Security posture"), and a SHA that was never
+# validated to actually look like a SHA is exactly the shell-command-construction-from-
+# unvalidated-input class that rule exists to close. Fixed by validating BASE_SHA (CLI lane:
+# already did this for HEAD_SHA; extended the same check to BASE_SHA) / BASE_SHA+HEAD_SHA
+# (Action lane: a new dedicated step) against `^[0-9a-f]{7,40}$` before either reaches a shell
+# command, fail-closed on a miss.
+# ---------------------------------------------------------------------------
+section "Part E: BASE_SHA validation (fail-closed on malformed PR metadata)"
+
+# E1 — CLI lane: extract the REAL SHA_RE regex from cli/review-gate (never hand-copied — a
+# drifted copy would defeat the point) and prove it rejects a shell-metacharacter payload and a
+# short non-hex string, while accepting a real-looking SHA.
+CLI_SHA_RE_LINE="$(grep -m1 "^SHA_RE=" "$REVIEW_GATE" 2>/dev/null)"
+if [[ -n "$CLI_SHA_RE_LINE" ]]; then
+  # shellcheck disable=SC1090,SC2034 # dynamically defines SHA_RE from the extracted line
+  eval "$CLI_SHA_RE_LINE"
+  pass "cli/review-gate: extracted the real SHA_RE regex"
+else
+  fail "cli/review-gate: could not find a SHA_RE= assignment — review-gate's shape changed; update the extractor"
+fi
+
+check_sha_re() {
+  local label="$1" value="$2" expect_match="$3"
+  if [[ "$value" =~ $SHA_RE ]]; then
+    if [[ "$expect_match" == "true" ]]; then
+      pass "$label"
+    else
+      fail "$label (expected NO match, but '$value' matched SHA_RE — this should be rejected)"
+    fi
+  else
+    if [[ "$expect_match" == "false" ]]; then
+      pass "$label"
+    else
+      fail "$label (expected a match, but '$value' did not match SHA_RE)"
+    fi
+  fi
+}
+
+check_sha_re "cli/review-gate SHA_RE: rejects a shell-metacharacter payload ('deadbeef; rm -rf x')" \
+  'deadbeef; rm -rf x' false
+check_sha_re "cli/review-gate SHA_RE: rejects a short non-hex string ('xyz')" \
+  'xyz' false
+check_sha_re "cli/review-gate SHA_RE: accepts a real-looking 40-char hex SHA" \
+  "$(printf 'a%.0s' $(seq 1 40))" true
+
+# E1b — structural: the BASE_SHA validation line must appear BEFORE build_prompt() is even
+# defined (let alone called) — i.e. before anything that could use it in a shell command.
+# shellcheck disable=SC2016
+CLI_BASE_SHA_CHECK_LINE="$(grep -n '\[\[ "\$BASE_SHA" =~ \$SHA_RE \]\]' "$REVIEW_GATE" 2>/dev/null | head -1 | cut -d: -f1)"
+CLI_BUILD_PROMPT_DEF_LINE="$(grep -n '^build_prompt() {' "$REVIEW_GATE" 2>/dev/null | head -1 | cut -d: -f1)"
+if [[ -n "$CLI_BASE_SHA_CHECK_LINE" && -n "$CLI_BUILD_PROMPT_DEF_LINE" && "$CLI_BASE_SHA_CHECK_LINE" -lt "$CLI_BUILD_PROMPT_DEF_LINE" ]]; then
+  pass "cli/review-gate: BASE_SHA is validated before build_prompt() is even defined (let alone called)"
+else
+  fail "cli/review-gate: BASE_SHA validation missing or ordered after build_prompt() (base=$CLI_BASE_SHA_CHECK_LINE build_prompt=$CLI_BUILD_PROMPT_DEF_LINE)"
+fi
+
+# E2 — Action lane: extract and actually EXECUTE the real "Validate PR base/head SHAs" step
+# body (never hand-copied) against fixture BASE_SHA/HEAD_SHA values — a functional test of the
+# shipped code, not just a wording check.
+validate_step="$(awk '
+  /- name: Validate PR base\/head SHAs/ { grab=1 }
+  grab && /- name:/ && !/Validate PR base\/head SHAs/ { exit }
+  grab { print }
+' "$ACTION_YML")"
+
+VALIDATE_SCRIPT="$WORKDIR_A/validate-shas.sh"
+{
+  echo '#!/usr/bin/env bash'
+  awk '/run: \|/ { grab=1; next } grab { print }' <<<"$validate_step"
+} > "$VALIDATE_SCRIPT"
+
+if [[ -s "$VALIDATE_SCRIPT" ]] && grep -q 'SHA_RE=' "$VALIDATE_SCRIPT"; then
+  pass "action.yml: extracted the real 'Validate PR base/head SHAs' step body"
+else
+  fail "action.yml: could not extract the 'Validate PR base/head SHAs' step body — check the step name/shape"
+fi
+
+run_validate_step() {
+  local base="$1" head="$2"
+  BASE_SHA="$base" HEAD_SHA="$head" bash "$VALIDATE_SCRIPT" >/dev/null 2>&1
+}
+
+if ! run_validate_step 'deadbeef; rm -rf x' "$(printf 'a%.0s' $(seq 1 40))"; then
+  pass "action.yml: 'Validate PR base/head SHAs' rejects a shell-metacharacter BASE_SHA payload (fail-closed)"
+else
+  fail "action.yml: 'Validate PR base/head SHAs' did NOT reject a shell-metacharacter BASE_SHA payload"
+fi
+
+if ! run_validate_step 'xyz' "$(printf 'a%.0s' $(seq 1 40))"; then
+  pass "action.yml: 'Validate PR base/head SHAs' rejects a short non-hex BASE_SHA"
+else
+  fail "action.yml: 'Validate PR base/head SHAs' did NOT reject a short non-hex BASE_SHA"
+fi
+
+if run_validate_step "$(printf 'a%.0s' $(seq 1 40))" "$(printf 'b%.0s' $(seq 1 40))"; then
+  pass "action.yml: 'Validate PR base/head SHAs' accepts two real-looking hex SHAs"
+else
+  fail "action.yml: 'Validate PR base/head SHAs' rejected two valid-looking hex SHAs (false positive)"
+fi
+
+# E2b — structural: the validate step must run BEFORE both steps that use BASE_SHA in a shell
+# command ("Resolve gate configuration" — git show — and "Detect docs-only diff" — git diff).
+ACTION_VALIDATE_STEP_LINE="$(grep -n -- '- name: Validate PR base/head SHAs' "$ACTION_YML" 2>/dev/null | head -1 | cut -d: -f1)"
+ACTION_RESOLVE_STEP_LINE="$(grep -n -- '- name: Resolve gate configuration' "$ACTION_YML" 2>/dev/null | head -1 | cut -d: -f1)"
+ACTION_DOCSCHECK_STEP_LINE="$(grep -n -- '- name: Detect docs-only diff' "$ACTION_YML" 2>/dev/null | head -1 | cut -d: -f1)"
+if [[ -n "$ACTION_VALIDATE_STEP_LINE" && -n "$ACTION_RESOLVE_STEP_LINE" && -n "$ACTION_DOCSCHECK_STEP_LINE" ]] \
+     && [[ "$ACTION_VALIDATE_STEP_LINE" -lt "$ACTION_RESOLVE_STEP_LINE" ]] \
+     && [[ "$ACTION_VALIDATE_STEP_LINE" -lt "$ACTION_DOCSCHECK_STEP_LINE" ]]; then
+  pass "action.yml: 'Validate PR base/head SHAs' runs before both steps that use BASE_SHA in a shell command"
+else
+  fail "action.yml: 'Validate PR base/head SHAs' step ordering regressed (validate=$ACTION_VALIDATE_STEP_LINE resolve=$ACTION_RESOLVE_STEP_LINE docs-check=$ACTION_DOCSCHECK_STEP_LINE)"
 fi
 
 echo

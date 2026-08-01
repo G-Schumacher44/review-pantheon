@@ -176,6 +176,30 @@ runs:
           exit 1
         fi
 
+    # PR metadata is attacker-controlled on forks (DESIGN.md's "Security posture") — validated
+    # before it touches any shell command, same posture as the CLI lane's PR-number/branch-name/
+    # head-SHA checks in cli/review-gate. BASE_SHA specifically feeds `git show`/`git diff`
+    # below (the Resolve-gate-configuration step's base-pinned rules/spec reads, and the
+    # Detect-docs-only-diff step) — both runs BEFORE this fix validated it. Runs before every
+    # step that touches either SHA in a shell command; a failure here fails the whole composite
+    # action closed (no continue-on-error on this step) before anything downstream executes.
+    - name: Validate PR base/head SHAs
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        SHA_RE='^[0-9a-f]{7,40}$'
+        if ! [[ "$BASE_SHA" =~ $SHA_RE ]]; then
+          echo "::error::review-pantheon: unsafe base SHA '$BASE_SHA' from PR event context — UNVERIFIED, refusing to use it in any git command."
+          exit 1
+        fi
+        if ! [[ "$HEAD_SHA" =~ $SHA_RE ]]; then
+          echo "::error::review-pantheon: unsafe head SHA '$HEAD_SHA' from PR event context — UNVERIFIED, refusing to use it in any git command."
+          exit 1
+        fi
+
     - name: Resolve gate configuration
       id: resolve
       shell: bash
