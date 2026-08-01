@@ -126,6 +126,12 @@ refuse "git log --pager=less (pager override attempt)" log --pager=less
 refuse "git show --textconv (external content filter)" show --textconv HEAD
 refuse "git diff --exec-path=/tmp (relocates git's own helper search path)" diff --exec-path=/tmp
 
+section "Hostile invocations — diff without a range (working-tree-touching forms)"
+
+refuse "bare 'diff' (no arguments — compares working tree to index)" diff
+refuse "'diff HEAD' (single ref, no range — compares working tree to that ref)" diff HEAD
+refuse "'diff -- README.md' (no range, path only — still working-tree-touching)" diff -- README.md
+
 section "Legit invocations — exactly what DESIGN.md rule 1 tells personas to use"
 
 accept "git status" status
@@ -310,6 +316,75 @@ fi
 
 rm -f "$FSMON_MARKER" "$FSMON_HOOK"
 rm -rf "$FSMON_REPO"
+
+# ---------------------------------------------------------------------------
+# Configured clean/smudge filter bypass (Codex P1, round 6). A `filter.<name>.clean` command
+# (gitattributes' clean-filter mechanism — distinct from the ext-diff/textconv machinery closed
+# above) converts a working-tree file's content before git compares it — but ONLY when the
+# comparison actually touches the working tree (a bare `diff` or `diff <single-ref>`), never for
+# a blob-to-blob range comparison. This fixture proves both halves: the filter DOES fire via the
+# working-tree-touching forms this wrapper now refuses outright (covered by the "Hostile
+# invocations — diff without a range" section above), and does NOT fire via the range form this
+# wrapper still allows, even with the exact same filter configured in the exact same repo.
+# ---------------------------------------------------------------------------
+section "Configured clean/smudge filter bypass (working-tree-touching diff forms vs. a proper range)"
+
+FILTER_REPO="$(mktemp -d)"
+git -C "$FILTER_REPO" init -q
+git -C "$FILTER_REPO" config user.email "test@example.com"
+git -C "$FILTER_REPO" config user.name "test"
+echo "a" > "$FILTER_REPO/file.dat"
+git -C "$FILTER_REPO" add file.dat
+git -C "$FILTER_REPO" commit -q -m "first"
+echo "b" > "$FILTER_REPO/file.dat"
+git -C "$FILTER_REPO" commit -q -am "second"
+
+FILTER_MARKER="$(mktemp -u)"
+rm -f "$FILTER_MARKER"
+FILTER_SCRIPT="$(mktemp)"
+cat > "$FILTER_SCRIPT" <<EOF
+#!/bin/sh
+touch "$FILTER_MARKER"
+cat
+EOF
+chmod +x "$FILTER_SCRIPT"
+git -C "$FILTER_REPO" config "filter.evilclean.clean" "$FILTER_SCRIPT"
+echo "*.dat filter=evilclean" > "$FILTER_REPO/.gitattributes"
+echo "modified working-tree content" > "$FILTER_REPO/file.dat"
+
+# Negative control: RAW git, same repo, same filter, a bare 'diff' (working-tree-touching) MUST
+# fire the marker — proving the fixture is live.
+rm -f "$FILTER_MARKER"
+( cd "$FILTER_REPO" && git diff >/dev/null 2>&1 )
+if [[ -f "$FILTER_MARKER" ]]; then
+  pass "negative control: RAW git (no wrapper) DOES fire the configured clean filter via a bare 'diff' — fixture is live"
+else
+  fail "negative control FAILED: raw git did not fire the configured clean filter at all — this fixture is not exercising anything"
+fi
+
+# The wrapper refuses the working-tree-touching form outright (see the "Hostile invocations —
+# diff without a range" section above) — this just re-confirms the filter never runs as a
+# consequence, using the same live repo/filter as the negative control above.
+rm -f "$FILTER_MARKER"
+( cd "$FILTER_REPO" && "$WRAPPER" diff >/dev/null 2>&1 ) || true
+if [[ -f "$FILTER_MARKER" ]]; then
+  fail "configured clean filter FIRED via the wrapper's bare 'diff' — should have been refused before git ever ran"
+else
+  pass "wrapper's bare 'diff' refusal means the configured clean filter never gets a chance to fire"
+fi
+
+# The range form the wrapper DOES allow must not trigger the filter either — it's a blob-to-blob
+# comparison, never touching the (dirty) working-tree file the filter would otherwise convert.
+rm -f "$FILTER_MARKER"
+( cd "$FILTER_REPO" && "$WRAPPER" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
+if [[ -f "$FILTER_MARKER" ]]; then
+  fail "configured clean filter FIRED via the wrapper's range-form 'diff HEAD~1...HEAD' — blob-to-blob diff should never touch the filter"
+else
+  pass "wrapper's range-form 'diff HEAD~1...HEAD' does not trigger the configured clean filter (blob-to-blob, no working-tree involvement)"
+fi
+
+rm -f "$FILTER_MARKER" "$FILTER_SCRIPT"
+rm -rf "$FILTER_REPO"
 
 # ---------------------------------------------------------------------------
 # Trace-output-sink env vars (Codex P2, round 5). git's own docs define GIT_TRACE (and its

@@ -454,6 +454,41 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
     perf). Both trace mechanisms now carry a live fixture with a negative control (raw git DOES
     write/create the marker; the wrapper does not), the same "not green-by-construction"
     standard every config-driven-bypass fixture in this file already holds itself to.
+  - **Round 6 — a comprehensive exec/write-surface close, plus base-pinning `gate.conf`'s
+    `execution=` itself.** After five rounds of individual findings on the same wrapper, this
+    round did one exhaustive pass instead of another single patch:
+    - **`cli/lib/pantheon-git-readonly.sh`'s header comment is now the single canonical
+      enumeration** of every git config key, attribute, or environment variable that names an
+      executable or a write target, checked against git's own documentation for reachability
+      from the four allowlisted subcommands with no explicit model-supplied flag — a table of
+      vector → neutralization → verification status, plus a "not reachable" section (aliases,
+      remote-touching mechanisms) with the reasoning for why each is out of scope, stated as a
+      standing invariant, not a one-time check. Read that file directly rather than duplicating
+      the table here — this section only calls out what's new since Round 5.
+    - **Clean/smudge filters** (`filter.<name>.clean`, activated via `.gitattributes` —
+      distinct from the ext-diff/textconv machinery Round 2 closed): fire on a `diff` that
+      touches the WORKING TREE (a bare `diff` or `diff <single-ref>`), never on a blob-to-blob
+      range comparison. Reproduced live on both forms; confirmed `show`/`log`/`status` never
+      trigger this mechanism at all. Fixed structurally, not by blocklisting the filter
+      mechanism itself: `diff` now requires its first positional argument to contain `..` (a
+      proper range) — the ONLY form DESIGN.md rule 1 and every generated run-context prompt
+      ever told an agent to use in the first place, so this costs no legitimate capability.
+    - **Auto-maintenance** (`gc.auto`, `maintenance.auto`): tested for a live trigger from
+      `status` (git's own trace output showed no gc/maintenance invocation) — not reproducible,
+      forced off anyway (`-c gc.auto=0 -c maintenance.auto=false`) as the same no-cost-insurance
+      posture as Round 4's `log.showSignature=false`.
+    - **`gate.conf`'s `execution=` key itself is now base-pinned**, closing a gap in the
+      wrapper's own trust model: `cli/review-gate` never checks out the PR branch, but a
+      maintainer who first runs `gh pr checkout <n>` (a common local-review habit) before
+      invoking `review-gate` would have the PR's own head content checked out — including a
+      hostile `gate.conf` shipping its own `execution=trusted` to restore unrestricted Bash
+      before the gate inspects anything. Same trust boundary as `REVIEW_RULES.md`/`DESIGN.md`
+      base-pinning, applied to this one security-sensitive `gate.conf` key; every other
+      `gate.conf` key (provider, model, base_branch, rules_file, spec_file, agents) is
+      lower-stakes and stays working-tree-sourced, unchanged. An explicit `--execution` CLI flag
+      is operator-typed input, not PR-controlled configuration, so it's resolved and validated
+      immediately (fail-fast, before any `gh`/network call) rather than waiting on `BASE_SHA` —
+      only the gate.conf-sourced fallback waits for the base-pinned read.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is

@@ -17,6 +17,9 @@
 #
 # No test framework — plain bash, `bash tests/test-execution-tier.sh` is the whole invocation
 # (wired into .github/workflows/ci.yml and tests/test-setup-smoke.sh).
+#
+# shellcheck disable=SC2034 # Part G's run_exec_block() sets several vars read only by the
+# sourced/extracted cli/review-gate block, which shellcheck can't see through.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -162,10 +165,13 @@ else
   fail "cli/review-gate's arg parser is missing an --execution case"
 fi
 
+# Regression guard: the EARLY (working-tree) gate.conf parser must NOT have an execution= case
+# — that's the whole point of the base-pinning fix below (Part G). If this reappears, gate.conf's
+# execution= is being read from the working tree again, reopening the PR-controlled-config gap.
 if grep -qE '^\s*execution\) CFG_EXECUTION=' "$REVIEW_GATE"; then
-  pass "cli/review-gate's gate.conf parser has an execution= case"
+  fail "cli/review-gate's EARLY (working-tree) gate.conf parser has an execution= case again — this reopens the base-pinning gap Part G's fixtures cover; execution= must only be read base-pinned (see the block Part G extracts)"
 else
-  fail "cli/review-gate's gate.conf parser is missing an execution= case"
+  pass "cli/review-gate's early (working-tree) gate.conf parser correctly does NOT read execution= (it's base-pinned instead — see Part G)"
 fi
 
 # shellcheck disable=SC2016 # literal text search, not variable expansion — see cli/review-gate
@@ -175,9 +181,11 @@ else
   fail "cli/review-gate does not call pantheon_validate_execution on EXECUTION"
 fi
 
-# Real invocation, from a scratch (non-review-pantheon) git repo: an invalid --execution value
-# must die BEFORE any gh/network call — the die message must be the execution one, not a `gh`
-# failure, and it must return fast (no hang waiting on network/auth).
+# Real invocation, from a scratch (non-review-pantheon) git repo: an invalid --EXPLICIT
+# --execution flag must die BEFORE any gh/network call — it's operator-typed input, resolved in
+# the early section (before PR-number validation), unlike gate.conf's execution= (base-pinned,
+# so it necessarily can't be checked without a real PR to fetch — see Part G's fixtures for that
+# half instead, which don't need network access).
 SCRATCH="$(mktemp -d)"
 git init -q "$SCRATCH"
 
@@ -187,16 +195,6 @@ if [[ $bogus_status -ne 0 ]] && grep -qF "unknown execution tier 'bogus-tier'" <
   pass "review-gate --execution bogus-tier --pr 1: fails closed with the execution-tier error, before any gh call"
 else
   fail "review-gate --execution bogus-tier --pr 1: did not fail closed as expected (status=$bogus_status, output: $bogus_out)"
-fi
-
-echo "execution=also-bogus" > "$SCRATCH/gate.conf"
-gateconf_out="$(cd "$SCRATCH" && "$REVIEW_GATE" --pr 1 2>&1)"
-gateconf_status=$?
-rm -f "$SCRATCH/gate.conf"
-if [[ $gateconf_status -ne 0 ]] && grep -qF "unknown execution tier 'also-bogus'" <<<"$gateconf_out"; then
-  pass "gate.conf's execution=also-bogus: fails closed with the execution-tier error, before any gh call"
-else
-  fail "gate.conf's execution=also-bogus: did not fail closed as expected (status=$gateconf_status, output: $gateconf_out)"
 fi
 
 rm -rf "$SCRATCH"
@@ -354,6 +352,171 @@ for trace_var in GIT_TRACE GIT_TRACE2 GIT_TRACE2_EVENT GIT_TRACE2_PERF GIT_CURL_
     fail "pantheon-git-readonly.sh no longer unsets $trace_var — the trace-output-sink write regression could recur"
   fi
 done
+
+# Round 6 (Codex P1): diff must require a proper range (contains '..') — a bare diff or a
+# single-ref diff touches the working tree and can trigger a configured clean/smudge filter.
+# shellcheck disable=SC2016
+if strip_comments "$WRAPPER_SCRIPT" | grep -qF '"$first_positional" == *..*'; then
+  pass "pantheon-git-readonly.sh requires diff's first positional argument to contain '..' (a proper range)"
+else
+  fail "pantheon-git-readonly.sh no longer requires a range on diff — the clean-filter bypass via a bare/single-ref diff could regress"
+fi
+
+for gc_override in "gc.auto=0" "maintenance.auto=false"; do
+  if strip_comments "$WRAPPER_SCRIPT" | grep -qF "$gc_override"; then
+    pass "pantheon-git-readonly.sh forces -c $gc_override"
+  else
+    fail "pantheon-git-readonly.sh no longer forces -c $gc_override"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Part G — cli/review-gate's execution= must be base-pinned, not working-tree-pinned (Codex P1,
+# round 6). review-gate never checks out the PR branch itself, but a maintainer who first runs
+# `gh pr checkout <n>` (a common local-review habit) before invoking review-gate would have the
+# PR's own head content checked out, including a hostile gate.conf shipping `execution=trusted`.
+# This extracts the real base-pinned-execution block verbatim from cli/review-gate (never
+# hand-copied — the same pattern tests/test-prompt-assembly.sh's Part B uses for build_prompt())
+# and exercises it against real git fixture repos.
+# ---------------------------------------------------------------------------
+section "Part G: cli/review-gate's execution= is base-pinned, not working-tree-pinned"
+
+EXEC_BLOCK_FILE="$(mktemp)"
+# shellcheck disable=SC2016
+awk '
+  /^if \[\[ -z "\$EXECUTION" \]\]; then$/ { grab=1 }
+  grab { print }
+  grab && /^fi$/ { exit }
+' "$REVIEW_GATE" > "$EXEC_BLOCK_FILE"
+
+# shellcheck disable=SC2016
+if [[ -s "$EXEC_BLOCK_FILE" ]] && grep -qF 'if [[ -z "$EXECUTION" ]]; then' "$EXEC_BLOCK_FILE"; then
+  pass "extracted the base-pinned execution= block verbatim from cli/review-gate"
+else
+  fail "could not extract the base-pinned execution= block from cli/review-gate — its shape changed; update the extractor"
+fi
+
+# `exit 1`, not `return 1`: the real cli/review-gate's die() calls `exit`, which — critically —
+# terminates the whole process on a real invocation. `return` would only return from die() itself
+# and let the extracted block's script keep running past the failed validation (masking exactly
+# the fail-closed behavior G5 below exists to prove), since run_exec_block's subshell has no
+# `set -e` of its own to stop at a nonzero-status statement either. Because this runs inside a
+# `( ... )` subshell (run_exec_block), `exit` here only terminates that subshell, never this test
+# script itself.
+die() { echo "test-stub die: $*" >&2; exit 1; }
+
+git_fixture_repo_exec() {
+  local dir="$1"
+  git -C "$dir" init -q
+  git -C "$dir" config user.email "test@example.com"
+  git -C "$dir" config user.name "test"
+  git -C "$dir" add -A
+  git -C "$dir" commit -q -m "fixture commit"
+  git -C "$dir" rev-parse HEAD
+}
+
+# run_exec_block <repo-root> <base-sha> [preset-execution]
+#
+# The extracted block only runs its base-pinned gate.conf read when $EXECUTION is still empty —
+# that's the real script's own guard for "no --execution flag was given" (the flag is resolved
+# in an EARLIER, unextracted section). [preset-execution] simulates what that earlier section
+# would already have set EXECUTION to; leave it empty to exercise the base-pinned read itself
+# (the normal case), or pass a value (e.g. "readonly") to prove the late block correctly leaves
+# an already-resolved EXECUTION untouched instead of overwriting it from gate.conf.
+#
+# PANTHEON_GIT_WRAPPER and PANTHEON_ROOT must be set before sourcing — the extracted block
+# references both, and this harness's `set -uo pipefail` (inherited by the subshell below) turns
+# any unset-variable reference into an immediate, silent-looking subshell exit — no output at
+# all, not even a visible error — which is exactly what happened here before this fix (every
+# G1-G4 result came back empty, not "wrong").
+run_exec_block() {
+  (
+    REPO_ROOT="$1"
+    BASE_SHA="$2"
+    EXECUTION="${3:-}"
+    PANTHEON_ROOT="$ROOT"
+    PANTHEON_GIT_WRAPPER="$ROOT/cli/lib/pantheon-git-readonly.sh"
+    # shellcheck disable=SC1090
+    source "$EXEC_BLOCK_FILE" >/dev/null 2>&1
+    echo "$EXECUTION"
+  )
+}
+
+# G1 — the exact Codex scenario: base has execution=readonly committed; a fork PR's head EDITS
+# gate.conf to execution=trusted (leaving the working tree checked out at the edited version,
+# simulating `gh pr checkout` before running review-gate). The base-pinned read must see
+# 'readonly', never the working tree's 'trusted'.
+FIXTURE_G1="$(mktemp -d)"
+echo "execution=readonly" > "$FIXTURE_G1/gate.conf"
+FIXTURE_G1_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G1")"
+echo "execution=trusted" > "$FIXTURE_G1/gate.conf"
+git -C "$FIXTURE_G1" commit -q -am "fork PR edits gate.conf to execution=trusted"
+
+G1_RESULT="$(run_exec_block "$FIXTURE_G1" "$FIXTURE_G1_BASE_SHA")"
+if [[ "$G1_RESULT" == "readonly" ]]; then
+  pass "base has execution=readonly, PR-edited working tree has execution=trusted -> base-pinned value (readonly) wins"
+else
+  fail "base-pinning regression: expected 'readonly' (the base commit's value), got '$G1_RESULT' — the working-tree-edited value leaked through"
+fi
+
+# G2 — a fork PR INTRODUCES gate.conf for the first time (absent at base entirely) with
+# execution=trusted. Must fall back to readonly, never read the PR-introduced file.
+FIXTURE_G2="$(mktemp -d)"
+echo "unrelated" > "$FIXTURE_G2/README.md"
+FIXTURE_G2_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G2")"
+echo "execution=trusted" > "$FIXTURE_G2/gate.conf"
+git -C "$FIXTURE_G2" add gate.conf
+git -C "$FIXTURE_G2" commit -q -m "fork PR introduces gate.conf with execution=trusted"
+
+G2_RESULT="$(run_exec_block "$FIXTURE_G2" "$FIXTURE_G2_BASE_SHA")"
+if [[ "$G2_RESULT" == "readonly" ]]; then
+  pass "gate.conf absent at base, PR introduces execution=trusted -> falls back to readonly, PR-introduced file never read"
+else
+  fail "base-pinning regression: expected 'readonly' (gate.conf absent at base), got '$G2_RESULT'"
+fi
+
+# G3 — a LEGITIMATE, already-merged gate.conf at base with execution=trusted (an own-repo
+# maintainer's own deliberate choice, committed to the base branch itself) must still be
+# honored — base-pinning isn't "always readonly," it's "trust the base commit, not the PR's own
+# edits."
+FIXTURE_G3="$(mktemp -d)"
+echo "execution=trusted" > "$FIXTURE_G3/gate.conf"
+FIXTURE_G3_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G3")"
+
+G3_RESULT="$(run_exec_block "$FIXTURE_G3" "$FIXTURE_G3_BASE_SHA")"
+if [[ "$G3_RESULT" == "trusted" ]]; then
+  pass "execution=trusted legitimately committed AT BASE (not PR-introduced) -> honored"
+else
+  fail "expected 'trusted' (a legitimately base-committed value), got '$G3_RESULT' — base-pinning should trust the base commit's own content"
+fi
+
+# G4 — the --execution CLI flag (OPT_EXECUTION) is an explicit operator action, not
+# PR-controlled configuration, so it must win over whatever the base-pinned gate.conf says.
+G4_RESULT="$(run_exec_block "$FIXTURE_G3" "$FIXTURE_G3_BASE_SHA" "readonly")"
+if [[ "$G4_RESULT" == "readonly" ]]; then
+  pass "--execution readonly (operator-explicit) overrides base-pinned gate.conf's execution=trusted"
+else
+  fail "expected 'readonly' (the explicit --execution flag), got '$G4_RESULT' — CLI flag should win over gate.conf"
+fi
+
+# G5 — an invalid execution= value AT BASE must still fail closed (this doesn't need network/a
+# real PR to test, unlike the live-invocation fixture in Part C — that's exactly why this exists
+# here instead). die() is stubbed above to `return 1` rather than exit, so run_exec_block's
+# subshell exits nonzero at that point and produces no "echo $EXECUTION" output at all.
+FIXTURE_G5="$(mktemp -d)"
+echo "execution=bogus-at-base" > "$FIXTURE_G5/gate.conf"
+FIXTURE_G5_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G5")"
+
+G5_STATUS=0
+G5_RESULT="$(run_exec_block "$FIXTURE_G5" "$FIXTURE_G5_BASE_SHA")" || G5_STATUS=$?
+if [[ $G5_STATUS -ne 0 && -z "$G5_RESULT" ]]; then
+  pass "execution=bogus-at-base fails closed (nonzero exit, no EXECUTION value produced) — not silently coerced to a default"
+else
+  fail "execution=bogus-at-base did NOT fail closed (status=$G5_STATUS, result='$G5_RESULT')"
+fi
+
+rm -rf "$FIXTURE_G1" "$FIXTURE_G2" "$FIXTURE_G3" "$FIXTURE_G5"
+rm -f "$EXEC_BLOCK_FILE"
 
 echo
 echo "execution-tier fixtures: $PASS passed, $FAIL failed"

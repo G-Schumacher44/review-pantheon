@@ -182,8 +182,15 @@ CFG_BASE_BRANCH="main"
 CFG_RULES_FILE="REVIEW_RULES.md"
 CFG_SPEC_FILE="DESIGN.md"
 CFG_AGENTS="artemis apollo"
-CFG_EXECUTION="readonly"
 
+# execution= is deliberately NOT read here, from the working-tree gate.conf, even though every
+# other key is (see the base-pinned re-read after BASE_SHA is resolved, below) — a Codex P1
+# finding on this PR: review-gate never checks out the PR branch itself, but a maintainer who
+# first runs `gh pr checkout <n>` (a common local-review habit) before invoking review-gate WOULD
+# have the PR's own head content checked out, including a hostile gate.conf shipping its own
+# `execution=trusted` to restore unrestricted Bash before this gate inspects anything. Every
+# other gate.conf key here is lower-stakes (doesn't control tool-execution breadth) and stays
+# working-tree-sourced, unchanged.
 if [[ -f "$REPO_ROOT/gate.conf" ]]; then
   while IFS= read -r cfg_line; do
     [[ "$cfg_line" =~ ^[a-z_]+= ]] || continue
@@ -196,7 +203,6 @@ if [[ -f "$REPO_ROOT/gate.conf" ]]; then
       rules_file) CFG_RULES_FILE="$cfg_val" ;;
       spec_file) CFG_SPEC_FILE="$cfg_val" ;;
       agents) CFG_AGENTS="$cfg_val" ;;
-      execution) CFG_EXECUTION="$cfg_val" ;;
     esac
   done < "$REPO_ROOT/gate.conf"
 fi
@@ -215,16 +221,23 @@ for agent in $AGENTS_LIST; do
   esac
 done
 
-# Tiered execution (HIGH-1 fix — see cli/lib/execution.sh and DESIGN.md's "Security posture"):
-# readonly is the default everywhere; trusted (full Bash) is an explicit opt-in. Fail-closed on
-# an unrecognized value, same posture as an unknown provider/agent above — this is a security
-# default, not something to silently coerce to a guess.
-EXECUTION="${OPT_EXECUTION:-$CFG_EXECUTION}"
-pantheon_validate_execution "$EXECUTION" \
-  || die "unknown execution tier '$EXECUTION' (must be 'readonly' or 'trusted')"
 PANTHEON_GIT_WRAPPER="$PANTHEON_ROOT/cli/lib/pantheon-git-readonly.sh"
-export PANTHEON_ALLOWED_TOOLS
-PANTHEON_ALLOWED_TOOLS="$(pantheon_allowed_tools_for "$EXECUTION" "$PANTHEON_GIT_WRAPPER")"
+
+# Tiered execution (HIGH-1 fix — see cli/lib/execution.sh and DESIGN.md's "Security posture").
+# An explicit --execution flag is an operator-typed action, not PR-controlled configuration, so
+# it's resolved and validated HERE — immediately, fail-fast, before any gh/network call — exactly
+# like every other explicit flag above. It does NOT depend on gate.conf at all, so it doesn't
+# need to wait for BASE_SHA. When no --execution flag is given, EXECUTION is resolved later
+# instead, from gate.conf's execution= key — but ONLY as read from the PR's BASE commit, never
+# from the working tree (see the base-pinned re-read after BASE_SHA is resolved, below).
+EXECUTION=""
+if [[ -n "$OPT_EXECUTION" ]]; then
+  EXECUTION="$OPT_EXECUTION"
+  pantheon_validate_execution "$EXECUTION" \
+    || die "unknown execution tier '$EXECUTION' (must be 'readonly' or 'trusted')"
+  export PANTHEON_ALLOWED_TOOLS
+  PANTHEON_ALLOWED_TOOLS="$(pantheon_allowed_tools_for "$EXECUTION" "$PANTHEON_GIT_WRAPPER")"
+fi
 
 # ---------------------------------------------------------------------------
 # PR number validation — untrusted input starts here (PR metadata is
@@ -279,6 +292,32 @@ BASE_SHA="$(git rev-parse "$GATE_BASE_REF")"
 [[ "$BASE_SHA" =~ $SHA_RE ]] || die "unsafe base SHA '$BASE_SHA' — UNVERIFIED, posting nothing"
 
 DIFF_RANGE="${GATE_BASE_REF}...${GATE_HEAD_REF}"
+
+# ---------------------------------------------------------------------------
+# Tiered execution, continued (see the early --execution handling above — this only runs when
+# NO --execution flag was given). execution= is read from gate.conf ONLY as committed at the
+# PR's BASE commit — never from the working tree (a maintainer who first runs `gh pr checkout
+# <n>` before invoking review-gate would otherwise pick up a hostile PR's own
+# `execution=trusted`). Same trust boundary as the base-pinned REVIEW_RULES.md/DESIGN.md reads
+# below, applied to this one security-sensitive key.
+if [[ -z "$EXECUTION" ]]; then
+  BASE_GATE_CONF_EXECUTION=""
+  if base_gate_conf_content="$(git -C "$REPO_ROOT" show "${BASE_SHA}:gate.conf" 2>/dev/null)"; then
+    while IFS= read -r cfg_line; do
+      [[ "$cfg_line" =~ ^execution= ]] || continue
+      BASE_GATE_CONF_EXECUTION="${cfg_line#*=}"
+    done <<< "$base_gate_conf_content"
+  fi
+  CFG_EXECUTION="${BASE_GATE_CONF_EXECUTION:-readonly}"
+
+  # Fail-closed on an unrecognized value, same posture as an unknown provider/agent above — this
+  # is a security default, not something to silently coerce to a guess.
+  EXECUTION="$CFG_EXECUTION"
+  pantheon_validate_execution "$EXECUTION" \
+    || die "unknown execution tier '$EXECUTION' (must be 'readonly' or 'trusted')"
+  export PANTHEON_ALLOWED_TOOLS
+  PANTHEON_ALLOWED_TOOLS="$(pantheon_allowed_tools_for "$EXECUTION" "$PANTHEON_GIT_WRAPPER")"
+fi
 
 # ---------------------------------------------------------------------------
 # Docs-only detection — via `git diff --name-only` over the refs we just fetched, not
