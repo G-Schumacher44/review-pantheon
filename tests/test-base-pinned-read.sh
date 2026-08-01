@@ -303,6 +303,94 @@ else
   fail "a 10-hop symlink chain did not resolve to the final target's content"
 fi
 
+# ---------------------------------------------------------------------------
+# Part G — round-3 (Codex P2 on PR #8, after round 2 landed): a symlink doesn't have to occupy
+# the FULL requested path to matter. Git's tree lookup does not traverse a symlinked path
+# COMPONENT — `git ls-tree $base_sha -- <nested/path>` returns nothing at all (not the symlink,
+# not an error) the instant a non-leaf component is itself a mode-120000 blob, even when the
+# real target genuinely exists in the tree. Round 2 only resolved a symlink occupying the WHOLE
+# requested path (the leaf case); a symlinked DIRECTORY partway through the path
+# (`custom-personas -> real-personas`) silently read as ordinary absence instead of resolving.
+# ---------------------------------------------------------------------------
+section "Part G: pantheon_base_pinned_read — symlinked INTERMEDIATE path component (round 3)"
+
+FIXTURE_G="$WORKDIR/fixture-g"
+mkdir -p "$FIXTURE_G/real-personas"
+echo "REAL-ARTEMIS-VIA-DIR-SYMLINK" > "$FIXTURE_G/real-personas/artemis.md"
+( cd "$FIXTURE_G" && ln -s real-personas custom-personas )
+FIXTURE_G_SHA="$(git_fixture_repo "$FIXTURE_G")"
+
+# Fixture sanity check: confirm the directory component really is a mode-120000 blob, and that
+# a single-shot `git ls-tree` on the full nested path really does return nothing — proving this
+# fixture exercises the exact bug class before asserting the fix closes it.
+G_DIR_MODE="$(cd "$FIXTURE_G" && git ls-tree "$FIXTURE_G_SHA" -- custom-personas | awk '{print $1}')"
+if [[ "$G_DIR_MODE" == "120000" ]]; then
+  pass "fixture sanity check: the intermediate directory component is really a mode-120000 (symlink) blob at base"
+else
+  fail "fixture sanity check FAILED: expected mode 120000 for the directory component, got '$G_DIR_MODE'"
+fi
+G_BARE_LSTREE="$(cd "$FIXTURE_G" && git ls-tree "$FIXTURE_G_SHA" -- custom-personas/artemis.md)"
+if [[ -z "$G_BARE_LSTREE" ]]; then
+  pass "fixture sanity check: a single-shot 'git ls-tree' on the full nested path returns NOTHING (the bug this fix closes — git does not traverse a symlinked component)"
+else
+  fail "fixture sanity check: expected empty output from a single-shot ls-tree on the nested path, got '$G_BARE_LSTREE'"
+fi
+
+G1_OUT="$WORKDIR/g1-out.txt"
+G1_RC=0
+( cd "$FIXTURE_G" && pantheon_base_pinned_read "$FIXTURE_G_SHA" "custom-personas/artemis.md" "$G1_OUT" ) || G1_RC=$?
+if [[ "$G1_RC" -eq 0 ]]; then
+  pass "a symlinked intermediate directory component resolves (rc=0)"
+else
+  fail "a symlinked intermediate directory component failed to resolve (rc=$G1_RC) — misread as ordinary absence"
+fi
+if grep -q "REAL-ARTEMIS-VIA-DIR-SYMLINK" "$G1_OUT" 2>/dev/null; then
+  pass "a symlinked intermediate directory component resolves to the TARGET file's content"
+else
+  fail "a symlinked intermediate directory component did not resolve to the target's content"
+fi
+
+# A chain of nested directory symlinks (dir -> dir -> file), proving the component walk
+# restarts correctly after substitution rather than assuming one substitution is enough.
+( cd "$FIXTURE_G" && ln -s custom-personas other-personas )
+git -C "$FIXTURE_G" add -A
+git -C "$FIXTURE_G" commit -q -m "add a second-hop directory symlink"
+FIXTURE_G2_SHA="$(git -C "$FIXTURE_G" rev-parse HEAD)"
+G2_OUT="$WORKDIR/g2-out.txt"
+G2_RC=0
+( cd "$FIXTURE_G" && pantheon_base_pinned_read "$FIXTURE_G2_SHA" "other-personas/artemis.md" "$G2_OUT" ) || G2_RC=$?
+if [[ "$G2_RC" -eq 0 ]] && grep -q "REAL-ARTEMIS-VIA-DIR-SYMLINK" "$G2_OUT" 2>/dev/null; then
+  pass "a 2-hop directory-symlink chain (dir -> dir -> file) resolves to the final target's content"
+else
+  fail "a 2-hop directory-symlink chain failed to resolve (rc=$G2_RC)"
+fi
+
+# ---------------------------------------------------------------------------
+# Part H — a directory symlink escaping the repository root must be REFUSED (rc=1), the same
+# as an escaping leaf symlink — never silently treated as absent.
+# ---------------------------------------------------------------------------
+section "Part H: pantheon_base_pinned_read — symlinked intermediate directory escaping the repo root is refused"
+
+FIXTURE_H="$WORKDIR/fixture-h"
+mkdir -p "$FIXTURE_H"
+( cd "$FIXTURE_H" && ln -s ../../../../../../etc evil-dir )
+echo "unrelated" > "$FIXTURE_H/README.md"
+FIXTURE_H_SHA="$(git_fixture_repo "$FIXTURE_H")"
+
+H1_OUT="$WORKDIR/h1-out.txt"
+H1_RC=0
+( cd "$FIXTURE_H" && pantheon_base_pinned_read "$FIXTURE_H_SHA" "evil-dir/passwd" "$H1_OUT" ) 2>/dev/null || H1_RC=$?
+if [[ "$H1_RC" -eq 1 ]]; then
+  pass "a directory symlink climbing above the repo root is refused (rc=1, not silently absent)"
+else
+  fail "a directory symlink climbing above the repo root was NOT refused with rc=1 (got rc=$H1_RC)"
+fi
+if [[ ! -s "$H1_OUT" ]]; then
+  pass "no content was written for the refused escaping directory symlink"
+else
+  fail "content was written despite the escaping directory symlink being refused"
+fi
+
 echo
 echo "PASS: $PASS, FAIL: $FAIL"
 [[ "$FAIL" -eq 0 ]]

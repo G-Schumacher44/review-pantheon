@@ -700,9 +700,12 @@ cli/lib/pantheon-base-pin.sh  symlink-safe base-pinned reads (issue #6's class, 
                            a bare `git show $BASE_SHA:path` on a symlinked path returns the
                            link-target STRING, not the target's content) — sourced by
                            cli/review-gate and by action.yml's "Resolve gate configuration"
-                           step; action/review.yml carries its own hand-synced inline copy (a
+                           step; vendored by bootstrap.sh (CLI lane) into the bootstrap prefix
+                           alongside cli/lib/execution.sh and cli/lib/pantheon-git-readonly.sh
+                           (unlike that wrapper, install.sh does NOT separately vendor this file
+                           — action/review.yml carries its own hand-synced inline copy instead (a
                            target repo never gets cli/lib/ — same reason as the prompt-build
-                           logic it already hand-syncs, see "Lane differences" below)
+                           logic it already hand-syncs, see "Lane differences" below))
 cli/providers/             provider lanes (claude, codex, gemini, cursor)
 action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
                            artifact-based result passing, fail-closed decision step

@@ -22,6 +22,14 @@
 # way a non-symlinked base-pinned read already is: BASE commit content only, never the working
 # tree, never a chain link outside the repo.
 #
+# Round 3 (a further Codex P2 on the same PR): a symlink doesn't have to occupy the FULL
+# requested path to matter — git's tree lookup never traverses a symlinked path COMPONENT, so a
+# symlinked DIRECTORY partway through the path (`custom-personas -> real-personas`, with
+# `real-personas/artemis.md` the real file) made `git ls-tree $base_sha --
+# custom-personas/artemis.md` return nothing at all, misreading a real file as ordinary absence.
+# pantheon_base_pinned_read below walks `cur` one path COMPONENT at a time for exactly this
+# reason — see its own header comment for the walk/resolve/restart mechanics.
+#
 # Usage: pantheon_base_pinned_read <base-sha> <path> <dest-file> [repo-dir]
 # <repo-dir> defaults to "." — every git call is routed through `git -C <repo-dir>` explicitly,
 # not an implicit cwd, so behavior doesn't depend on whether the caller has already `cd`'d into
@@ -101,6 +109,22 @@ pantheon_normalize_repo_path() {
 # relying on an implicit cwd, so this function behaves the same whether or not the caller has
 # already `cd`'d into the target repo (cli/review-gate does; a GitHub Actions step's cwd is
 # already $GITHUB_WORKSPACE by convention, so passing nothing there is equally correct).
+#
+# Round-3 fix (Codex P2, PR #8): git's tree lookup does not traverse a symlinked path
+# COMPONENT — `git ls-tree $base_sha -- <full/nested/path>` returns nothing at all (not the
+# symlink, not an error) the instant any non-leaf component of that path is itself a mode-120000
+# blob, even though the semantically-correct target genuinely exists in the tree. Round 2 only
+# detected a symlink AT THE FULL REQUESTED PATH (the leaf case: `.github/custom-personas/
+# artemis.md` itself being a symlink) — a symlinked DIRECTORY one level up (`custom-personas ->
+# real-personas`, with `real-personas/artemis.md` real) silently read as ordinary absence
+# instead. Fixed by walking `cur`'s path components one at a time via `git ls-tree` on each
+# PREFIX (not the whole path in one shot): the first prefix — at any depth, leaf or
+# intermediate — found to be a mode-120000 blob is resolved through the SAME target-relative-to-
+# its-own-directory / normalize / escape-refuse logic round 2 already built (one code path, not
+# a second copy, per this file's own no-duplication convention), substituted into `cur` together
+# with whatever path still follows it, and the whole component walk restarts from the top —
+# bounded by the same 32-hop counter, so a resolved substitution that turns out to contain
+# ANOTHER symlinked component (nested dir-symlinks) is walked again rather than assumed resolved.
 pantheon_base_pinned_read() {
   local base_sha="$1" path="$2" dest="$3" repo_dir="${4:-.}"
   local cur="$path" hops=0
@@ -112,49 +136,86 @@ pantheon_base_pinned_read() {
       return 1
     fi
 
-    local mode
-    mode="$(git -C "$repo_dir" ls-tree "$base_sha" -- "$cur" 2>/dev/null | awk '{print $1}')"
-    [[ -n "$mode" ]] || return 2 # not present at base — ordinary absence
+    # Walk cur's path components left to right, ls-tree'ing each PREFIX (never the whole path
+    # in one shot — see this function's header comment on why). Stops at the first prefix that
+    # is a symlink (found_symlink=true, possibly the leaf itself) or once every component has
+    # been consumed (found_symlink stays false — mode/prefix then describe the full path $cur).
+    local prefix="" remaining="$cur" comp mode found_symlink=false
+    while [[ -n "$remaining" ]]; do
+      comp="${remaining%%/*}"
+      if [[ "$remaining" == */* ]]; then
+        remaining="${remaining#*/}"
+      else
+        remaining=""
+      fi
+      if [[ -z "$prefix" ]]; then
+        prefix="$comp"
+      else
+        prefix="$prefix/$comp"
+      fi
 
-    case "$mode" in
-      120000)
-        local target
-        target="$(git -C "$repo_dir" show "${base_sha}:${cur}" 2>/dev/null)" || return 2
+      mode="$(git -C "$repo_dir" ls-tree "$base_sha" -- "$prefix" 2>/dev/null | awk '{print $1}')"
+      [[ -n "$mode" ]] || return 2 # this prefix doesn't exist at base — ordinary absence
 
-        if [[ "$target" == /* ]]; then
-          echo "::error::pantheon: symlink '$cur' at base ${base_sha} has an absolute target '$target' — refusing (only relative, in-repo-resolving symlinks are followed; base-pinning never reads outside the repository)." >&2
-          return 1
-        fi
+      if [[ "$mode" == "120000" ]]; then
+        found_symlink=true
+        break
+      fi
+      # Anything else (a tree when more path remains, or — once remaining is empty — a blob)
+      # just continues the walk; the case below handles the terminal mode once the walk ends.
+    done
 
-        local cur_dir combined
-        cur_dir="${cur%/*}"
-        [[ "$cur_dir" == "$cur" ]] && cur_dir="."
-        if [[ "$cur_dir" == "." ]]; then
-          combined="$target"
-        else
-          combined="$cur_dir/$target"
-        fi
-
-        local normalized
-        if ! normalized="$(pantheon_normalize_repo_path "$combined")"; then
-          echo "::error::pantheon: symlink '$cur' at base ${base_sha} resolves to '$combined', which escapes the repository root — refusing to follow it (never falls back to reading it from the working tree)." >&2
-          return 1
-        fi
-        cur="$normalized"
-        ;;
-      100644 | 100755)
-        if git -C "$repo_dir" show "${base_sha}:${cur}" > "$dest" 2>/dev/null; then
-          return 0
-        else
+    if [[ "$found_symlink" != "true" ]]; then
+      # No symlink anywhere along the path — every component was a plain tree/blob, and
+      # $prefix == $cur (the walk consumed the whole path). $mode is the leaf's own mode.
+      case "$mode" in
+        100644 | 100755)
+          if git -C "$repo_dir" show "${base_sha}:${cur}" > "$dest" 2>/dev/null; then
+            return 0
+          else
+            return 2
+          fi
+          ;;
+        *)
+          # A tree (040000), gitlink/submodule (160000), or any other mode at the LEAF
+          # position isn't readable content — treated as ordinary absence, the same as a path
+          # that doesn't exist at all.
           return 2
-        fi
-        ;;
-      *)
-        # A tree (040000), gitlink/submodule (160000), or any other mode is not a readable file
-        # or a symlink to one — treated as ordinary absence, the same as a path that doesn't
-        # exist at all (there's nothing content-shaped to read).
-        return 2
-        ;;
-    esac
+          ;;
+      esac
+    fi
+
+    # $prefix is the first symlinked component found (leaf or intermediate); $remaining is
+    # whatever path (possibly empty, if $prefix was the leaf) still follows it. Resolve $prefix
+    # exactly like round 2's leaf-only logic did — target relative to the symlink's OWN
+    # directory, normalized, refused if it escapes the repo root — then substitute and restart.
+    local target
+    target="$(git -C "$repo_dir" show "${base_sha}:${prefix}" 2>/dev/null)" || return 2
+
+    if [[ "$target" == /* ]]; then
+      echo "::error::pantheon: symlink '$prefix' at base ${base_sha} has an absolute target '$target' — refusing (only relative, in-repo-resolving symlinks are followed; base-pinning never reads outside the repository)." >&2
+      return 1
+    fi
+
+    local prefix_dir combined
+    prefix_dir="${prefix%/*}"
+    [[ "$prefix_dir" == "$prefix" ]] && prefix_dir="."
+    if [[ "$prefix_dir" == "." ]]; then
+      combined="$target"
+    else
+      combined="$prefix_dir/$target"
+    fi
+
+    local normalized
+    if ! normalized="$(pantheon_normalize_repo_path "$combined")"; then
+      echo "::error::pantheon: symlink '$prefix' at base ${base_sha} resolves to '$combined', which escapes the repository root — refusing to follow it (never falls back to reading it from the working tree)." >&2
+      return 1
+    fi
+
+    if [[ -n "$remaining" ]]; then
+      cur="$normalized/$remaining"
+    else
+      cur="$normalized"
+    fi
   done
 }

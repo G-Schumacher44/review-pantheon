@@ -207,44 +207,68 @@ jobs:
                 echo "::error::pantheon: symlink chain resolving '$path' at base ${base_sha} exceeds 32 hops (cycle, or a deliberately pathological chain) — refusing to follow it." >&2
                 return 1
               fi
-              local mode
-              mode="$(git -C "$repo_dir" ls-tree "$base_sha" -- "$cur" 2>/dev/null | awk '{print $1}')"
-              [[ -n "$mode" ]] || return 2
-              case "$mode" in
-                120000)
-                  local target
-                  target="$(git -C "$repo_dir" show "${base_sha}:${cur}" 2>/dev/null)" || return 2
-                  if [[ "$target" == /* ]]; then
-                    echo "::error::pantheon: symlink '$cur' at base ${base_sha} has an absolute target '$target' — refusing (only relative, in-repo-resolving symlinks are followed; base-pinning never reads outside the repository)." >&2
-                    return 1
-                  fi
-                  local cur_dir combined
-                  cur_dir="${cur%/*}"
-                  [[ "$cur_dir" == "$cur" ]] && cur_dir="."
-                  if [[ "$cur_dir" == "." ]]; then
-                    combined="$target"
-                  else
-                    combined="$cur_dir/$target"
-                  fi
-                  local normalized
-                  if ! normalized="$(pantheon_normalize_repo_path "$combined")"; then
-                    echo "::error::pantheon: symlink '$cur' at base ${base_sha} resolves to '$combined', which escapes the repository root — refusing to follow it (never falls back to reading it from the working tree)." >&2
-                    return 1
-                  fi
-                  cur="$normalized"
-                  ;;
-                100644 | 100755)
-                  if git -C "$repo_dir" show "${base_sha}:${cur}" > "$dest" 2>/dev/null; then
-                    return 0
-                  else
-                    return 2
-                  fi
-                  ;;
-                *) return 2 ;;
-              esac
+              local prefix="" remaining="$cur" comp mode found_symlink=false
+              while [[ -n "$remaining" ]]; do
+                comp="${remaining%%/*}"
+                if [[ "$remaining" == */* ]]; then
+                  remaining="${remaining#*/}"
+                else
+                  remaining=""
+                fi
+                if [[ -z "$prefix" ]]; then
+                  prefix="$comp"
+                else
+                  prefix="$prefix/$comp"
+                fi
+                mode="$(git -C "$repo_dir" ls-tree "$base_sha" -- "$prefix" 2>/dev/null | awk '{print $1}')"
+                [[ -n "$mode" ]] || return 2
+                if [[ "$mode" == "120000" ]]; then
+                  found_symlink=true
+                  break
+                fi
+              done
+              if [[ "$found_symlink" != "true" ]]; then
+                case "$mode" in
+                  100644 | 100755)
+                    if git -C "$repo_dir" show "${base_sha}:${cur}" > "$dest" 2>/dev/null; then
+                      return 0
+                    else
+                      return 2
+                    fi
+                    ;;
+                  *) return 2 ;;
+                esac
+              fi
+              local target
+              target="$(git -C "$repo_dir" show "${base_sha}:${prefix}" 2>/dev/null)" || return 2
+              if [[ "$target" == /* ]]; then
+                echo "::error::pantheon: symlink '$prefix' at base ${base_sha} has an absolute target '$target' — refusing (only relative, in-repo-resolving symlinks are followed; base-pinning never reads outside the repository)." >&2
+                return 1
+              fi
+              local prefix_dir combined
+              prefix_dir="${prefix%/*}"
+              [[ "$prefix_dir" == "$prefix" ]] && prefix_dir="."
+              if [[ "$prefix_dir" == "." ]]; then
+                combined="$target"
+              else
+                combined="$prefix_dir/$target"
+              fi
+              local normalized
+              if ! normalized="$(pantheon_normalize_repo_path "$combined")"; then
+                echo "::error::pantheon: symlink '$prefix' at base ${base_sha} resolves to '$combined', which escapes the repository root — refusing to follow it (never falls back to reading it from the working tree)." >&2
+                return 1
+              fi
+              if [[ -n "$remaining" ]]; then
+                cur="$normalized/$remaining"
+              else
+                cur="$normalized"
+              fi
             done
           }
-          # ---- END inlined copy of cli/lib/pantheon-base-pin.sh ----
+          # ---- END inlined copy of cli/lib/pantheon-base-pin.sh (round 3 — component-walk
+          # symlink resolution, not just leaf-symlink; see the library file's own header for
+          # why a single ls-tree on the whole path silently misses a symlinked intermediate
+          # directory component) ----
 
           PERSONA_DEST="$RUNNER_TEMP/${AGENT_NAME}.md"
           persona_rc=0
