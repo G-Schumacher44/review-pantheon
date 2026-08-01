@@ -75,9 +75,12 @@ docker run --rm review-pantheon-smoke
   of them. Fix the divergence in the same PR that introduced it; don't leave the doc stale.
 - **Base-pinned provenance for anything the gate reads that shapes its own behavior** (personas,
   the verdict decider, the read-only git wrapper, house-rules/spec files) — read from the PR's
-  base commit or this repo's own trusted checkout, never the PR head's working tree. See
-  DESIGN.md's ["Security posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design)
-  for the full read-provenance matrix and why.
+  base commit or this repo's own trusted checkout, per DESIGN.md's read-provenance matrix,
+  including its disclosed exceptions (the vendored `action/review.yml` workflow reads
+  house-rules/spec content from the checked-out working tree instead — a documented, narrower
+  exception, not a precedent to extend). See DESIGN.md's ["Security
+  posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design) for the full
+  matrix and why.
 - **Every new fixture must be shown failing against the pre-fix code.** A test that was never red
   proves nothing about the fix it's supposed to cover — this repo's own fixture tests follow that
   pattern (see `tests/test-git-readonly-wrapper.sh`'s history for a worked example) and reviewers

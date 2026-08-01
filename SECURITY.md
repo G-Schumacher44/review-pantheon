@@ -35,22 +35,30 @@ instead of silently closed.
 
 ## Scope notes — read before assuming a finding is new
 
-- **The `readonly` execution tier's guarantee is scoped, not absolute.** Under `readonly` (the
-  default on every surface that invokes a provider), Bash is restricted to
-  `pantheon-git-readonly.sh` for everything beyond Claude Code's own small, built-in,
-  non-configurable set of always-approved bare read-only commands (plain `git diff`/`show`/`log`/
-  `status`, no flags) — those never reach the wrapper at all, on any tier, because Claude Code
-  itself allows them regardless; this is expected, since they're genuinely read-only, but it means
-  "Bash routes through the wrapper" is true for any flag or any other subcommand, not literally
-  every git invocation. For everything the wrapper does see, it validates the full argv of a
-  `diff`/`show`/`log`/`status` call before running real `git` — no flags accepted, forced
-  `--no-ext-diff --no-textconv`, `GIT_OPTIONAL_LOCKS=0`, run under `--permission-mode dontAsk`.
-  This closes the arbitrary-command-execution primitive through the tool-call surface for that
-  broader surface; it is one layer among several (base-pinned provenance, schema validation, the
+- **The `readonly` execution tier's guarantee is scoped to the Claude lane, and scoped further
+  even there — not absolute.** `execution=readonly` (the default) only tool-scopes
+  `cli/providers/claude.sh` — the one integration-tested lane. `cli/providers/{codex,gemini,
+  cursor}.sh` invoke their own CLIs directly and never consume `PANTHEON_ALLOWED_TOOLS` or the
+  wrapper: Codex, Gemini, and Cursor have no equivalent tool-scoping mechanism in their own CLIs
+  as of v1, so a best-effort lane carries **no tool restriction at all** — its only guard against
+  a hostile fork PR is the same fail-closed verdict handling every lane gets (schema validation,
+  the blocker invariant, degrading to `UNVERIFIED` on anything malformed), not a tool-call
+  boundary. On the Claude lane itself, `readonly` restricts Bash to `pantheon-git-readonly.sh`
+  for everything beyond Claude Code's own small, built-in, non-configurable set of always-approved
+  bare read-only commands (plain `git diff`/`show`/`log`/`status`, no flags) — those never reach
+  the wrapper at all, on any tier, because Claude Code itself allows them regardless; this is
+  expected, since they're genuinely read-only, but it means "Bash routes through the wrapper" is
+  true for any flag or any other subcommand, not literally every git invocation. For everything
+  the wrapper does see, it validates the full argv of a `diff`/`show`/`log`/`status` call before
+  running real `git` — no flags accepted, forced `--no-ext-diff --no-textconv`,
+  `GIT_OPTIONAL_LOCKS=0`, run under `--permission-mode dontAsk`. This closes the
+  arbitrary-command-execution primitive through the tool-call surface for that broader surface, on
+  the Claude lane; it is one layer among several (base-pinned provenance, schema validation, the
   blocker invariant, cross-review by a second agent), not a claim that reviewing a hostile fork PR
-  is safe in general. It does not eliminate a schema-valid, deceptive verdict from an agent that
-  injected content has fully compromised — that's an accepted, documented limit, not a gap this
-  policy is tracking as open. Full detail: DESIGN.md's "Security posture" section, "Round 3."
+  is safe in general on any lane. It does not eliminate a schema-valid, deceptive verdict from an
+  agent that injected content has fully compromised — that's an accepted, documented limit, not a
+  gap this policy is tracking as open. Full detail: DESIGN.md's "Security posture" section,
+  "Tiered tool execution" and "Round 3."
 - **The `trusted` tier is an explicit, known trade — own-repo/trusted-author use only.** Setting
   `execution=trusted` restores full Bash. It exists for reviewing your own repo's own PRs from
   your own checkout (this repo's own CI uses it exactly that way, self-reviewing its own PRs) and
