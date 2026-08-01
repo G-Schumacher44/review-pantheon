@@ -177,13 +177,15 @@ fi
 [[ -f "$SRC_ROOT/cli/lib/render_comment.sh" ]] || die "missing $SRC_ROOT/cli/lib/render_comment.sh"
 [[ -f "$SRC_ROOT/cli/lib/execution.sh" ]] || die "missing $SRC_ROOT/cli/lib/execution.sh"
 [[ -f "$SRC_ROOT/cli/lib/pantheon-git-readonly.sh" ]] || die "missing $SRC_ROOT/cli/lib/pantheon-git-readonly.sh"
+[[ -f "$SRC_ROOT/cli/lib/pantheon-base-pin.sh" ]] || die "missing $SRC_ROOT/cli/lib/pantheon-base-pin.sh"
 [[ -d "$SRC_ROOT/cli/providers" ]] || die "missing $SRC_ROOT/cli/providers"
 [[ -d "$SRC_ROOT/agents" ]] || die "missing $SRC_ROOT/agents"
 
 # ---------------------------------------------------------------------------
 # Install — mirrors the source layout under $PREFIX (cli/review-gate, cli/lib/verdict.sh,
 # cli/lib/render_comment.sh, cli/lib/execution.sh, cli/lib/pantheon-git-readonly.sh,
-# cli/providers/*.sh, agents/*.md) so review-gate's own PANTHEON_ROOT-relative path resolution
+# cli/lib/pantheon-base-pin.sh, cli/providers/*.sh, agents/*.md) so review-gate's own
+# PANTHEON_ROOT-relative path resolution
 # (agents/ and cli/providers/ next to it) works unmodified from the prefix, exactly as it does
 # from an in-repo checkout.
 #
@@ -223,6 +225,7 @@ install_file "$SRC_ROOT/cli/lib/render_comment.sh" "$PREFIX/cli/lib/render_comme
 install_file "$SRC_ROOT/cli/lib/execution.sh" "$PREFIX/cli/lib/execution.sh"
 install_file "$SRC_ROOT/cli/lib/pantheon-git-readonly.sh" "$PREFIX/cli/lib/pantheon-git-readonly.sh"
 chmod +x "$PREFIX/cli/lib/pantheon-git-readonly.sh"
+install_file "$SRC_ROOT/cli/lib/pantheon-base-pin.sh" "$PREFIX/cli/lib/pantheon-base-pin.sh"
 
 for f in "$SRC_ROOT"/cli/providers/*.sh; do
   install_file "$f" "$PREFIX/cli/providers/$(basename "$f")"
