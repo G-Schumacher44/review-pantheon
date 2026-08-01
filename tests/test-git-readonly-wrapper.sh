@@ -215,8 +215,15 @@ echo "a" > "$LOCKS_REPO/file.txt"
 git -C "$LOCKS_REPO" add file.txt
 git -C "$LOCKS_REPO" commit -q -m "first"
 
+# GNU coreutils `-f` means "filesystem mode" (a completely different flag from BSD/macOS
+# stat's "-f <format>") — `stat -f %m FILE` on GNU does NOT error, it silently stats the
+# filesystem instead of the file and prints an unrelated multi-line report, so a
+# `stat -f %m || stat -c %Y` fallback (BSD-first) never triggers on Linux; the GNU form must be
+# tried first here, with the BSD form as the fallback (which BSD's stat, lacking `-c` at all,
+# correctly errors out of, triggering `-f` in the other order). Caught by this repo's own Linux
+# CI runner — this file's dev loop is macOS, where the BSD-first order looked fine.
 stat_mtime() {
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
 before="$(stat_mtime "$LOCKS_REPO/.git/index")"
