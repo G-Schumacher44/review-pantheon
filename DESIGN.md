@@ -575,6 +575,67 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
       is operator-typed input, not PR-controlled configuration, so it's resolved and validated
       immediately (fail-fast, before any `gh`/network call) rather than waiting on `BASE_SHA` —
       only the gate.conf-sourced fallback waits for the base-pinned read.
+  - **Round 7 — the three findings deferred off PR #5 (issue #7), closed out.** Round 6's own
+    header-comment matrix flagged these as new-since-Round-5; they were tracked as a follow-up
+    rather than reopening PR #5's scope.
+    - **`GIT_NO_LAZY_FETCH=1`**, forced alongside `GIT_OPTIONAL_LOCKS=0`. In a partial clone
+      (`--filter=blob:none`) missing a promisor object, an allowlisted `diff`/`show`/`log`
+      touching that object silently contacts the configured remote and writes the fetched pack
+      into `.git/objects` — a network round-trip AND a write, from a subcommand this wrapper's
+      whole premise is "no transport, no write." Reproduced live against a local `file://` remote
+      (no real network needed to exercise the identical lazy-fetch code path git uses for any
+      remote): a fresh bare partial clone, reading the tip blob with `GIT_NO_LAZY_FETCH` unset
+      grew `.git/objects` from 4 to 8 files; the pre-fix wrapper (which set no such variable)
+      reproduced the exact same growth. With `GIT_NO_LAZY_FETCH=1` forced, the identical read
+      instead fails closed (`fatal: bad object HEAD:<path>`) with zero objects written.
+    - **`GIT_REDIRECT_STDOUT`/`GIT_REDIRECT_STDERR` scrubbed**, unset alongside the existing
+      `GIT_TRACE*` block — git's own docs describe these as a Git for Windows mechanism that
+      redirects `git.exe`'s own stdout/stderr handles to a named path, the same
+      inherited-environment-driven class as the trace sinks Round 5 already closed. Confirmed as
+      a documented no-op on this repo's (non-Windows) development and CI platforms via a local
+      repro (set + run, no file created) — the fixture for this one is necessarily structural
+      (the scrub is present in the wrapper source) rather than a live marker-file proof, and says
+      so rather than pretending a Linux CI runner exercised a Windows-only code path.
+    - **The `..`-substring diff-range check replaced with real revspec validation.** The
+      substring check (`"$first_positional" == *..*`) accepted the STRING "foo..bar" as a
+      "range" whether or not "foo" and "bar" were real revisions. A tracked working-tree file
+      literally named `foo..bar`, with a configured clean filter, exploits git's own
+      disambiguation rule — fall back to treating an unparseable revision-shaped token as a
+      PATHSPEC when it names an existing path — so `diff foo..bar` becomes a working-tree diff of
+      that one file, reopening the exact clean-filter path the original substring check was
+      meant to close. Reproduced live against the pre-fix wrapper (checked out from its
+      pre-Round-7 commit): `diff foo..bar` in a repo with that file and filter configured ran
+      clean, no refusal, and the filter fired. Fixed structurally: each side of the range is now
+      independently resolved via `git rev-parse --verify --quiet <side>^{commit}` before diff
+      ever runs, under the same hardened environment as every other git invocation this wrapper
+      makes; a side beginning with `-` is refused outright first (never handed to `rev-parse` as
+      a potentially flag-shaped argument), and a side that fails to resolve is named in the
+      refusal, not silently reinterpreted as a pathspec.
+    - All three carry live-proof fixtures in `tests/test-git-readonly-wrapper.sh` (raw-git
+      negative controls where the platform allows one; an honest structural-only note for the
+      Windows-only redirect sinks), each independently reproduced failing against the pre-fix
+      wrapper before the fix landed — the same "not green-by-construction" standard every
+      config-driven-bypass fixture in this file already holds itself to.
+  - **Round 8 — caller-supplied `--` shifts a revspec-validated range into pathspec position
+    (Codex, round 2 on the PR carrying Round 7).** Revspec-verifying both sides of a diff range is
+    NOT sufficient on its own: `git diff -- A..B`, forwarded verbatim by Round 7's wrapper, is
+    parsed by real git as a PURE PATHSPEC — not a revision — because of the leading `--`, even
+    though `A` and `B` independently resolve as real commits via `rev-parse --verify`. A tracked
+    working-tree file literally named `<A>..<B>` (trivially constructable: any two real ancestor
+    commit SHAs) plus a configured clean filter reopens the exact clean-filter RCE Round 7 was
+    written to close — reached through argument POSITION (a caller-supplied `--`) rather than
+    argument CONTENT. Reproduced live against Round 7's own pushed commit: `diff -- <A..B>` ran
+    clean, no refusal, filter fired. Fixed by the wrapper owning the pathspec boundary end to end,
+    not by blocklisting the leading-`--` shape specifically: the caller can never supply `--` at
+    all now (closed in the top-level argv-validation loop, for every subcommand — show/log/status
+    swept for the same argument-position class, not just diff), `diff` accepts EXACTLY one
+    positional argument (so there is no second, pathspec-shaped slot even without an explicit
+    `--`), and the wrapper appends its OWN trailing `--` after the validated range on exec (never
+    a caller-influenced one). The previously-accepted `diff <range> -- <path>` pathspec-scoping
+    form is consequently no longer supported — it was never a documented DESIGN.md rule 1 usage,
+    and was exactly the surface this bypass exploited. Carries the same live-proof-plus-negative-
+    control fixture pattern (`tests/test-git-readonly-wrapper.sh`), independently reproduced
+    failing against Round 7's pushed commit before this fix landed.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is
