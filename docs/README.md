@@ -4,6 +4,8 @@
 |---|---|
 | [DESIGN.md](../DESIGN.md) | The contract. Hard rules, the verdict schema, security posture, configuration keys, and the lane-differences table every agent and provider lane is required to follow. |
 | [SETUP.md](SETUP.md) | Install (three ways), the zero-token `--dry-run` demo, first live run, and troubleshooting (draft skips, UNVERIFIED causes, timeouts, force-push fallback). |
+| [CONTRIBUTING.md](../CONTRIBUTING.md) | Ground rules (PRs only, the review-loop contract), dev setup, the test suites, shellcheck/container-verify expectations, and design constraints contributors must respect. |
+| [SECURITY.md](../SECURITY.md) | Supported surface, how to report a vulnerability privately (GitHub security advisories), and the honest scope notes on the `readonly`/`trusted` execution tiers. |
 | [REVIEW_RULES.example.md](../REVIEW_RULES.example.md) | The shipped starting point for a house-spec: blocker-class rules Artemis and Apollo check on every PR. Copy to `REVIEW_RULES.md` at your repo root and edit it to match your team's actual rules. |
 | [agents/artemis.md](../agents/artemis.md) | Gate agent — the hunter. Reviews the diff itself for correctness risks, untested failure paths, shortcuts, and house-rule violations. |
 | [agents/apollo.md](../agents/apollo.md) | Gate agent — the verifier. Audits the claim of completed work against git reality. |

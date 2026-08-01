@@ -342,6 +342,8 @@ Every commit was gated by the repo's own review method before landing: hunter an
 audits (Artemis, Apollo) plus a delivery-verify pass, run against this codebase the same way it
 runs against any other. Human-directed, spec-driven, self-gated.
 
+Contributing? See [CONTRIBUTING.md](CONTRIBUTING.md) (dev setup, review-loop contract) and [SECURITY.md](SECURITY.md) (report privately, don't open a public issue).
+
 ## License
 
 MIT — © 2026 Garrett Schumacher. See [LICENSE](LICENSE).
