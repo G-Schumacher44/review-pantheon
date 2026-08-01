@@ -224,11 +224,27 @@ else
   fail "action/review.yml is missing a 'Resolve read-only git wrapper' step"
 fi
 
+# Round-4 (issue #6, an artemis finding on this repo's own gate, PR #8): this step's read is
+# now routed through the symlink-safe pantheon_base_pinned_read (inlined here, same as
+# "Resolve gate scripts (base-pinned)" below it — see that step's own header comment for why
+# this file carries more than one inline copy) instead of a bare `git show` — a bare git show
+# on a symlinked, base-committed wrapper would silently authorize a link-target pathname string
+# as the executable gating every tool call for the rest of the run. Still base-pinned either
+# way (never the working tree); this check now looks for the call site, not literal git-show text.
 # shellcheck disable=SC2016
-if grep -q 'git show "\${BASE_SHA}:\.github/review-agents/pantheon-git-readonly\.sh"' <<<"$resolve_wrapper_step"; then
-  pass "action/review.yml resolves the wrapper via 'git show \$BASE_SHA:path' (base-pinned)"
+if grep -qF 'pantheon_base_pinned_read "$BASE_SHA" ".github/review-agents/pantheon-git-readonly.sh" "$WRAPPER_DEST"' <<<"$resolve_wrapper_step"; then
+  pass "action/review.yml resolves the wrapper via pantheon_base_pinned_read (base-pinned, symlink-safe)"
 else
-  fail "action/review.yml's wrapper-resolution step no longer reads the wrapper via base-pinned git show — check for a regression back to a working-tree path"
+  fail "action/review.yml's wrapper-resolution step no longer reads the wrapper via pantheon_base_pinned_read — check for a regression back to a working-tree path or a bare, symlink-unsafe git show"
+fi
+
+# The inline pantheon_base_pinned_read/pantheon_normalize_repo_path functions must actually be
+# defined in THIS step (each GitHub Actions step is a fresh shell — a function defined in a
+# later step does not exist here), not merely called.
+if grep -q 'pantheon_base_pinned_read() {' <<<"$resolve_wrapper_step" && grep -q 'pantheon_normalize_repo_path() {' <<<"$resolve_wrapper_step"; then
+  pass "action/review.yml's wrapper-resolution step defines its own inline copy of pantheon_base_pinned_read/pantheon_normalize_repo_path"
+else
+  fail "action/review.yml's wrapper-resolution step calls pantheon_base_pinned_read without defining it in the same step (steps don't share shell state)"
 fi
 
 # shellcheck disable=SC2016
@@ -266,6 +282,102 @@ if [[ -n "$REVIEW_YML_VALIDATE_LINE" && -n "$REVIEW_YML_WRAPPER_LINE" && -n "$RE
 else
   fail "action/review.yml: step ordering regressed (validate=$REVIEW_YML_VALIDATE_LINE wrapper=$REVIEW_YML_WRAPPER_LINE docs-check=$REVIEW_YML_DOCSCHECK_LINE)"
 fi
+
+# ---------------------------------------------------------------------------
+# Part D-functional — issue #6, round 4: extract and actually EXECUTE the real
+# "Resolve read-only git wrapper (base-pinned)" step's run body (never hand-copied) against real
+# git fixture repos, proving its inline pantheon_base_pinned_read handles a symlinked wrapper
+# script correctly — the structural checks above only confirm the call site exists, not that it
+# behaves. Mirrors tests/test-prompt-assembly.sh's Part G (which does the same for the sibling
+# "Resolve gate scripts (base-pinned)" step).
+# ---------------------------------------------------------------------------
+wrapper_fixture_repo() {
+  local dir="$1"
+  git -C "$dir" init -q
+  git -C "$dir" config user.email "test@example.com"
+  git -C "$dir" config user.name "test"
+  git -C "$dir" add -A
+  git -C "$dir" commit -q -m "fixture commit"
+  git -C "$dir" rev-parse HEAD
+}
+
+# A fresh scratch dir of its own — $SCRATCH (defined above, in Part A) was already `rm -rf`'d
+# once its own job there was done; reusing it here would silently write into a deleted directory.
+WRAPPER_TEST_SCRATCH="$(mktemp -d)"
+WRAPPER_STEP_SH="$WRAPPER_TEST_SCRATCH/resolve-git-wrapper.sh"
+{
+  echo '#!/usr/bin/env bash'
+  awk '/run: \|/ { grab=1; next } grab { print }' <<<"$resolve_wrapper_step"
+} > "$WRAPPER_STEP_SH"
+
+if [[ -s "$WRAPPER_STEP_SH" ]] && grep -q 'pantheon_base_pinned_read() {' "$WRAPPER_STEP_SH"; then
+  pass "action/review.yml: extracted the real 'Resolve read-only git wrapper' step body"
+else
+  fail "action/review.yml: could not extract the 'Resolve read-only git wrapper' step body — its shape changed"
+fi
+
+# D-func 1 — a symlinked wrapper (real, legitimate pattern: a target repo symlinking its
+# vendored wrapper copy to a shared one) must resolve to the TARGET script's content, never a
+# bare git-show's raw link-target pathname (which would then get chmod+x'd and
+# --allowedTools-authorized as-is).
+FIXTURE_WRAP="$(mktemp -d)"
+mkdir -p "$FIXTURE_WRAP/.github/review-agents" "$FIXTURE_WRAP/shared"
+echo '#!/usr/bin/env bash' > "$FIXTURE_WRAP/shared/real-wrapper.sh"
+echo 'echo REAL-WRAPPER-CONTENT' >> "$FIXTURE_WRAP/shared/real-wrapper.sh"
+( cd "$FIXTURE_WRAP/.github/review-agents" && ln -s ../../shared/real-wrapper.sh pantheon-git-readonly.sh )
+FIXTURE_WRAP_SHA="$(wrapper_fixture_repo "$FIXTURE_WRAP")"
+
+WRAP1_RUNNER_TEMP="$(mktemp -d)"
+WRAP1_GITHUB_OUTPUT="$WRAPPER_TEST_SCRATCH/wrap1-github-output.txt"
+: > "$WRAP1_GITHUB_OUTPUT"
+if (cd "$FIXTURE_WRAP" && BASE_SHA="$FIXTURE_WRAP_SHA" RUNNER_TEMP="$WRAP1_RUNNER_TEMP" GITHUB_OUTPUT="$WRAP1_GITHUB_OUTPUT" bash "$WRAPPER_STEP_SH"); then
+  pass "action/review.yml: 'Resolve read-only git wrapper' resolves a symlinked wrapper (rc=0)"
+else
+  fail "action/review.yml: 'Resolve read-only git wrapper' failed to resolve a symlinked wrapper"
+fi
+if grep -q "REAL-WRAPPER-CONTENT" "$WRAP1_RUNNER_TEMP/pantheon-git-readonly.sh" 2>/dev/null; then
+  pass "action/review.yml: resolved wrapper carries the TARGET script's content, not a raw link-target pathname"
+else
+  fail "action/review.yml: resolved wrapper does not carry the target script's content (round-4 regression)"
+fi
+if grep -qF "shared/real-wrapper.sh" "$WRAP1_RUNNER_TEMP/pantheon-git-readonly.sh" 2>/dev/null; then
+  fail "action/review.yml: resolved wrapper still contains the raw link-target pathname string"
+else
+  pass "action/review.yml: resolved wrapper does NOT contain the raw link-target pathname string"
+fi
+if [[ -x "$WRAP1_RUNNER_TEMP/pantheon-git-readonly.sh" ]]; then
+  pass "action/review.yml: the resolved wrapper is chmod+x'd, same as the non-symlink case"
+else
+  fail "action/review.yml: the resolved wrapper was not made executable"
+fi
+if grep -qF "wrapper_path=$WRAP1_RUNNER_TEMP/pantheon-git-readonly.sh" "$WRAP1_GITHUB_OUTPUT" 2>/dev/null; then
+  pass "action/review.yml: 'Resolve read-only git wrapper' writes the wrapper_path output"
+else
+  fail "action/review.yml: 'Resolve read-only git wrapper' did not write the expected wrapper_path output"
+fi
+
+# D-func 2 — a wrapper symlink escaping the repository root must be REFUSED, never silently
+# treated as absent and never followed outside the repo.
+FIXTURE_WRAP2="$(mktemp -d)"
+mkdir -p "$FIXTURE_WRAP2/.github/review-agents"
+( cd "$FIXTURE_WRAP2/.github/review-agents" && ln -s ../../../../../../etc/passwd pantheon-git-readonly.sh )
+FIXTURE_WRAP2_SHA="$(wrapper_fixture_repo "$FIXTURE_WRAP2")"
+
+WRAP2_RUNNER_TEMP="$(mktemp -d)"
+WRAP2_GITHUB_OUTPUT="$WRAPPER_TEST_SCRATCH/wrap2-github-output.txt"
+: > "$WRAP2_GITHUB_OUTPUT"
+if (cd "$FIXTURE_WRAP2" && BASE_SHA="$FIXTURE_WRAP2_SHA" RUNNER_TEMP="$WRAP2_RUNNER_TEMP" GITHUB_OUTPUT="$WRAP2_GITHUB_OUTPUT" bash "$WRAPPER_STEP_SH" 2>/dev/null); then
+  fail "action/review.yml: 'Resolve read-only git wrapper' should refuse a wrapper symlink escaping the repo root, but it succeeded"
+else
+  pass "action/review.yml: 'Resolve read-only git wrapper' refuses a wrapper symlink escaping the repo root"
+fi
+if [[ ! -s "$WRAP2_RUNNER_TEMP/pantheon-git-readonly.sh" ]]; then
+  pass "action/review.yml: no content was written for the refused escaping wrapper symlink"
+else
+  fail "action/review.yml: content was written despite the escaping wrapper symlink being refused"
+fi
+
+rm -rf "$FIXTURE_WRAP" "$FIXTURE_WRAP2" "$WRAP1_RUNNER_TEMP" "$WRAP2_RUNNER_TEMP" "$WRAPPER_TEST_SCRATCH"
 
 # ---------------------------------------------------------------------------
 # Part E — --permission-mode dontAsk on every provider invocation. A real Apollo finding on this

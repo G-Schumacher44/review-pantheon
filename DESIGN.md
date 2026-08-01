@@ -284,6 +284,92 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
   applied" note for the always-on house-rules file, the same pre-existing silent skip as when
   it's absent entirely for the only-if-exists spec file. `action/review.yml` (the vendored,
   install.sh-Way-A workflow) is not part of this fix — see "Lane differences" below.
+- **The class this is one instance of (issue #6 — closed one round after two Codex P1s made it
+  bite twice more).** Base-SHA-pinning REVIEW_RULES.md/DESIGN.md was the first fix under this
+  rule, but the rule itself is broader than rules/spec content: **any file that shapes what the
+  gate *does* — not just what it judges by — must be read from trusted provenance before it is
+  used.** "Trusted provenance" is one of exactly two things, never a third: the PR's **base ref**
+  (`git show $BASE_SHA:<path>`) for a file that lives in the target repo, or **the action's own
+  checkout** (`$ACTION_PATH`/`github.action_path`, the copy GitHub Actions resolved from the
+  pinned `uses:` ref) for a file that ships with review-pantheon itself. A PR — especially a
+  fork PR — that can get a gate-behavior file read from its own head content can steer or defeat
+  the gate reviewing it: not by convincing an honest reviewer of something false (that's what
+  the "Untrusted data, not instructions" framing in `agents/*.md` is for), but by rewriting the
+  reviewer's own instructions or the code that grades its verdict. This closed twice already —
+  the read-only git wrapper (`pantheon-git-readonly.sh`, base-pinned into the vendored workflow)
+  and `gate.conf`'s `execution=` key (base-pinned in the CLI lane) — before two more instances of
+  the identical gap surfaced as Codex P1 findings on the SAME PR that added those two fixes,
+  because the fix was applied per-instance instead of as a swept, complete pass: `action/
+  review.yml` still ran `.github/review-agents/decide_verdict.py` and read
+  `.github/review-agents/${AGENT_NAME}.md` straight out of `$GITHUB_WORKSPACE` — the PR's own
+  checkout. A fork PR could replace `decide_verdict.py` to run arbitrary Python and print
+  whatever verdict-shaped JSON it wanted, or rewrite its own persona file to soften the hunt list
+  or force a `SHIP`/`ACCEPT` verdict — the gate would have reviewed the fork PR with reviewers
+  and a grader the fork PR itself controlled. Both are now base-pinned into `$RUNNER_TEMP` the
+  same way the wrapper is (`action/review.yml`'s "Resolve gate scripts (base-pinned)" step),
+  with the same fail-loud-not-silent behavior on a bootstrap PR where the files don't exist at
+  base yet (see that step's own comment). The published action's `personas_path` override —
+  when set, previously resolved from `$GITHUB_WORKSPACE/$PERSONAS_PATH` instead of
+  `$ACTION_PATH/agents` — closed the same way: base-pinned into `$RUNNER_TEMP` when set (see
+  `action.yml`'s "Resolve gate configuration" step), unchanged (still `$ACTION_PATH`, already
+  trusted) when unset.
+
+  **Read → provenance matrix, every lane, swept complete for this PR** (✅ = base-pinned or
+  action's-own-checkout, i.e. trusted provenance; ⚠️ = judgment content, not gate behavior, kept
+  as a documented exception; — = not applicable to that lane):
+
+  | File read | CLI (`cli/review-gate`) | Published action (`action.yml`) | Vendored workflow (`action/review.yml`) |
+  |---|---|---|---|
+  | Personas (`agents/*.md`) | ✅ `$PANTHEON_ROOT/agents` — review-pantheon's own installed copy, never the target repo's | ✅ `$ACTION_PATH/agents` by default; ✅ base-pinned into `$RUNNER_TEMP` when `personas_path` is set (this PR) | ✅ base-pinned into `$RUNNER_TEMP` (this PR — was `$GITHUB_WORKSPACE`) |
+  | Verdict decider (`cli/lib/verdict.sh` / `decide_verdict.py`) | ✅ `$PANTHEON_ROOT/cli/lib/verdict.sh` — this repo's own file | ✅ `$ACTION_PATH/action/decide_verdict.py` | ✅ base-pinned into `$RUNNER_TEMP` (this PR — was `$GITHUB_WORKSPACE`) |
+  | Read-only git wrapper | ✅ `$PANTHEON_ROOT/cli/lib/pantheon-git-readonly.sh` | ✅ `$ACTION_PATH/cli/lib/pantheon-git-readonly.sh` | ✅ base-pinned into `$RUNNER_TEMP` (prior fix) |
+  | House rules / spec (`REVIEW_RULES.md` / `DESIGN.md`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ⚠️ read from `$GITHUB_WORKSPACE` — documented exception, see "Lane differences" |
+  | `gate.conf`'s `execution=` key | ✅ base-pinned | — (no `gate.conf`; `execution` is an explicit input, operator-typed, not PR content) | — (no config surface at all) |
+  | `gate.conf`'s other keys (provider/model/base_branch/rules_file/spec_file/agents) | ⚠️ working-tree-sourced — lower-stakes, doesn't control tool-execution breadth or which files get read | — | — |
+  | `.review-gate-state.json` (follow-up-mode `reviewed_sha`) | ⚠️ working-tree-sourced (see "Honest limit" below) | — | — |
+  | Prompt-builder shell (`cli/lib/execution.sh`, `action/lib/build_prompt.sh`, `action/lib/combine_verdicts.sh`) | ✅ this repo's own file | ✅ `$ACTION_PATH/...` | ✅ inline in the workflow file itself (this repo's own committed YAML, not the target repo's content) |
+  | The diff / file contents under review | untrusted **by design** — this is the data the gate exists to evaluate; never treated as instructions (`agents/*.md`'s "Untrusted data, not instructions") | same | same |
+
+  **Round 2 — a real gap in "base-pinned," self-caught (Codex P2 on this class's own PR #8).**
+  Base-pinning a read as `git show $BASE_SHA:path` is correct for a regular file, but git stores
+  a tracked **symlink** as a mode-120000 blob whose "content" IS the link target string — `git
+  show` on a symlinked path therefore returned a pathname, not the referenced file's content, for
+  every ✅ row above that touches personas, the decider, or rules/spec. A target repo using a
+  symlinked custom persona (a real pattern: `.github/custom-personas/artemis.md ->
+  ../../agents/artemis.md`) got a broken prompt where the pre-base-pinning checkout-based read
+  had worked. `cli/lib/pantheon-base-pin.sh`'s `pantheon_base_pinned_read` closes this: it
+  detects the mode-120000 case via `git ls-tree`, resolves the target relative to the symlink's
+  own directory, normalizes the result using pure string manipulation (no filesystem access — a
+  git-tree-relative path isn't something `realpath` can resolve), refuses (loud, `git show`'d
+  path never falls back to the working tree) any resolution that escapes the repository root or
+  has an absolute target, bounds the chain depth at 32 hops (the same convention
+  `cli/review-gate`'s `resolve_real_dir` and `bootstrap.sh` already use for symlink-following
+  elsewhere), and only then `git show`'s the resolved in-repo path at BASE. Every base-pinned
+  read this section's matrix marks ✅ now routes through this function — `cli/review-gate`
+  (sourced), `action.yml` (sourced from `$ACTION_PATH/cli/lib/`), and `action/review.yml` (a
+  hand-synced inline copy of the same two functions — this lane can't `source` anything, the
+  same reason it already hand-syncs its prompt-build logic). Its two failure modes are
+  distinguished by return code on purpose — 2 is ordinary absence (unchanged: an only-if-exists
+  file like `DESIGN.md` silently falls back to "not applied"), 1 is REFUSED (an escaping or
+  over-deep chain) and is never folded into that same silent path — a caller that conflated the
+  two would turn a hostile symlink into a quiet no-op instead of a loud failure. Fixtures:
+  `tests/test-base-pinned-read.sh` (unit-level, including a fixture-sanity check that
+  reproduces the raw-pathname bug with a bare `git show` before asserting the fix), plus
+  symlink-aware cases added to the existing `action/review.yml`/`action.yml` integration
+  fixtures in `tests/test-prompt-assembly.sh`.
+
+  **Honest limit on the sweep.** `.review-gate-state.json` (git-ignored, CLI-lane-only — see
+  "Follow-up mode" below) is read from the target repo's working tree to decide the incremental
+  diff range for a follow-up review. In the specific scenario where a maintainer runs `gh pr
+  checkout <n>` before invoking `review-gate` (the same local-review habit that motivated
+  base-pinning `gate.conf`'s `execution=` key), a PR that force-adds a crafted
+  `.review-gate-state.json` despite the `.gitignore` entry could in principle narrow the diff
+  range Artemis is shown. Left open rather than base-pinned here: it requires a visibly unusual
+  act (committing a normally-ignored dotfile) that a reviewing agent — or a human skimming the
+  file list — is likely to flag on its own, it only affects the CLI lane's human-operated
+  incremental mode (not the fail-closed-by-default CI gate), and base-pinning it would need to
+  special-case follow-up mode's whole "what changed since I last looked" premise. Tracked as a
+  known, accepted gap rather than silently unswept.
 - The GitHub Action checks out with `persist-credentials: false` and fails loud (not skip)
   when its token secret is absent. It pins `anthropics/claude-code-action` to a full commit
   SHA — `be7b93b1907a4abad570368f3c74b6fe3807510b` (v1.0.183) — read directly from that
@@ -592,7 +678,8 @@ identical tools. Differences are intentional, not oversights:
 | Configuration | `gate.conf` (provider, model, base branch, rules file, agent list, execution tier). | None — twin panel (artemis, apollo), `REVIEW_RULES.md`, and the read-only execution tier are hardcoded in the workflow. |
 | Provider choice | Pluggable lane (`--provider`, `cli/providers/*.sh`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
-| Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Still reads `REVIEW_RULES.md`/`DESIGN.md` straight from the checked-out working tree (this lane's inline "Build prompt" step is a third, hand-synced copy of the prompt-build logic — see "Layout" below — and wasn't brought forward in this fix). The published `action.yml` lane (a **different** file from this table's `action/review.yml` column) got the same base-pinning as the CLI. |
+| Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Still reads `REVIEW_RULES.md`/`DESIGN.md` straight from the checked-out working tree (this lane's inline "Build prompt" step is a third, hand-synced copy of the prompt-build logic — see "Layout" below — and wasn't brought forward in this fix). The published `action.yml` lane (a **different** file from this table's `action/review.yml` column) got the same base-pinning as the CLI. This remains the one open item in issue #6's provenance sweep — judgment CONTENT, not gate behavior (see the class statement above), which is why it's tracked as a documented exception rather than left silently unswept. |
+| Persona / verdict-decider provenance | N/A — always `$PANTHEON_ROOT/agents` and `cli/lib/verdict.sh`, this repo's own installed copy; the target repo never supplies these on the CLI lane. | Base-pinned, same as the CLI's non-issue: `$ACTION_PATH/agents` and `$ACTION_PATH/action/decide_verdict.py` by default (this repo's own trusted checkout); base-pinned into `$RUNNER_TEMP` when `personas_path` opts into reading from the target repo instead. | Base-pinned into `$RUNNER_TEMP` via "Resolve gate scripts (base-pinned)" (issue #6 — closed in this PR; previously read straight from `$GITHUB_WORKSPACE`, the PR's own checkout, same class as the read-only git wrapper fix above). |
 
 ## Published action
 
@@ -670,6 +757,16 @@ cli/lib/pantheon-git-readonly.sh  the argv-validating read-only git wrapper the 
                            vendored by bootstrap.sh (CLI lane) and install.sh
                            (.github/review-agents/, for action/review.yml); read in place by
                            action.yml from its own checkout (see "Security posture" above)
+cli/lib/pantheon-base-pin.sh  symlink-safe base-pinned reads (issue #6's class, round-2:
+                           a bare `git show $BASE_SHA:path` on a symlinked path returns the
+                           link-target STRING, not the target's content) — sourced by
+                           cli/review-gate and by action.yml's "Resolve gate configuration"
+                           step; vendored by bootstrap.sh (CLI lane) into the bootstrap prefix
+                           alongside cli/lib/execution.sh and cli/lib/pantheon-git-readonly.sh
+                           (unlike that wrapper, install.sh does NOT separately vendor this file
+                           — action/review.yml carries its own hand-synced inline copy instead (a
+                           target repo never gets cli/lib/ — same reason as the prompt-build
+                           logic it already hand-syncs, see "Lane differences" below))
 cli/providers/             provider lanes (claude, codex, gemini, cursor)
 action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
                            artifact-based result passing, fail-closed decision step

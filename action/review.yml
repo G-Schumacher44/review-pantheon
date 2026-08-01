@@ -6,6 +6,14 @@
 # too, so this isn't automatic — see the job `if:` below) to match the CLI lane's draft
 # behavior: no review run, nothing posted.
 #
+# PROVENANCE (issue #6 — see DESIGN.md's "Security posture" for the full class statement and
+# read->provenance matrix): every file below that shapes what the gate DOES, not just its
+# judgment content, is resolved from the PR's BASE commit via `git show` into $RUNNER_TEMP, not
+# read from $GITHUB_WORKSPACE (the PR's own checkout) — the read-only git wrapper, the
+# persona (.md) the agent runs as, and the verdict decider (decide_verdict.py) it's graded by.
+# Only REVIEW_RULES.md/DESIGN.md (judgment CONTENT, not gate behavior) remain a documented
+# exception on this one lane — see DESIGN.md's "Lane differences".
+#
 # PIN NOTE: `anthropics/claude-code-action` is pinned below to v1.0.183's full commit SHA
 # (be7b93b1907a4abad570368f3c74b6fe3807510b — https://github.com/anthropics/claude-code-action/
 # releases/tag/v1.0.183), verified by reading that release's actual action.yml, not assumed:
@@ -105,19 +113,308 @@ jobs:
       # review, or temporarily unset the `REVIEW_GATE_ENABLED` repo variable for this one PR),
       # then every PR after it — including ones editing this workflow again — is gated normally
       # once the wrapper exists at base.
+      # Round-4 fix (a fresh artemis finding on this repo's own gate, PR #8): this step's own
+      # base-pinned read of the wrapper was STILL a bare `git show "${BASE_SHA}:path"` — the
+      # exact class this whole PR exists to close, on the one file that gates command execution
+      # itself, not just prompt content (a symlinked, base-committed
+      # `.github/review-agents/pantheon-git-readonly.sh` would previously have made $WRAPPER_DEST
+      # hold a link-target pathname string instead of the wrapper script, then get chmod+x'd and
+      # --allowedTools-authorized anyway). Routed through pantheon_base_pinned_read below, the
+      # same symlink-safe helper `cli/lib/pantheon-base-pin.sh` implements — inlined here (a
+      # second copy within THIS file, not just one) because GitHub Actions gives every step's
+      # `run:` block its own fresh shell; a function defined in one step's script does not exist
+      # in the next step's. Both inline copies in this file (this step's and "Resolve gate
+      # scripts (base-pinned)" below) must be kept byte-identical by hand, same as either one
+      # against the external library.
       - name: Resolve read-only git wrapper (base-pinned)
         id: resolve-git-wrapper
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+
+          # ---- BEGIN inlined copy of cli/lib/pantheon-base-pin.sh — keep in sync by hand ----
+          pantheon_normalize_repo_path() {
+            local input="$1"
+            case "$input" in
+              /*) return 1 ;;
+              "") return 1 ;;
+            esac
+            local -a out=()
+            local remaining="$input" part
+            while [[ -n "$remaining" ]]; do
+              part="${remaining%%/*}"
+              if [[ "$remaining" == */* ]]; then
+                remaining="${remaining#*/}"
+              else
+                remaining=""
+              fi
+              case "$part" in
+                "" | ".") continue ;;
+                "..")
+                  local n=${#out[@]}
+                  [[ "$n" -gt 0 ]] || return 1
+                  out=("${out[@]:0:$((n - 1))}")
+                  ;;
+                *) out+=("$part") ;;
+              esac
+            done
+            [[ ${#out[@]} -gt 0 ]] || return 1
+            local joined="${out[0]}" i
+            for ((i = 1; i < ${#out[@]}; i++)); do
+              joined="$joined/${out[$i]}"
+            done
+            printf '%s' "$joined"
+          }
+
+          pantheon_base_pinned_read() {
+            local base_sha="$1" path="$2" dest="$3" repo_dir="${4:-.}"
+            local cur="$path" hops=0
+            while :; do
+              hops=$((hops + 1))
+              if (( hops > 32 )); then
+                echo "::error::pantheon: symlink chain resolving '$path' at base ${base_sha} exceeds 32 hops (cycle, or a deliberately pathological chain) — refusing to follow it." >&2
+                return 1
+              fi
+              local prefix="" remaining="$cur" comp mode found_symlink=false
+              while [[ -n "$remaining" ]]; do
+                comp="${remaining%%/*}"
+                if [[ "$remaining" == */* ]]; then
+                  remaining="${remaining#*/}"
+                else
+                  remaining=""
+                fi
+                if [[ -z "$prefix" ]]; then
+                  prefix="$comp"
+                else
+                  prefix="$prefix/$comp"
+                fi
+                mode="$(git -C "$repo_dir" ls-tree "$base_sha" -- "$prefix" 2>/dev/null | awk '{print $1}')"
+                [[ -n "$mode" ]] || return 2
+                if [[ "$mode" == "120000" ]]; then
+                  found_symlink=true
+                  break
+                fi
+              done
+              if [[ "$found_symlink" != "true" ]]; then
+                case "$mode" in
+                  100644 | 100755)
+                    if git -C "$repo_dir" show "${base_sha}:${cur}" > "$dest" 2>/dev/null; then
+                      return 0
+                    else
+                      return 2
+                    fi
+                    ;;
+                  *) return 2 ;;
+                esac
+              fi
+              local target
+              target="$(git -C "$repo_dir" show "${base_sha}:${prefix}" 2>/dev/null)" || return 2
+              if [[ "$target" == /* ]]; then
+                echo "::error::pantheon: symlink '$prefix' at base ${base_sha} has an absolute target '$target' — refusing (only relative, in-repo-resolving symlinks are followed; base-pinning never reads outside the repository)." >&2
+                return 1
+              fi
+              local prefix_dir combined
+              prefix_dir="${prefix%/*}"
+              [[ "$prefix_dir" == "$prefix" ]] && prefix_dir="."
+              if [[ "$prefix_dir" == "." ]]; then
+                combined="$target"
+              else
+                combined="$prefix_dir/$target"
+              fi
+              local normalized
+              if ! normalized="$(pantheon_normalize_repo_path "$combined")"; then
+                echo "::error::pantheon: symlink '$prefix' at base ${base_sha} resolves to '$combined', which escapes the repository root — refusing to follow it (never falls back to reading it from the working tree)." >&2
+                return 1
+              fi
+              if [[ -n "$remaining" ]]; then
+                cur="$normalized/$remaining"
+              else
+                cur="$normalized"
+              fi
+            done
+          }
+          # ---- END inlined copy of cli/lib/pantheon-base-pin.sh ----
+
           WRAPPER_DEST="$RUNNER_TEMP/pantheon-git-readonly.sh"
-          if ! git show "${BASE_SHA}:.github/review-agents/pantheon-git-readonly.sh" > "$WRAPPER_DEST" 2>/dev/null; then
+          wrapper_rc=0
+          pantheon_base_pinned_read "$BASE_SHA" ".github/review-agents/pantheon-git-readonly.sh" "$WRAPPER_DEST" || wrapper_rc=$?
+          if [ "$wrapper_rc" -eq 1 ]; then
+            echo "::error::refused to resolve .github/review-agents/pantheon-git-readonly.sh at base commit ${BASE_SHA} — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
+            exit 1
+          elif [ "$wrapper_rc" -eq 2 ]; then
             echo "::error::missing .github/review-agents/pantheon-git-readonly.sh at base commit ${BASE_SHA}. Two possible causes: (1) install.sh hasn't been run in this repo yet — run it, commit the result, and re-push; or (2) this IS the PR that first runs install.sh and adds this workflow — the wrapper exists at this PR's head but not yet at base, and base-pinning correctly refuses to read a PR-introduced file from PR content rather than falling back unsafely. For (2): merge this bootstrap PR via another path (manual review, or temporarily unset the REVIEW_GATE_ENABLED repo variable for just this PR) — every PR after it will be gated normally, since the wrapper will then exist at base."
             exit 1
           fi
           chmod +x "$WRAPPER_DEST"
           echo "wrapper_path=$WRAPPER_DEST" >> "$GITHUB_OUTPUT"
+
+      # Issue #6's class-close: the same base-pinning gap the wrapper-resolution step above
+      # closes existed for two more files this workflow reads out of the PR's own checkout — a
+      # fork PR reviewing itself with its own reviewers:
+      #   - Codex P1 (action/review.yml:190 on PR #5): "Decide verdict" ran
+      #     $GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py, the PR's own head copy —
+      #     a fork PR could replace it to run arbitrary Python and emit a fake green verdict
+      #     regardless of what the reviewer actually found.
+      #   - Codex P1 (agents/artemis.md:33 on PR #5): "Build prompt" read
+      #     $GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md, the PR's own head copy —
+      #     a fork PR could rewrite its own reviewing agent's instructions (soften the hunt list,
+      #     tell it to always SHIP, etc.).
+      # Fixed the identical way as the wrapper above: resolve both from the PR's BASE commit via
+      # `git show`, into $RUNNER_TEMP (never the checked-out working tree), and every downstream
+      # step reads the resolved path, not a $GITHUB_WORKSPACE one. Same bootstrap-PR fail-loud
+      # caveat as the wrapper-resolution step above (see its own comment for the full rationale
+      # — falling back to head content "just this once" would reopen exactly what base-pinning
+      # exists to close).
+      #
+      # Round-2 fix (issue #6, a Codex P2 finding on this repo's own PR #8): a bare `git show
+      # $BASE_SHA:path` on a SYMLINKED path (git stores a tracked symlink as a mode-120000 blob)
+      # returns the link TARGET STRING, not the target file's content — a target repo whose
+      # `.github/review-agents/` uses a symlinked persona (a legitimate pattern) would get a
+      # pathname instead of persona Markdown, breaking what a plain checkout-based read
+      # previously handled correctly. pantheon_base_pinned_read below is this workflow's own
+      # inlined copy of cli/lib/pantheon-base-pin.sh's function (same logic, same return-code
+      # contract — see that file's header comment for the full rationale) — this lane can't
+      # `source` it: a target repo never gets a copy of cli/lib/ (see DESIGN.md's "Published
+      # action"/"Lane differences"), the same reason this workflow already hand-syncs its
+      # prompt-build/comment-post logic instead of sourcing action/lib/*.sh.
+      - name: Resolve gate scripts (base-pinned)
+        id: resolve-gate-scripts
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          AGENT_NAME: ${{ matrix.agent }}
+        run: |
+          set -euo pipefail
+
+          # ---- BEGIN inlined copy of cli/lib/pantheon-base-pin.sh — keep in sync by hand ----
+          pantheon_normalize_repo_path() {
+            local input="$1"
+            case "$input" in
+              /*) return 1 ;;
+              "") return 1 ;;
+            esac
+            local -a out=()
+            local remaining="$input" part
+            while [[ -n "$remaining" ]]; do
+              part="${remaining%%/*}"
+              if [[ "$remaining" == */* ]]; then
+                remaining="${remaining#*/}"
+              else
+                remaining=""
+              fi
+              case "$part" in
+                "" | ".") continue ;;
+                "..")
+                  local n=${#out[@]}
+                  [[ "$n" -gt 0 ]] || return 1
+                  out=("${out[@]:0:$((n - 1))}")
+                  ;;
+                *) out+=("$part") ;;
+              esac
+            done
+            [[ ${#out[@]} -gt 0 ]] || return 1
+            local joined="${out[0]}" i
+            for ((i = 1; i < ${#out[@]}; i++)); do
+              joined="$joined/${out[$i]}"
+            done
+            printf '%s' "$joined"
+          }
+
+          pantheon_base_pinned_read() {
+            local base_sha="$1" path="$2" dest="$3" repo_dir="${4:-.}"
+            local cur="$path" hops=0
+            while :; do
+              hops=$((hops + 1))
+              if (( hops > 32 )); then
+                echo "::error::pantheon: symlink chain resolving '$path' at base ${base_sha} exceeds 32 hops (cycle, or a deliberately pathological chain) — refusing to follow it." >&2
+                return 1
+              fi
+              local prefix="" remaining="$cur" comp mode found_symlink=false
+              while [[ -n "$remaining" ]]; do
+                comp="${remaining%%/*}"
+                if [[ "$remaining" == */* ]]; then
+                  remaining="${remaining#*/}"
+                else
+                  remaining=""
+                fi
+                if [[ -z "$prefix" ]]; then
+                  prefix="$comp"
+                else
+                  prefix="$prefix/$comp"
+                fi
+                mode="$(git -C "$repo_dir" ls-tree "$base_sha" -- "$prefix" 2>/dev/null | awk '{print $1}')"
+                [[ -n "$mode" ]] || return 2
+                if [[ "$mode" == "120000" ]]; then
+                  found_symlink=true
+                  break
+                fi
+              done
+              if [[ "$found_symlink" != "true" ]]; then
+                case "$mode" in
+                  100644 | 100755)
+                    if git -C "$repo_dir" show "${base_sha}:${cur}" > "$dest" 2>/dev/null; then
+                      return 0
+                    else
+                      return 2
+                    fi
+                    ;;
+                  *) return 2 ;;
+                esac
+              fi
+              local target
+              target="$(git -C "$repo_dir" show "${base_sha}:${prefix}" 2>/dev/null)" || return 2
+              if [[ "$target" == /* ]]; then
+                echo "::error::pantheon: symlink '$prefix' at base ${base_sha} has an absolute target '$target' — refusing (only relative, in-repo-resolving symlinks are followed; base-pinning never reads outside the repository)." >&2
+                return 1
+              fi
+              local prefix_dir combined
+              prefix_dir="${prefix%/*}"
+              [[ "$prefix_dir" == "$prefix" ]] && prefix_dir="."
+              if [[ "$prefix_dir" == "." ]]; then
+                combined="$target"
+              else
+                combined="$prefix_dir/$target"
+              fi
+              local normalized
+              if ! normalized="$(pantheon_normalize_repo_path "$combined")"; then
+                echo "::error::pantheon: symlink '$prefix' at base ${base_sha} resolves to '$combined', which escapes the repository root — refusing to follow it (never falls back to reading it from the working tree)." >&2
+                return 1
+              fi
+              if [[ -n "$remaining" ]]; then
+                cur="$normalized/$remaining"
+              else
+                cur="$normalized"
+              fi
+            done
+          }
+          # ---- END inlined copy of cli/lib/pantheon-base-pin.sh (round 3 — component-walk
+          # symlink resolution, not just leaf-symlink; see the library file's own header for
+          # why a single ls-tree on the whole path silently misses a symlinked intermediate
+          # directory component) ----
+
+          PERSONA_DEST="$RUNNER_TEMP/${AGENT_NAME}.md"
+          persona_rc=0
+          pantheon_base_pinned_read "$BASE_SHA" ".github/review-agents/${AGENT_NAME}.md" "$PERSONA_DEST" || persona_rc=$?
+          if [ "$persona_rc" -eq 1 ]; then
+            echo "::error::refused to resolve .github/review-agents/${AGENT_NAME}.md at base commit ${BASE_SHA} — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
+            exit 1
+          elif [ "$persona_rc" -eq 2 ]; then
+            echo "::error::missing .github/review-agents/${AGENT_NAME}.md at base commit ${BASE_SHA}. Two possible causes: (1) install.sh hasn't been run in this repo yet — run it, commit the result, and re-push; or (2) this IS the PR that first runs install.sh and adds this workflow — the persona exists at this PR's head but not yet at base, and base-pinning correctly refuses to read a PR-introduced file from PR content rather than falling back unsafely. For (2): merge this bootstrap PR via another path (manual review, or temporarily unset the REVIEW_GATE_ENABLED repo variable for just this PR) — every PR after it will be gated normally, since the persona will then exist at base."
+            exit 1
+          fi
+          echo "persona_path=$PERSONA_DEST" >> "$GITHUB_OUTPUT"
+
+          DECIDER_DEST="$RUNNER_TEMP/decide_verdict.py"
+          decider_rc=0
+          pantheon_base_pinned_read "$BASE_SHA" ".github/review-agents/decide_verdict.py" "$DECIDER_DEST" || decider_rc=$?
+          if [ "$decider_rc" -eq 1 ]; then
+            echo "::error::refused to resolve .github/review-agents/decide_verdict.py at base commit ${BASE_SHA} — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
+            exit 1
+          elif [ "$decider_rc" -eq 2 ]; then
+            echo "::error::missing .github/review-agents/decide_verdict.py at base commit ${BASE_SHA}. Same two possible causes as the persona check above (install.sh not yet run, or this is the bootstrap PR that first adds it) — see that error for the fix."
+            exit 1
+          fi
+          echo "decider_path=$DECIDER_DEST" >> "$GITHUB_OUTPUT"
 
       - name: Detect docs-only diff
         id: docs-check
@@ -161,11 +458,15 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           REPO_NAME: ${{ github.repository }}
           GIT_WRAPPER_PATH: ${{ steps.resolve-git-wrapper.outputs.wrapper_path }}
+          PERSONA_PATH: ${{ steps.resolve-gate-scripts.outputs.persona_path }}
         run: |
           set -euo pipefail
-          PERSONA="$GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md"
-          if [ ! -f "$PERSONA" ]; then
-            echo "::error::missing $PERSONA — run install.sh (review-pantheon) in this repo first."
+          # Base-pinned (see "Resolve gate scripts (base-pinned)" above) — never
+          # $GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md, the PR's own checked-out
+          # copy (issue #6's class-close).
+          PERSONA="$PERSONA_PATH"
+          if [ -z "$PERSONA" ] || [ ! -f "$PERSONA" ]; then
+            echo "::error::missing base-pinned persona for $AGENT_NAME — the 'Resolve gate scripts (base-pinned)' step didn't produce one; see its own error output above."
             exit 1
           fi
           PROMPT_FILE="$RUNNER_TEMP/${AGENT_NAME}-prompt.md"
@@ -280,11 +581,16 @@ jobs:
         if: always() && (matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true')
         env:
           AGENT_NAME: ${{ matrix.agent }}
+          DECIDER_PATH: ${{ steps.resolve-gate-scripts.outputs.decider_path }}
         run: |
           set -euo pipefail
-          SCRIPT="$GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py"
-          if [ ! -f "$SCRIPT" ]; then
-            echo "::error::missing $SCRIPT — run install.sh (review-pantheon) in this repo first."
+          # Base-pinned (see "Resolve gate scripts (base-pinned)" above) — never
+          # $GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py, the PR's own checked-out
+          # copy (issue #6's class-close: a fork PR could otherwise replace this script to run
+          # arbitrary Python and emit a fake green verdict).
+          SCRIPT="$DECIDER_PATH"
+          if [ -z "$SCRIPT" ] || [ ! -f "$SCRIPT" ]; then
+            echo "::error::missing base-pinned decide_verdict.py — the 'Resolve gate scripts (base-pinned)' step didn't produce one; see its own error output above."
             exit 1
           fi
           python3 "$SCRIPT" "$AGENT_NAME" "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"

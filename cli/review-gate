@@ -53,6 +53,8 @@ source "$PANTHEON_ROOT/cli/lib/verdict.sh"
 source "$PANTHEON_ROOT/cli/lib/render_comment.sh"
 # shellcheck disable=SC1091
 source "$PANTHEON_ROOT/cli/lib/execution.sh"
+# shellcheck disable=SC1091
+source "$PANTHEON_ROOT/cli/lib/pantheon-base-pin.sh"
 
 AGENT_TIMEOUT_SECS="${REVIEW_GATE_TIMEOUT:-600}"
 
@@ -420,15 +422,39 @@ build_prompt() {
   # prompt; house rules fall back to a loud "not applied" note when absent at base, and the
   # spec file keeps its pre-existing silent-skip-when-absent behavior (only-if-exists, same as
   # when it's explicitly disabled via `spec_file=` in gate.conf).
-  local rules_content="" rules_present=false
-  if [[ -n "$CFG_RULES_FILE" ]] && rules_content="$(git -C "$REPO_ROOT" show "${BASE_SHA}:${CFG_RULES_FILE}" 2>/dev/null)"; then
-    rules_present=true
+  #
+  # Routed through pantheon_base_pinned_read (cli/lib/pantheon-base-pin.sh), not a bare
+  # `git show`, so a symlinked rules/spec file resolves to its TARGET's content instead of the
+  # raw link-target pathname a bare `git show` would return on a mode-120000 blob (issue #6's
+  # class, round-2 Codex P2 finding on this repo's own PR #8). Its return codes are distinct on
+  # purpose: 2 is ordinary absence (the existing only-if-exists/not-applied behavior below,
+  # unchanged); 1 is a REFUSED resolution (an escaping or pathologically deep symlink chain) and
+  # must never be treated as mere absence — it fails the whole run loud, the same fail-closed
+  # posture every other refusal in this class already has.
+  local rules_content="" rules_present=false rules_rc=0
+  if [[ -n "$CFG_RULES_FILE" ]]; then
+    local rules_tmp="$WORKDIR/rules-content.txt"
+    pantheon_base_pinned_read "$BASE_SHA" "$CFG_RULES_FILE" "$rules_tmp" "$REPO_ROOT" || rules_rc=$?
+    if [[ "$rules_rc" -eq 0 ]]; then
+      rules_content="$(cat "$rules_tmp")"
+      rules_present=true
+    elif [[ "$rules_rc" -eq 1 ]]; then
+      die "refused to resolve $CFG_RULES_FILE at base $BASE_SHA — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound) — UNVERIFIED, posting nothing"
+    fi
+    rm -f "$rules_tmp"
   fi
 
-  local spec_content="" spec_present=false
-  if [[ "$agent" == "apollo" && -n "$CFG_SPEC_FILE" ]] \
-       && spec_content="$(git -C "$REPO_ROOT" show "${BASE_SHA}:${CFG_SPEC_FILE}" 2>/dev/null)"; then
-    spec_present=true
+  local spec_content="" spec_present=false spec_rc=0
+  if [[ "$agent" == "apollo" && -n "$CFG_SPEC_FILE" ]]; then
+    local spec_tmp="$WORKDIR/spec-content.txt"
+    pantheon_base_pinned_read "$BASE_SHA" "$CFG_SPEC_FILE" "$spec_tmp" "$REPO_ROOT" || spec_rc=$?
+    if [[ "$spec_rc" -eq 0 ]]; then
+      spec_content="$(cat "$spec_tmp")"
+      spec_present=true
+    elif [[ "$spec_rc" -eq 1 ]]; then
+      die "refused to resolve $CFG_SPEC_FILE at base $BASE_SHA — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound) — UNVERIFIED, posting nothing"
+    fi
+    rm -f "$spec_tmp"
   fi
 
   {

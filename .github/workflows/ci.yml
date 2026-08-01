@@ -82,6 +82,9 @@ jobs:
       - name: Run verdict-decision fixture tests
         run: bash tests/test-verdict-decision.sh
 
+      - name: Run base-pinned-read fixture tests (symlink-safe resolution)
+        run: bash tests/test-base-pinned-read.sh
+
       - name: Run combined-comment renderer fixture tests
         run: bash tests/test-render-comment.sh
 

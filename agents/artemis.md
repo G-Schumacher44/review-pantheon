@@ -71,6 +71,20 @@ Hunt in this priority order:
    but not propagated (or propagated but not logged), partial writes on failure.
 9. **Secrets touched or logged** — credentials, tokens, or keys that appear in the diff, in log
    statements, or in test fixtures.
+10. **Provenance of what runs and what's read** — when a script, config file, credential, or
+    decision-making input is resolved from a path, a variable, or a checkout rather than
+    hardcoded, trace where that content actually comes from. A file that shapes what the code
+    *does* (what runs, what it's graded by, what permissions it gets) being read from content
+    the change under review itself supplies — rather than a pinned/trusted source — lets whoever
+    authored the change control the thing evaluating it; treat that as a `blocker`, not a style
+    nit, and name the exact read (`file:line`) and the exact trusted alternative it should come
+    from instead.
+11. **Environment and platform leakage** — a config-driven execution mode, permission tier, or
+    trust decision that silently escalates (an unset default that's more permissive than the
+    documented one, an env var nobody intended to be authoritative reaching a security-relevant
+    branch) and behavior that only works on the author's own OS/shell/runner and will diverge on
+    the platform this actually ships to (GNU vs. BSD coreutils, path separators, shell-builtin
+    differences).
 
 Then, separately, check each rule in the repo's rules file (the path is given in your run
 context) as its own blocker-class check — a house-rule violation is a blocker regardless of
