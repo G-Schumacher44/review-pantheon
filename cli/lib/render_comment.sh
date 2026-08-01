@@ -76,18 +76,31 @@ _pantheon_severity_badge() {
 }
 
 # `.findings` is only checked for PRESENCE upstream (cli/lib/verdict.sh's decide_verdict,
-# decide_verdict.py's REQUIRED_KEYS), never for being an array — a malformed verdict (e.g. an
-# agent emitting `"findings": "none"` instead of `[]`) would otherwise still pass that
-# validation and reach this renderer. `if type == "array" then . else [] end` degrades any
-# non-array shape to empty rather than letting jq error out or, worse, `length` silently
-# return a wrong count (a string's character count, not zero) — fail-closed for the render
-# layer specifically: a malformed findings shape reads as "no findings", never a bogus count.
+# decide_verdict.py's REQUIRED_KEYS), never for being an array of objects — a malformed
+# verdict (e.g. an agent emitting `"findings": "none"` instead of `[]`, or an array with a
+# stray non-object element mixed in among real findings) would otherwise still pass that
+# validation and reach this renderer. `_pantheon_safe_findings_filter` degrades both cases —
+# a non-array `.findings` becomes `[]`; a non-object element inside an otherwise-valid array
+# is dropped, not left to blow up every downstream `.severity`/`.file`/`.issue` access with a
+# jq type error — rather than letting jq error out (silently swallowed by every call site's
+# command-substitution subshell, which would render an agent's real findings as an empty list
+# even on a red/blocked verdict) or, worse, `length` on a bare string silently returning a
+# wrong count. Fail-closed for the render layer specifically: a malformed findings shape (or a
+# malformed element within it) reads as "no findings" / fewer findings, never a crash or a
+# bogus count. Reused as a jq `def` (not a bash string constant) so every call site stays a
+# single source, not three hand-copied filter expressions that could drift.
+_pantheon_safe_findings_filter='
+  def safe_findings:
+    (.findings // [])
+    | if type == "array" then . else [] end
+    | map(select(type == "object"));
+'
 
 # One compact JSON object per line, findings sorted blocker -> should_fix -> note -> other.
 # Zero findings prints zero lines (a `while read` loop over this correctly no-ops).
 _pantheon_sorted_findings() {
-  jq -c '
-    ((.findings // []) | if type == "array" then . else [] end)
+  jq -c "$_pantheon_safe_findings_filter"'
+    safe_findings
     | map(. + {_rank: (if .severity == "blocker" then 0
                         elif .severity == "should_fix" then 1
                         elif .severity == "note" then 2
@@ -101,8 +114,8 @@ _pantheon_sorted_findings() {
 # or "" if there are none. Deliberately a single jq call (not sorted-findings | head -1) so an
 # empty findings array can't turn into a zero-line command substitution edge case.
 _pantheon_top_finding_text() {
-  jq -r '
-    ((.findings // []) | if type == "array" then . else [] end)
+  jq -r "$_pantheon_safe_findings_filter"'
+    safe_findings
     | map(. + {_rank: (if .severity == "blocker" then 0
                         elif .severity == "should_fix" then 1
                         elif .severity == "note" then 2
@@ -219,7 +232,7 @@ pantheon_render_comment() {
     findings_json="${!findings_var:-\{\}}"
     [ -n "$findings_json" ] || findings_json='{}'
 
-    fcount="$(jq -r '((.findings // []) | if type == "array" then . else [] end) | length' <<<"$findings_json" 2>/dev/null)"
+    fcount="$(jq -r "$_pantheon_safe_findings_filter"'safe_findings | length' <<<"$findings_json" 2>/dev/null)"
     [ -n "$fcount" ] || fcount=0
     total_findings=$((total_findings + fcount))
 

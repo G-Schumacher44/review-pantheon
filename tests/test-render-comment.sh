@@ -173,6 +173,26 @@ assert_contains "malformed-findings" "fold count degrades to 0, not the string's
 assert_not_contains "malformed-findings" "no bogus non-zero count leaks through" "$out" "Full findings (4)"
 
 # ---------------------------------------------------------------------------
+# Fixture: a findings ARRAY with one real object and one non-object stray element — regression
+# coverage for a deeper version of the same class this repo's own gate found on itself (PR #3,
+# artemis's second-round FIX_FIRST finding): the array-type guard above only checked
+# `.findings` itself, never that every ELEMENT is an object, so a stray non-object element
+# (e.g. a plain string mixed into an otherwise-valid array) crashed every downstream
+# .severity/.file/.issue access and silently emptied the itemized list — even for a real
+# blocker sitting right next to the malformed element. Must keep the real finding, drop only
+# the malformed element, never lose the blocker or crash.
+# ---------------------------------------------------------------------------
+reset_agent_env
+ARTEMIS_COLOR=red ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="blocker: real blocker"
+ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"SHIP","has_blocker":true,"findings":[{"severity":"blocker","file":"a.sh","line":1,"issue":"real blocker","scenario":"n/a"},"a stray malformed entry"],"summary":"one real blocker, one malformed element"}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+
+out="$(pantheon_render_comment "$HEAD_SHA" artemis)"
+assert_contains "malformed-element" "the real blocker still renders, badge and all" "$out" "**blocker** \`a.sh:1\` — real blocker"
+assert_contains "malformed-element" "fold count reflects only the valid object, not both array entries" "$out" "<summary>Full findings (1)</summary>"
+assert_contains "malformed-element" "table top-finding cell still surfaces the real blocker" "$out" "real blocker"
+
+# ---------------------------------------------------------------------------
 # Fixture: one agent skipped (docs-only apollo skip), loud row required
 # ---------------------------------------------------------------------------
 reset_agent_env
