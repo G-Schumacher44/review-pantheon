@@ -179,9 +179,15 @@ PR opened                                   spec / design doc / proposal
   verdict JSON is schema- and type-validated, and the blocker invariant forces red whenever any
   finding is a blocker, regardless of the stated verdict word. Tool execution defaults to a
   read-only tier (`execution=readonly`) that routes Bash through an argv-validating wrapper
-  script — not a bare command-prefix pattern, which can't distinguish a read-only git subcommand
-  from the same subcommand carrying a writing/execution-capable flag — so reviewing hostile fork
-  content never grants an agent arbitrary command execution. **Honest limit:** none of this
+  script, run under an explicit deny-by-default permission mode (`--permission-mode dontAsk`) —
+  not a bare command-prefix pattern (which can't distinguish a read-only git subcommand from the
+  same subcommand carrying a writing/execution-capable flag, or one activated by config/
+  attributes rather than a flag at all) and not an unset permission mode (which leaves an
+  unlisted tool call unanswerable, not denied, outside an interactive terminal) — so reviewing
+  hostile fork content never grants an agent arbitrary command execution. Claude Code itself
+  still always allows a small, built-in, non-configurable set of bare read-only commands
+  (including plain `git diff`/`show`/`log`/`status`) regardless of tier — expected, since those
+  are genuinely read-only; the wrapper's job is everything beyond that. **Honest limit:** none of this
   can eliminate a schema-valid, deceptive verdict from an agent that's been fully compromised by
   injected content — these layers make that harder to pull off and more visible when attempted
   (an injection attempt becomes its own flagged finding, not a silent verdict flip), and

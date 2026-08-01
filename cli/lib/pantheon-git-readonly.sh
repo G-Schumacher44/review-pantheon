@@ -39,7 +39,22 @@
 # (any git flag beyond a bare positional argument); it is defense in depth on top of, not a
 # replacement for, whatever chained-command protection the installed `claude` CLI itself
 # provides. See DESIGN.md's "Security posture" for this same honesty applied to the tier as a
-# whole.
+# whole. Also disclosed there: Claude Code itself treats a built-in set of Bash commands,
+# including "read-only forms of git", as always-approved in every permission mode — bare
+# `git diff`/`show`/`log`/`status` can run without ever reaching this wrapper at all. This
+# wrapper's job is everything BEYOND that built-in set: anything with a flag, and every other
+# subcommand.
+#
+# Round 2 (Codex P1, fresh evidence after the flag-refusal fix above): rejecting `--ext-diff` as
+# an explicit argument doesn't stop a CONFIGURED external diff driver from firing on a plain,
+# validation-passing `diff`/`show` — a `.gitattributes` entry (`*.foo diff=evil`) plus a
+# `diff.evil.command=...` config entry activates the driver without the model ever typing
+# `--ext-diff`, and unsetting `$GIT_EXTERNAL_DIFF` (already done below) doesn't touch
+# attributes/config-driven activation. Reproduced live by Codex against the pre-fix wrapper.
+# Fixed by forcing `--no-ext-diff --no-textconv` onto every `diff`/`show` invocation this
+# wrapper makes — not accepted from the model's argv (still rejected as a flag, same as any
+# other), injected by the wrapper itself, so no config or attributes state the target repo (or
+# environment) happens to carry can re-enable an external helper or content filter.
 set -euo pipefail
 
 die() {
@@ -69,11 +84,24 @@ done
 # or editor can itself be an arbitrary external program (via $PAGER/$EDITOR or git's own
 # core.pager/core.editor config), and external diff/merge substitution is exactly the
 # execution-capable behavior the flag refusal above is meant to close off; this is the same
-# closure applied to ambient environment instead of argv.
+# closure applied to ambient environment instead of argv. GIT_OPTIONAL_LOCKS=0 (a Codex P2
+# finding: `status` performs an optional index refresh that writes `.git/index`, contradicting
+# this tier's "never mutates the index" claim and able to race a concurrent repo operation on a
+# shared runner) disables every optional-lock operation git would otherwise perform, not status
+# alone.
 export GIT_PAGER=cat
 export PAGER=cat
 export GIT_EDITOR=true
 export GIT_SEQUENCE_EDITOR=true
+export GIT_OPTIONAL_LOCKS=0
 unset GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT 2>/dev/null || true
 
-exec git "$subcommand" "$@"
+# --no-ext-diff/--no-textconv are diff-machinery flags: valid on diff/show (which is where a
+# configured driver or textconv filter could otherwise fire), invalid on log/status (git itself
+# rejects them there — "error: unknown option"), so this is scoped to exactly the two
+# subcommands that can trigger diff output, appended after the subcommand and before whatever
+# plain refs/paths/ranges the model supplied.
+case "$subcommand" in
+  diff | show) exec git "$subcommand" --no-ext-diff --no-textconv "$@" ;;
+  *) exec git "$subcommand" "$@" ;;
+esac

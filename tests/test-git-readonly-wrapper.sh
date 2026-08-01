@@ -151,6 +151,87 @@ accept_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD -- file.txt (range + -- pathsp
 
 rm -rf "$SCRATCH_REPO"
 
+# ---------------------------------------------------------------------------
+# Configured external-diff-driver bypass (Codex P1, round 2 — fresh evidence after the flag-
+# refusal fix above). Rejecting `--ext-diff` as an explicit argument doesn't stop a CONFIGURED
+# driver from firing on a plain, validation-passing `diff`/`show`: a `.gitattributes` entry
+# assigning a custom driver plus a `diff.<name>.command` config entry activates an external
+# helper without the model ever typing `--ext-diff`. This fixture reproduces exactly that
+# (Codex's own repro shape) against a real helper script and asserts it never runs.
+# ---------------------------------------------------------------------------
+section "Configured external-diff-driver bypass (attributes + config, no --ext-diff flag)"
+
+DRIVER_REPO="$(mktemp -d)"
+git -C "$DRIVER_REPO" init -q
+git -C "$DRIVER_REPO" config user.email "test@example.com"
+git -C "$DRIVER_REPO" config user.name "test"
+echo "a" > "$DRIVER_REPO/file.foo"
+git -C "$DRIVER_REPO" add file.foo
+git -C "$DRIVER_REPO" commit -q -m "first"
+echo "b" > "$DRIVER_REPO/file.foo"
+git -C "$DRIVER_REPO" commit -q -am "second"
+
+echo "*.foo diff=evil" > "$DRIVER_REPO/.gitattributes"
+HELPER_FIRED_MARKER="$(mktemp -u)"
+rm -f "$HELPER_FIRED_MARKER"
+HELPER_SCRIPT="$(mktemp)"
+cat > "$HELPER_SCRIPT" <<EOF
+#!/bin/sh
+touch "$HELPER_FIRED_MARKER"
+EOF
+chmod +x "$HELPER_SCRIPT"
+git -C "$DRIVER_REPO" config "diff.evil.command" "$HELPER_SCRIPT"
+
+( cd "$DRIVER_REPO" && "$WRAPPER" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
+if [[ -f "$HELPER_FIRED_MARKER" ]]; then
+  fail "configured external diff driver FIRED via a plain 'diff HEAD~1...HEAD' — --no-ext-diff/--no-textconv regression"
+else
+  pass "configured external diff driver did NOT fire — --no-ext-diff/--no-textconv forced by the wrapper closes it"
+fi
+
+( cd "$DRIVER_REPO" && "$WRAPPER" show HEAD >/dev/null 2>&1 )
+if [[ -f "$HELPER_FIRED_MARKER" ]]; then
+  fail "configured external diff driver FIRED via a plain 'show HEAD' — --no-ext-diff/--no-textconv regression"
+else
+  pass "'show HEAD' does not trigger the configured external diff driver either"
+fi
+
+rm -f "$HELPER_FIRED_MARKER" "$HELPER_SCRIPT"
+rm -rf "$DRIVER_REPO"
+
+# ---------------------------------------------------------------------------
+# Index-write hygiene (Codex P2): `git status` performs an optional index refresh that writes
+# `.git/index` by default, contradicting this tier's "never mutates the index" framing.
+# GIT_OPTIONAL_LOCKS=0 (forced by the wrapper) disables that. Asserts the index's mtime is
+# byte-for-byte unchanged (not just "close enough") after a wrapper-run `status`.
+# ---------------------------------------------------------------------------
+section "Index-write hygiene (status must not touch .git/index)"
+
+LOCKS_REPO="$(mktemp -d)"
+git -C "$LOCKS_REPO" init -q
+git -C "$LOCKS_REPO" config user.email "test@example.com"
+git -C "$LOCKS_REPO" config user.name "test"
+echo "a" > "$LOCKS_REPO/file.txt"
+git -C "$LOCKS_REPO" add file.txt
+git -C "$LOCKS_REPO" commit -q -m "first"
+
+stat_mtime() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+}
+
+before="$(stat_mtime "$LOCKS_REPO/.git/index")"
+sleep 1.2
+( cd "$LOCKS_REPO" && "$WRAPPER" status >/dev/null 2>&1 )
+after="$(stat_mtime "$LOCKS_REPO/.git/index")"
+
+if [[ "$before" == "$after" ]]; then
+  pass "wrapper-run 'status' left .git/index's mtime unchanged (GIT_OPTIONAL_LOCKS=0 closes the optional-refresh write)"
+else
+  fail "wrapper-run 'status' changed .git/index's mtime ($before -> $after) — GIT_OPTIONAL_LOCKS regression"
+fi
+
+rm -rf "$LOCKS_REPO"
+
 echo
 echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

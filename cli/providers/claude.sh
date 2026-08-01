@@ -33,7 +33,18 @@ provider_run() {
     allowed_tools="Read,Grep,Glob,Bash($fallback_wrapper *)"
   fi
 
-  local -a args=(-p "$(cat "$prompt_file")" --allowedTools "$allowed_tools" --permission-mode default)
+  # --permission-mode dontAsk (not "default"): Claude Code's docs are explicit that `default`
+  # mode only auto-approves reads without a prompt — everything else, including a tool call that
+  # DOES match --allowedTools, still goes through a permission decision, and outside an
+  # interactive terminal there is no one to answer it. `dontAsk` is documented as the mode "for
+  # CI pipelines and scripts where you need the same result on every machine" / "locked-down CI
+  # and scripts": it auto-denies anything not pre-approved and never waits for input. Empirically
+  # confirmed the gap this closes: a live run using `default` mode (no explicit --permission-mode
+  # at all, matching what action.yml had before this fix) let this wrapper's OWN invocation sit
+  # unanswerable while Claude Code's separate, unconditional built-in "read-only forms of git"
+  # allowance kept bare `git log`/`git diff` working regardless — see cli/lib/execution.sh's own
+  # header comment for the fuller writeup (a real Apollo finding, from this PR's own self-review).
+  local -a args=(-p "$(cat "$prompt_file")" --allowedTools "$allowed_tools" --permission-mode dontAsk)
   if [[ -n "$model" ]]; then
     args+=(--model "$model")
   fi

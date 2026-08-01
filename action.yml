@@ -309,7 +309,20 @@ runs:
         # JSON_SCHEMA above contains only double quotes, never a single quote, so wrapping it
         # in single quotes here (for the CLI arg) needs no further escaping. ALLOWED_TOOLS
         # (computed above from the execution tier) never contains a double quote either.
+        #
+        # --permission-mode dontAsk (not left unset, which is what this action did before this
+        # fix): Claude Code's own docs are explicit that without it, a tool call matching
+        # --allowedTools still goes through a permission decision that nothing can answer outside
+        # an interactive terminal — `dontAsk` is documented as the mode for "locked-down CI and
+        # scripts": it auto-denies anything not pre-approved and never waits for input.
+        # Empirically confirmed the gap this closes: a live run of this action (no explicit
+        # --permission-mode, matching the pre-fix state) reported the wrapper's own invocation as
+        # unreachable while Claude Code's separate, unconditional built-in "read-only forms of
+        # git" allowance kept bare `git log`/`git diff` working regardless — see
+        # cli/lib/execution.sh's header comment for the fuller writeup (a real Apollo finding,
+        # from this PR's own self-review, on this exact composite action).
         CLAUDE_ARGS="--allowedTools \"$ALLOWED_TOOLS\"
+        --permission-mode dontAsk
         --json-schema '$JSON_SCHEMA'"
         if [ -n "$MODEL" ]; then
           CLAUDE_ARGS="$CLAUDE_ARGS

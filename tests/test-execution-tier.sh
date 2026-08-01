@@ -269,6 +269,66 @@ else
   fail "action/review.yml: step ordering regressed (validate=$REVIEW_YML_VALIDATE_LINE wrapper=$REVIEW_YML_WRAPPER_LINE docs-check=$REVIEW_YML_DOCSCHECK_LINE)"
 fi
 
+# ---------------------------------------------------------------------------
+# Part E — --permission-mode dontAsk on every provider invocation. A real Apollo finding on this
+# PR's own self-review of action.yml: without an explicit permission mode, a tool call matching
+# --allowedTools still hits a permission decision nothing can answer non-interactively, while
+# Claude Code's own unconditional built-in "read-only forms of git" allowance keeps bare
+# git log/diff working regardless — so raw git worked and the sanctioned wrapper didn't, the
+# opposite of the intended restriction. `dontAsk` (documented as the mode for "locked-down CI
+# and scripts") closes it: auto-denies anything not pre-approved, never waits for input.
+# ---------------------------------------------------------------------------
+section "Part E: --permission-mode dontAsk on every provider invocation"
+
+if grep -qF -- '--permission-mode dontAsk' "$ROOT/cli/providers/claude.sh"; then
+  pass "cli/providers/claude.sh passes --permission-mode dontAsk"
+else
+  fail "cli/providers/claude.sh does NOT pass --permission-mode dontAsk"
+fi
+
+if grep -qF -- '--permission-mode dontAsk' "$ROOT/action.yml"; then
+  pass "action.yml's CLAUDE_ARGS includes --permission-mode dontAsk"
+else
+  fail "action.yml's CLAUDE_ARGS does NOT include --permission-mode dontAsk"
+fi
+
+if grep -qF -- '--permission-mode dontAsk' "$ROOT/action/review.yml"; then
+  pass "action/review.yml's claude_args includes --permission-mode dontAsk"
+else
+  fail "action/review.yml's claude_args does NOT include --permission-mode dontAsk"
+fi
+
+# Regression guard: `default` mode must not silently return as the mode value on any of the
+# three surfaces (it was the CLI lane's original, insufficiently-strict value).
+if grep -qE -- '--permission-mode default' "$ROOT/cli/providers/claude.sh" "$ROOT/action.yml" "$ROOT/action/review.yml"; then
+  fail "one of the three provider-invocation surfaces still passes --permission-mode default — regressed back to the insufficiently-strict mode"
+else
+  pass "none of the three provider-invocation surfaces pass --permission-mode default anymore"
+fi
+
+# ---------------------------------------------------------------------------
+# Part F — cli/lib/pantheon-git-readonly.sh: structural checks for the round-2 hardening
+# (config/attributes-driven diff-driver bypass, index-write hygiene) that
+# tests/test-git-readonly-wrapper.sh exercises live. This is the same file/behavior check
+# pairing used throughout this repo (e.g. Part B above checks the same shape via grep that
+# tests/test-git-readonly-wrapper.sh proves via live invocation).
+# ---------------------------------------------------------------------------
+section "Part F: cli/lib/pantheon-git-readonly.sh round-2 hardening (structural)"
+
+WRAPPER_SCRIPT="$ROOT/cli/lib/pantheon-git-readonly.sh"
+
+if grep -qF -- '--no-ext-diff --no-textconv' "$WRAPPER_SCRIPT"; then
+  pass "pantheon-git-readonly.sh forces --no-ext-diff --no-textconv on diff/show"
+else
+  fail "pantheon-git-readonly.sh no longer forces --no-ext-diff --no-textconv — the configured-diff-driver bypass could regress"
+fi
+
+if grep -qF 'GIT_OPTIONAL_LOCKS=0' "$WRAPPER_SCRIPT"; then
+  pass "pantheon-git-readonly.sh sets GIT_OPTIONAL_LOCKS=0"
+else
+  fail "pantheon-git-readonly.sh no longer sets GIT_OPTIONAL_LOCKS=0 — the status index-write regression could recur"
+fi
+
 echo
 echo "execution-tier fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -355,6 +355,52 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
     their own CLIs as of v1, so this tiering currently applies to the Claude lane — the only
     integration-tested one — across all three surfaces that invoke it; that gap is disclosed,
     not silently assumed closed.
+  - **Round 3 — configured diff drivers, index writes, and permission-mode (fresh Codex/Apollo
+    evidence after round 2 landed).** Three more findings, all fixed in the wrapper/invocation
+    layer, none requiring another rethink of the shape above:
+    - Rejecting `--ext-diff` as an explicit argument doesn't stop a *configured* external diff
+      driver from firing on a plain, validation-passing `diff`/`show` — a `.gitattributes` entry
+      (`*.foo diff=evil`) plus a `diff.evil.command=...` config entry activates the driver
+      without the model ever typing `--ext-diff`. Codex reproduced this live against the
+      round-2 wrapper. Fixed by forcing `--no-ext-diff --no-textconv` onto every `diff`/`show`
+      call the wrapper makes — injected by the wrapper itself, not accepted from the model's
+      argv (still rejected as a flag like any other), so no config or attributes state the
+      target repo happens to carry can re-enable a driver or content filter. Reproduced-then-
+      fixed with a real helper script in `tests/test-git-readonly-wrapper.sh`.
+    - `git status` performs an optional index refresh that writes `.git/index` by default,
+      contradicting this tier's "never mutates the index" framing and able to race a concurrent
+      repo operation on a shared runner. Fixed with `GIT_OPTIONAL_LOCKS=0` in the wrapper's
+      forced environment (git's own documented mechanism for disabling optional lock-taking
+      operations) — verified with a real mtime-unchanged assertion, not just absence of an
+      error.
+    - **`--permission-mode dontAsk`, not left unset.** A live run of `action.yml` with no
+      explicit permission mode (an Apollo finding from this PR's own self-review, observed
+      first-hand during that very run) showed the wrapper's own invocation sitting unanswerable
+      while bare `git log`/`git diff` kept working — the inverse of the intended restriction.
+      Root cause, confirmed against Claude Code's own docs: a tool call matching `--allowedTools`
+      still goes through a permission decision that nothing can answer outside an interactive
+      terminal unless a mode says otherwise, while Claude Code separately treats a *built-in,
+      not-configurable* set of Bash commands — including "read-only forms of `git`" — as always-
+      approved **in every mode**, wrapper or no wrapper. `dontAsk` is documented as the mode for
+      "locked-down CI and scripts": it auto-denies anything not pre-approved and never waits for
+      input. Added to all three provider-invocation surfaces (`cli/providers/claude.sh`,
+      `action.yml`, `action/review.yml`), replacing the CLI lane's prior `--permission-mode
+      default` (whose own docs describe it as prompting on first use, not denying).
+    - **Honest consequence of that built-in bypass:** a bare `git diff`/`show`/`log`/`status`
+      with no flags can run without ever reaching `pantheon-git-readonly.sh` at all, on any
+      tier, because Claude Code itself always allows those — this is expected and fine (they're
+      genuinely read-only), but it means the wrapper's actual job is everything *beyond* that
+      built-in-safe set (any flag, any other subcommand), not "every git invocation routes
+      through it." The wrapper remains the enforcement point for that broader surface regardless
+      of what Claude Code's own undocumented internal classifier does or doesn't catch on its
+      own — an explicit, versioned, this-repo-owned guarantee instead of a dependency on
+      upstream behavior this repo can't audit.
+    - The very first PR that runs `install.sh` in a repo and adds `action/review.yml` + the
+      wrapper together has the wrapper at its own head but not yet at base — base-pinning
+      correctly refuses to read it from the working tree even for that PR (falling back "just
+      this once" would reopen the exact vulnerability base-pinning exists to close), so that
+      step fails loud with an explanation and a workaround (merge the bootstrap PR via another
+      path once) rather than either silently degrading or leaving an unexplained failure.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is

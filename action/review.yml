@@ -94,6 +94,17 @@ jobs:
       # reads"): read the wrapper's CONTENT from the PR's BASE commit via `git show`, write it
       # to a path OUTSIDE the checked-out working tree ($RUNNER_TEMP), and point every
       # --allowedTools value at THAT path — a PR editing its own head copy never reaches it.
+      # A Codex P2 finding: on the very PR that first runs install.sh and adds this workflow +
+      # the wrapper, the wrapper exists at HEAD but not at BASE (the commit before install.sh
+      # ran) — base-pinning by design can't read it, and this step fails loud rather than
+      # silently. That's the correct fail-closed outcome, not a bug: falling back to reading the
+      # wrapper from the checked-out working tree "just this once" would reopen exactly the
+      # vulnerability base-pinning exists to close (a PR-introduced file, read from PR content,
+      # on the one PR where doing so is easiest to justify and easiest to overlook as an
+      # exception). If this is that bootstrap PR: merge it via another path first (a manual
+      # review, or temporarily unset the `REVIEW_GATE_ENABLED` repo variable for this one PR),
+      # then every PR after it — including ones editing this workflow again — is gated normally
+      # once the wrapper exists at base.
       - name: Resolve read-only git wrapper (base-pinned)
         id: resolve-git-wrapper
         env:
@@ -102,7 +113,7 @@ jobs:
           set -euo pipefail
           WRAPPER_DEST="$RUNNER_TEMP/pantheon-git-readonly.sh"
           if ! git show "${BASE_SHA}:.github/review-agents/pantheon-git-readonly.sh" > "$WRAPPER_DEST" 2>/dev/null; then
-            echo "::error::missing .github/review-agents/pantheon-git-readonly.sh at base commit ${BASE_SHA} — run install.sh (review-pantheon) in this repo first (it vendors the wrapper)."
+            echo "::error::missing .github/review-agents/pantheon-git-readonly.sh at base commit ${BASE_SHA}. Two possible causes: (1) install.sh hasn't been run in this repo yet — run it, commit the result, and re-push; or (2) this IS the PR that first runs install.sh and adds this workflow — the wrapper exists at this PR's head but not yet at base, and base-pinning correctly refuses to read a PR-introduced file from PR content rather than falling back unsafely. For (2): merge this bootstrap PR via another path (manual review, or temporarily unset the REVIEW_GATE_ENABLED repo variable for just this PR) — every PR after it will be gated normally, since the wrapper will then exist at base."
             exit 1
           fi
           chmod +x "$WRAPPER_DEST"
@@ -237,8 +248,17 @@ jobs:
           # outside this file. A Way-A installer who genuinely needs full Bash (own-repo/
           # trusted-author use only, never for reviewing a fork PR) edits this vendored copy
           # directly, the same way they'd edit any other hardcoded value here.
+          # --permission-mode dontAsk (not left unset, which is what this workflow did before
+          # this fix): Claude Code's own docs are explicit that without it, a tool call matching
+          # --allowedTools still goes through a permission decision that nothing can answer
+          # outside an interactive terminal — `dontAsk` is documented as the mode for
+          # "locked-down CI and scripts": it auto-denies anything not pre-approved and never
+          # waits for input. See cli/lib/execution.sh's header comment for the fuller writeup (a
+          # real Apollo finding, from this PR's own self-review of action.yml, which has the
+          # identical gap this same fix closes here).
           claude_args: |
             --allowedTools "Read,Grep,Glob,Bash(${{ steps.resolve-git-wrapper.outputs.wrapper_path }} *)"
+            --permission-mode dontAsk
             --json-schema '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
       - name: Save raw agent output
