@@ -176,6 +176,30 @@ runs:
           exit 1
         fi
 
+    # PR metadata is attacker-controlled on forks (DESIGN.md's "Security posture") — validated
+    # before it touches any shell command, same posture as the CLI lane's PR-number/branch-name/
+    # head-SHA checks in cli/review-gate. BASE_SHA specifically feeds `git show`/`git diff`
+    # below (the Resolve-gate-configuration step's base-pinned rules/spec reads, and the
+    # Detect-docs-only-diff step) — both runs BEFORE this fix validated it. Runs before every
+    # step that touches either SHA in a shell command; a failure here fails the whole composite
+    # action closed (no continue-on-error on this step) before anything downstream executes.
+    - name: Validate PR base/head SHAs
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        SHA_RE='^[0-9a-f]{7,40}$'
+        if ! [[ "$BASE_SHA" =~ $SHA_RE ]]; then
+          echo "::error::review-pantheon: unsafe base SHA '$BASE_SHA' from PR event context — UNVERIFIED, refusing to use it in any git command."
+          exit 1
+        fi
+        if ! [[ "$HEAD_SHA" =~ $SHA_RE ]]; then
+          echo "::error::review-pantheon: unsafe head SHA '$HEAD_SHA' from PR event context — UNVERIFIED, refusing to use it in any git command."
+          exit 1
+        fi
+
     - name: Resolve gate configuration
       id: resolve
       shell: bash
@@ -185,6 +209,7 @@ runs:
         SPEC_FILE: ${{ inputs.spec_file }}
         MODEL: ${{ inputs.model }}
         ACTION_PATH: ${{ github.action_path }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
 
@@ -196,19 +221,43 @@ runs:
         [ -d "$PERSONAS_DIR" ] || { echo "::error::review-pantheon: personas directory not found: $PERSONAS_DIR (check the personas_path input)"; exit 1; }
         echo "personas_dir=$PERSONAS_DIR" >> "$GITHUB_OUTPUT"
 
-        if [ -n "$RULES_FILE" ] && [ -f "$GITHUB_WORKSPACE/$RULES_FILE" ]; then
+        # Rules/spec files are read from the PR's BASE commit (`git show $BASE_SHA:path`),
+        # never the checked-out working tree — on a fork PR the working tree holds the PR
+        # author's own (attacker-controlled) head content, and a rules/spec file read from
+        # there would be prompt-injectable by whoever opened the PR. A file that only exists on
+        # head (the PR itself adds or edits it) is never read; if it's absent at base, this
+        # falls back to omitting it — see DESIGN.md's "Security posture" — "Base-SHA-pinned
+        # context file reads" — and action/lib/build_prompt.sh's per-agent handling of
+        # rules_present/spec_present below for the loud-vs-silent distinction between the two.
+        #
+        # Content travels to the build-prompt steps as a FILE PATH under $RUNNER_TEMP, never as
+        # an env var or a GITHUB_OUTPUT value carrying the raw content — a large base spec/rules
+        # file blew past the OS's per-step environment size limit ("Argument list too long")
+        # when it was passed as an env var, which killed the whole build-prompt step (and, since
+        # that step isn't continue-on-error, the entire gate run and its combined comment) before
+        # build_prompt.sh ever ran. A file has no such ceiling. Every downstream build-prompt
+        # step reads RULES_CONTENT_PATH/SPEC_CONTENT_PATH from this step's outputs and cats the
+        # file itself (action/lib/build_prompt.sh) — this is the only place in this repo that
+        # carries pinned file content across a GitHub Actions step boundary.
+        RULES_CONTENT_FILE="$RUNNER_TEMP/pantheon-rules-content.txt"
+        if [ -n "$RULES_FILE" ] && git show "${BASE_SHA}:${RULES_FILE}" > "$RULES_CONTENT_FILE" 2>/dev/null; then
           echo "rules_present=true" >> "$GITHUB_OUTPUT"
         else
+          : > "$RULES_CONTENT_FILE"
           echo "rules_present=false" >> "$GITHUB_OUTPUT"
         fi
         echo "rules_file=$RULES_FILE" >> "$GITHUB_OUTPUT"
+        echo "rules_content_path=$RULES_CONTENT_FILE" >> "$GITHUB_OUTPUT"
 
-        if [ -n "$SPEC_FILE" ] && [ -f "$GITHUB_WORKSPACE/$SPEC_FILE" ]; then
+        SPEC_CONTENT_FILE="$RUNNER_TEMP/pantheon-spec-content.txt"
+        if [ -n "$SPEC_FILE" ] && git show "${BASE_SHA}:${SPEC_FILE}" > "$SPEC_CONTENT_FILE" 2>/dev/null; then
           echo "spec_present=true" >> "$GITHUB_OUTPUT"
         else
+          : > "$SPEC_CONTENT_FILE"
           echo "spec_present=false" >> "$GITHUB_OUTPUT"
         fi
         echo "spec_file=$SPEC_FILE" >> "$GITHUB_OUTPUT"
+        echo "spec_content_path=$SPEC_CONTENT_FILE" >> "$GITHUB_OUTPUT"
 
         # The verdict-contract JSON schema (DESIGN.md's "Verdict contract") — structural only,
         # deliberately NOT enforcing each agent's own verdict vocabulary here (that would be a
@@ -272,6 +321,7 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/artemis-prompt.md"
@@ -332,8 +382,10 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
         SPEC_FILE: ${{ steps.resolve.outputs.spec_file }}
         SPEC_PRESENT: ${{ steps.resolve.outputs.spec_present }}
+        SPEC_CONTENT_PATH: ${{ steps.resolve.outputs.spec_content_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/apollo-prompt.md"
@@ -391,6 +443,7 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/socrates-prompt.md"
@@ -443,6 +496,7 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/diogenes-prompt.md"
@@ -495,6 +549,7 @@ runs:
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
+        RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/plato-prompt.md"

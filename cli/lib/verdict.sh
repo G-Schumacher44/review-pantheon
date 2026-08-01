@@ -17,17 +17,50 @@
 # to abort the caller's shell on a bad candidate (a bad candidate is exactly the input this
 # code exists to classify, not something that should kill the process).
 
-# Last `^{`-anchored block in the output through EOF — resets on every match, so it ends up
-# holding only the final JSON object (or garbage, which decide_verdict correctly classifies
-# as unverified). Handles "trailing prose after JSON" (prose after the last `{` line still
-# gets swept into buf, so a real trailing-JSON case must have the JSON as the true tail) and
-# "two JSON objects" (last one wins) the same way.
+# Parse-anchored suffix scan (REPLACES an earlier brace-depth-tracking version — see this
+# file's git history for why: it regressed on an unmatched `{` anywhere earlier in the output.
+# A brace left open by prose or a quoted code snippet before the real verdict — plausible in
+# this tool's own domain, code review of brace-heavy files — pinned `depth` above 0 for the
+# rest of the document, so the real trailing JSON's own `{` was never treated as a fresh
+# candidate, and a legitimate verdict came back UNVERIFIED. Artemis caught this live on PR #4;
+# the balanced-braces fixture that existed at the time was green-by-construction for exactly
+# the failure it was meant to catch, because its stray brace happened to be balanced).
+#
+# Correctness now comes from an ACTUAL PARSE ATTEMPT, not from tracking anything about braces.
+# Read the whole candidate text, then scan every `{` character from the END of the text
+# backward; the first (rightmost) one whose suffix — that character straight through EOF —
+# parses as a single, complete JSON value via `jq -e` is the verdict. Immune BY CONSTRUCTION to:
+#   - an unmatched `{` anywhere earlier in the text (that candidate is simply never tried,
+#     because a later `{` — the real object's own — is tried first and succeeds),
+#   - an unmatched `{` anywhere AFTER the real object (its own candidate fails to parse, so the
+#     scan falls through to the real object's `{` — whose candidate then correctly fails too,
+#     since genuine trailing garbage after a complete value is a jq parse error either way; this
+#     is the "nothing after the JSON" contract already enforced by the "trailing prose after
+#     JSON" case, just now covering trailing content that happens to contain a stray brace too),
+#   - leading whitespace before the real object (the candidate starts exactly at the `{`, never
+#     at column 0 specifically),
+#   - a nested, unindented `{` inside an otherwise-valid pretty-printed object (that inner
+#     candidate is a JSON fragment — invalid on its own — so it fails to parse and the scan
+#     correctly falls through to the real, outer `{`).
+# "Two JSON objects, last wins" still holds: the rightmost `{` in the text is the start of
+# whichever object comes last, and if it's complete on its own, nothing about an earlier object
+# is ever consulted. Not a full tokenizer and doesn't need to be — the parser IS the check, so
+# there's no separate brace/string-awareness to get subtly wrong. Outputs from these agents are
+# small; a handful of parse attempts per call is an accepted cost for the correctness this buys
+# (mirrored exactly in action/decide_verdict.py's extract_last_json — keep both in sync, same
+# as everywhere else in this file).
 extract_last_json() {
-  awk '
-    /^\{/ { buf = "" }
-    { buf = buf $0 "\n" }
-    END { printf "%s", buf }
-  '
+  local text i candidate
+  text="$(cat)"
+  for (( i = ${#text} - 1; i >= 0; i-- )); do
+    [[ "${text:i:1}" == "{" ]] || continue
+    candidate="${text:i}"
+    if jq -e '.' <<<"$candidate" >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  printf ''
 }
 
 # Per-agent verdict vocabulary -> gate color. Mirrors the VOCAB table in
@@ -57,15 +90,27 @@ agent_color() {
 # result worse, never better):
 #   1. Candidate must parse as JSON -> else unverified, verdict_json={}.
 #   2. Parsed object must have all five required keys -> else unverified.
-#   3. Look up color from the agent+verdict vocabulary; agent-field mismatch or an
+#   3. Type-strict validation of the invariant-read surface only — verdict must be a string,
+#      has_blocker must be strictly boolean, findings must be strictly an array, and every
+#      findings[].severity must be a string in {blocker, should_fix, note} -> else unverified.
+#      This is the fix for a real gap: presence-only validation (step 2) let a malformed
+#      `"has_blocker": "true"` (a string) through, and jq's type-strict `==` comparison in the
+#      blocker invariant below then silently never fired for it — a malformed verdict could
+#      read as a clean green. Display fields (file/line/issue/scenario/summary) are
+#      deliberately NOT checked here; DESIGN.md's "Validation surface" section is the contract
+#      for why (the render layer, cli/lib/render_comment.sh, sanitizes those at render time).
+#   4. Look up color from the agent+verdict vocabulary; agent-field mismatch or an
 #      out-of-vocabulary verdict -> unverified (but keeps verdict_json, since we can still
 #      check it for a blocker below).
-#   4. Blocker invariant: if has_blocker==true OR any finding has severity=="blocker", and
+#   5. Blocker invariant: if has_blocker==true OR any finding has severity=="blocker", and
 #      the color so far isn't already red, force color=red and invariant_fired=true. This
-#      is deliberately checked regardless of whether step 3 landed on a valid vocabulary
-#      color OR on unverified — a blocker finding is unambiguous even when the rest of the
-#      object is malformed, and red is the fail-closed direction (it blocks merge; unverified
-#      would only flag "not gated," which is a weaker signal than a known blocker deserves).
+#      is deliberately checked regardless of whether step 4 landed on a valid vocabulary
+#      color OR on unverified — a blocker finding is unambiguous even when the verdict WORD
+#      itself is malformed (typo'd/out-of-vocabulary), and red is the fail-closed direction (it
+#      blocks merge; unverified would only flag "not gated," a weaker signal than a known
+#      blocker deserves). An object that fails step 3's type-strict check never reaches this
+#      step at all — there's no reliable blocker signal to trust in an object that isn't even
+#      type-shaped correctly, so that case stays unverified, never red.
 decide_verdict() {
   local expected_agent="$1" candidate="$2"
   local verdict_json
@@ -82,6 +127,26 @@ decide_verdict() {
         <<<"$verdict_json" >/dev/null 2>&1; then
     jq -nc --arg agent "$expected_agent" \
       --arg reason "verdict JSON missing required keys" \
+      --argjson vj "$verdict_json" \
+      '{agent:$agent, color:"unverified", verdict:"UNVERIFIED", reason:$reason,
+        invariant_fired:false, top_finding:$reason, verdict_json:$vj}'
+    return 0
+  fi
+
+  # Type-strict validation surface — see decision-order comment above and DESIGN.md's
+  # "Validation surface". Deliberately scoped to verdict/has_blocker/findings/severity only.
+  if ! jq -e '
+        (.verdict | type) == "string"
+        and (.has_blocker | type) == "boolean"
+        and (.findings | type) == "array"
+        and (.findings | all(
+              type == "object"
+              and (.severity | type) == "string"
+              and (.severity | IN("blocker","should_fix","note"))
+            ))
+      ' <<<"$verdict_json" >/dev/null 2>&1; then
+    jq -nc --arg agent "$expected_agent" \
+      --arg reason "verdict JSON failed type-strict validation on the invariant-read surface (verdict must be a string, has_blocker must be boolean, findings must be an array, every findings[].severity must be a string in {blocker,should_fix,note})" \
       --argjson vj "$verdict_json" \
       '{agent:$agent, color:"unverified", verdict:"UNVERIFIED", reason:$reason,
         invariant_fired:false, top_finding:$reason, verdict_json:$vj}'

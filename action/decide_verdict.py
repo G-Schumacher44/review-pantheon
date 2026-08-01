@@ -47,15 +47,40 @@ VOCAB = {
 REQUIRED_KEYS = {"agent", "verdict", "has_blocker", "findings", "summary"}
 
 
-def extract_last_json(raw: str):
-    """Same rule as cli/lib/verdict.sh's extract_last_json: the last `{`-anchored block
-    through EOF. Returns the candidate text (possibly empty)."""
-    lines = raw.splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        if line.startswith("{"):
-            start = i
-    return "\n".join(lines[start:]) if start is not None else ""
+def extract_last_json(raw: str) -> str:
+    """Parse-anchored suffix scan (REPLACES an earlier brace-depth-tracking version — see git
+    history for why: it regressed on an unmatched `{` anywhere earlier in the output. A brace
+    left open by prose or a quoted code snippet before the real verdict — plausible in this
+    tool's own domain, code review of brace-heavy files — pinned `depth` above 0 for the rest
+    of the document, so the real trailing JSON's own `{` was never treated as a fresh
+    candidate, and a legitimate verdict came back UNVERIFIED. Artemis caught this live on
+    PR #4; the balanced-braces fixture that existed at the time was green-by-construction for
+    exactly the failure it was meant to catch, because its stray brace happened to be balanced.
+
+    Correctness now comes from an ACTUAL PARSE ATTEMPT, not from tracking anything about
+    braces: scan every `{` character from the END of raw backward; the first (rightmost) one
+    whose suffix — that character straight through EOF — parses as a single, complete JSON
+    value is the verdict. Immune BY CONSTRUCTION to an unmatched `{` anywhere earlier in the
+    text (that candidate is simply never tried, because a later `{` succeeds first), an
+    unmatched `{` anywhere AFTER the real object (its own candidate fails to parse, and the
+    scan falls through to the real object's `{`, whose candidate then correctly fails too if
+    there's genuine trailing garbage after it — same 'nothing after the JSON' contract as the
+    existing 'trailing prose after JSON' case), leading whitespace, and a nested unindented `{`
+    inside an otherwise-valid pretty-printed object (that inner candidate is an invalid JSON
+    fragment on its own, so the scan falls through to the real, outer `{`). 'Two JSON objects,
+    last wins' still holds: the rightmost `{` starts whichever object comes last, and if it's
+    complete on its own, nothing about an earlier object is ever consulted. Mirrors
+    cli/lib/verdict.sh's extract_last_json exactly — keep both in sync."""
+    for i in range(len(raw) - 1, -1, -1):
+        if raw[i] != "{":
+            continue
+        candidate = raw[i:]
+        try:
+            json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        return candidate
+    return ""
 
 
 def top_finding_of(verdict_obj) -> str:
@@ -78,9 +103,46 @@ def blocker_present(verdict_obj) -> bool:
     return False
 
 
+TYPE_STRICT_REASON = (
+    "verdict JSON failed type-strict validation on the invariant-read surface (verdict must be "
+    "a string, has_blocker must be boolean, findings must be an array, every findings[].severity "
+    "must be a string in {blocker,should_fix,note})"
+)
+
+
+def type_strict_ok(verdict_obj: dict) -> bool:
+    """Type-strict check of the invariant-read surface only — mirrors cli/lib/verdict.sh's
+    equivalent jq check exactly (same fields, same order of evaluation). Fixes a real gap:
+    presence-only validation let a malformed `"has_blocker": "true"` (a string, not a bool)
+    through, and `is True` / `== True` comparisons below never fire for it — a malformed
+    verdict could silently read as a clean green. Display fields (file/line/issue/scenario/
+    summary) are deliberately NOT checked here — see DESIGN.md's "Validation surface"."""
+    if not isinstance(verdict_obj.get("verdict"), str):
+        return False
+    if not isinstance(verdict_obj.get("has_blocker"), bool):
+        return False
+    findings = verdict_obj.get("findings")
+    if not isinstance(findings, list):
+        return False
+    for f in findings:
+        if not isinstance(f, dict):
+            return False
+        if not isinstance(f.get("severity"), str) or f.get("severity") not in (
+            "blocker",
+            "should_fix",
+            "note",
+        ):
+            return False
+    return True
+
+
 def decide(expected_agent: str, raw: str) -> dict:
     """Same decision order as cli/lib/verdict.sh's decide_verdict: parse -> required keys ->
-    vocabulary lookup -> blocker invariant (checked last, can only make the result worse)."""
+    type-strict validation of the invariant-read surface -> vocabulary lookup -> blocker
+    invariant (checked last, can only make the result worse). An object that fails the
+    type-strict check never reaches the blocker invariant — there's no reliable blocker signal
+    to trust in an object that isn't even type-shaped correctly, so that case stays unverified,
+    never red."""
     candidate = extract_last_json(raw)
     if not candidate:
         return {
@@ -109,6 +171,15 @@ def decide(expected_agent: str, raw: str) -> dict:
             "invariant_fired": False,
             "top_finding": "verdict JSON missing required keys",
             "verdict_json": verdict_obj if isinstance(verdict_obj, dict) else {},
+        }
+
+    if not type_strict_ok(verdict_obj):
+        return {
+            "agent": expected_agent, "color": "unverified", "verdict": "UNVERIFIED",
+            "reason": TYPE_STRICT_REASON,
+            "invariant_fired": False,
+            "top_finding": TYPE_STRICT_REASON,
+            "verdict_json": verdict_obj,
         }
 
     agent_field = verdict_obj.get("agent")

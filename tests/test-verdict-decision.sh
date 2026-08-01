@@ -116,6 +116,99 @@ check "blocker-severity-with-has-blocker-false" "apollo" \
   "red" "true"
 
 # ---------------------------------------------------------------------------
+# Type-strict validation surface — presence-only validation (has("has_blocker") etc.) let a
+# malformed field THROUGH the schema check as long as the key existed, regardless of its type.
+# jq's `==` / Python's `is`/`==` comparisons in the blocker invariant are type-strict, so
+# `"has_blocker": "true"` (a string) never matched `== true` and the invariant silently never
+# fired — a malformed verdict could read as a clean, ungated green. Every fixture below must
+# come back unverified (never green — a malformed object earns no trust either way) with the
+# invariant NOT firing (type-strict failure is checked before the blocker invariant, so there's
+# no reliable blocker signal to trust in an object that isn't type-shaped correctly).
+# ---------------------------------------------------------------------------
+check "has-blocker-is-a-string-not-boolean" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":"true","findings":[],"summary":"clean pass, nothing to report"}' \
+  "unverified" "false"
+
+check "findings-is-an-object-not-an-array" "artemis" \
+  '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":{"severity":"should_fix","file":"a","line":1,"issue":"x","scenario":"y"},"summary":"one note"}' \
+  "unverified" "false"
+
+check "finding-severity-is-numeric-not-a-string" "artemis" \
+  '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":2,"file":"a","line":1,"issue":"x","scenario":"y"}],"summary":"one note"}' \
+  "unverified" "false"
+
+check "finding-severity-out-of-vocabulary" "artemis" \
+  '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"critical","file":"a","line":1,"issue":"x","scenario":"y"}],"summary":"one note"}' \
+  "unverified" "false"
+
+check "verdict-field-is-a-number-not-a-string" "artemis" \
+  '{"agent":"artemis","verdict":5,"has_blocker":false,"findings":[],"summary":"clean pass"}' \
+  "unverified" "false"
+
+# ---------------------------------------------------------------------------
+# Extractor hardening — leading whitespace before the trailing JSON object, and an unindented
+# `{` belonging to a NESTED object inside an otherwise valid pretty-printed verdict, must not
+# defeat extraction (the old `/^\{/`-anchored version reset on both). Fail-closed behavior for
+# genuinely malformed output is unaffected — covered above and by the pre-existing fixtures.
+# ---------------------------------------------------------------------------
+check "leading-whitespace-before-json-object" "artemis" \
+  '  {"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}' \
+  "green" "false"
+
+check "pretty-printed-with-nested-unindented-brace" "artemis" \
+  '{
+"agent": "artemis",
+"verdict": "STOP",
+"has_blocker": true,
+"findings": [
+{
+"severity": "blocker",
+"file": "src/gate.sh",
+"line": 42,
+"issue": "unquoted variable in rm path",
+"scenario": "a branch name containing a space deletes the wrong path"
+}
+],
+"summary": "one real blocker"
+}' \
+  "red" "false"
+
+# shellcheck disable=SC2016
+# The backtick below is fixture DATA (single-quoted, so bash never interprets it as command
+# substitution) — not shell syntax shellcheck needs to warn about.
+check "stray-brace-in-prose-before-the-real-verdict" "artemis" \
+  'Note: the config format uses `{key}` placeholders, not <angle> brackets.
+{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}' \
+  "green" "false"
+
+# ---------------------------------------------------------------------------
+# Extractor round 2 — parse-anchored suffix scan. REPLACES the brace-depth-tracking version
+# above (see cli/lib/verdict.sh's extract_last_json / action/decide_verdict.py's own header
+# comment for the full incident): Artemis caught, live on this PR, that a `{` left unmatched
+# ANYWHERE EARLIER in the output pinned brace-depth above 0 for the rest of the document, so
+# the real trailing verdict's own `{` was never treated as a fresh candidate — a legitimate
+# green verdict came back UNVERIFIED. The "stray-brace-in-prose" fixture above did NOT catch
+# this: it was green-by-construction for exactly the failure it existed to catch, because its
+# stray brace happened to be balanced (`{key}`, closed on the same line). Each fixture below
+# was verified to FAIL against the round-2 (brace-depth) extractor before being counted here —
+# see this PR's commit for the exact repro.
+# ---------------------------------------------------------------------------
+
+check "unmatched-brace-in-prose-before-the-real-verdict" "artemis" \
+  'Note: the config uses a { that never closes in this sentence, worth flagging.
+{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}' \
+  "green" "false"
+
+check "unmatched-brace-in-prose-after-the-real-verdict" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}
+Note: a trailing thought with an unmatched { that never closes.' \
+  "unverified" "false"
+
+check "pathological-all-braces-no-json" "artemis" \
+  '{ { {{ not json at all { { { still not json {{{' \
+  "unverified" "false"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

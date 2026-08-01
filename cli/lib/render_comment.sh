@@ -84,13 +84,22 @@ _pantheon_sanitize_inline() {
   printf '%s' "$s"
 }
 
+# Character-safe, not byte-safe: bash's own `${#text}`/`${text:a:b}` only count/slice by
+# character when the CALLER's locale happens to be UTF-8-aware (LC_CTYPE) — under a `C`/POSIX
+# locale (a bare-bones container with no locale configured, for instance), both become
+# byte-oriented, and slicing at a byte offset that lands mid-way through a multi-byte UTF-8
+# character garbles it (the truncated string ends in a broken byte sequence, and terminals/
+# GitHub's renderer show the replacement-character mess). jq's string functions are UTF-8-aware
+# by construction, independent of the C library locale (jq strings are always Unicode codepoint
+# sequences, per the jq manual) — jq is already a hard requirement for this whole file, so this
+# reuses it instead of hand-rolling locale-independent UTF-8 byte counting in bash.
 _pantheon_truncate() {
   local text="$1" max="${2:-90}"
-  if [ "${#text}" -le "$max" ]; then
-    printf '%s' "$text"
-  else
-    printf '%s…' "${text:0:$((max - 1))}"
-  fi
+  jq -rn --arg t "$text" --argjson m "$max" '
+    if ($t | length) <= $m then $t
+    else ($t[0:($m - 1)] + "…")
+    end
+  '
 }
 
 _pantheon_emoji_for_color() {
