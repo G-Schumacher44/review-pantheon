@@ -264,9 +264,11 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
   prompt or a shell command. Unsafe metadata → UNVERIFIED, not a crash. The CLI lane
   (`cli/review-gate`) validates HEAD_SHA and BASE_SHA before either is used; the published
   action (`action.yml`) validates both PR event-context SHAs in its own dedicated step, before
-  the base-pinned rules/spec reads or the docs-only diff check ever run — a `git show`/`git
-  diff` call built from an unvalidated SHA is exactly the shell-command-injection surface this
-  rule exists to close.
+  the base-pinned rules/spec reads or the docs-only diff check ever run; `action/review.yml`
+  (the vendored Way-A workflow) gained the same dedicated validation step when its own
+  base-pinned wrapper resolution was added (see below) — a `git show`/`git diff` call built
+  from an unvalidated SHA is exactly the shell-command-injection surface this rule exists to
+  close, on every lane now.
 - Model output is never interpolated into shell (`run:`) directly — it travels via files and
   env vars.
 - **Base-SHA-pinned context file reads.** `REVIEW_RULES.md` and the spec file (`DESIGN.md` by
@@ -329,10 +331,20 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
     substitute for it).
   - The CLI lane's wrapper ships alongside `cli/lib/execution.sh` and is picked up automatically
     (`bootstrap.sh` and `install.sh` both vendor it — see "Layout" below). `action.yml` reads it
-    from its own checkout (`github.action_path`, no vendoring needed). `action/review.yml` (the
-    vendored, no-config-surface lane — see "Lane differences") hardcodes the vendored copy's
-    path with no override, matching how it already hardcodes its provider and rules/spec paths;
-    a Way-A installer who genuinely needs `trusted` there edits that vendored file directly.
+    from its own checkout (`github.action_path`, no vendoring needed — that checkout is
+    review-pantheon's own trusted tree, never the reviewed PR's). `action/review.yml` (the
+    vendored, no-config-surface lane — see "Lane differences") is different: `install.sh` vendors
+    the wrapper INTO the target repo, and that repo's own checkout in this workflow pulls the
+    PR's own tree — so a naive `Bash(<path under $GITHUB_WORKSPACE> *)` rule would let a PR
+    simply replace the wrapper script with an arbitrary executable while the identical
+    permission-rule path still authorized running it (a Codex P1 finding, round 2). Fixed the
+    same way this repo already closes the identical class for `REVIEW_RULES.md`/`DESIGN.md`
+    base-pinning: a dedicated "Resolve read-only git wrapper (base-pinned)" step reads the
+    wrapper's content from the PR's **base** commit via `git show`, writes it to `$RUNNER_TEMP`
+    (never the checked-out working tree), and every `--allowedTools`/context-note reference
+    points at that resolved path — preceded by the same "Validate PR base/head SHAs" check
+    `action.yml` already has, newly added to this lane too. A Way-A installer who genuinely
+    needs `trusted` edits that vendored file directly, same as before.
   - Every runtime's generated per-run prompt tells the agent to call the wrapper in place of raw
     `git` when `readonly` is active (`cli/lib/execution.sh`'s `pantheon_execution_context_note`,
     templated into all three prompt-builders — `cli/review-gate`'s `build_prompt()`,

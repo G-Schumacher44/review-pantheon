@@ -201,6 +201,74 @@ fi
 
 rm -rf "$SCRATCH"
 
+# ---------------------------------------------------------------------------
+# Part D — action/review.yml: the wrapper must be BASE-PINNED, never a path under
+# $GITHUB_WORKSPACE (Codex P1, round 2). action/review.yml's Checkout step pulls the PR's OWN
+# tree; a `Bash(<path under $GITHUB_WORKSPACE> *)` permission rule would let a PR simply REPLACE
+# the wrapper script at that exact path with an arbitrary executable while the same rule still
+# authorized running it. This section is a structural, regression-guard check (the same
+# YAML-embedded-shell approach tests/test-prompt-assembly.sh's Parts C/D use) — it can't source
+# and execute this workflow directly, so it isolates the relevant steps and asserts their shape.
+# ---------------------------------------------------------------------------
+section "Part D: action/review.yml's wrapper resolution is base-pinned, not working-tree-pinned"
+
+REVIEW_YML="$ROOT/action/review.yml"
+
+resolve_wrapper_step="$(awk '
+  /- name: Resolve read-only git wrapper/ { grab=1 }
+  grab && /- name:/ && !/Resolve read-only git wrapper/ { exit }
+  grab { print }
+' "$REVIEW_YML")"
+
+if [[ -n "$resolve_wrapper_step" ]]; then
+  pass "action/review.yml has a 'Resolve read-only git wrapper' step"
+else
+  fail "action/review.yml is missing a 'Resolve read-only git wrapper' step"
+fi
+
+# shellcheck disable=SC2016
+if grep -q 'git show "\${BASE_SHA}:\.github/review-agents/pantheon-git-readonly\.sh"' <<<"$resolve_wrapper_step"; then
+  pass "action/review.yml resolves the wrapper via 'git show \$BASE_SHA:path' (base-pinned)"
+else
+  fail "action/review.yml's wrapper-resolution step no longer reads the wrapper via base-pinned git show — check for a regression back to a working-tree path"
+fi
+
+# shellcheck disable=SC2016
+if grep -qE '\$RUNNER_TEMP' <<<"$resolve_wrapper_step" && grep -q 'wrapper_path=' <<<"$resolve_wrapper_step"; then
+  pass "action/review.yml writes the base-pinned wrapper content to \$RUNNER_TEMP and outputs its path"
+else
+  fail "action/review.yml's wrapper-resolution step no longer writes to \$RUNNER_TEMP with a wrapper_path output"
+fi
+
+full_review_yml="$(cat "$REVIEW_YML")"
+# shellcheck disable=SC2016
+if grep -qF 'Bash(${{ steps.resolve-git-wrapper.outputs.wrapper_path }} *)' <<<"$full_review_yml"; then
+  pass "action/review.yml's claude_args points --allowedTools at the resolved (base-pinned) wrapper path"
+else
+  fail "action/review.yml's claude_args does not reference steps.resolve-git-wrapper.outputs.wrapper_path"
+fi
+
+# Regression guard: the OLD working-tree-pinned form must not reappear anywhere in this file.
+if grep -qF 'github.workspace }}/.github/review-agents/pantheon-git-readonly.sh' "$REVIEW_YML" \
+  || grep -qF 'GITHUB_WORKSPACE/.github/review-agents/pantheon-git-readonly.sh' "$REVIEW_YML"; then
+  fail "action/review.yml still references the wrapper under \$GITHUB_WORKSPACE somewhere — a PR-controlled path, exactly the Codex P1 finding this fixed"
+else
+  pass "action/review.yml no longer references the wrapper under \$GITHUB_WORKSPACE anywhere"
+fi
+
+# The new "Validate PR base/head SHAs" step must run before both the wrapper-resolution step and
+# the pre-existing docs-only-diff check (both use BASE_SHA in a shell command).
+REVIEW_YML_VALIDATE_LINE="$(grep -n -- '- name: Validate PR base/head SHAs' "$REVIEW_YML" 2>/dev/null | head -1 | cut -d: -f1)"
+REVIEW_YML_WRAPPER_LINE="$(grep -n -- '- name: Resolve read-only git wrapper' "$REVIEW_YML" 2>/dev/null | head -1 | cut -d: -f1)"
+REVIEW_YML_DOCSCHECK_LINE="$(grep -n -- '- name: Detect docs-only diff' "$REVIEW_YML" 2>/dev/null | head -1 | cut -d: -f1)"
+if [[ -n "$REVIEW_YML_VALIDATE_LINE" && -n "$REVIEW_YML_WRAPPER_LINE" && -n "$REVIEW_YML_DOCSCHECK_LINE" ]] \
+     && [[ "$REVIEW_YML_VALIDATE_LINE" -lt "$REVIEW_YML_WRAPPER_LINE" ]] \
+     && [[ "$REVIEW_YML_WRAPPER_LINE" -lt "$REVIEW_YML_DOCSCHECK_LINE" ]]; then
+  pass "action/review.yml: SHA validation runs before wrapper resolution, which runs before the docs-only check"
+else
+  fail "action/review.yml: step ordering regressed (validate=$REVIEW_YML_VALIDATE_LINE wrapper=$REVIEW_YML_WRAPPER_LINE docs-check=$REVIEW_YML_DOCSCHECK_LINE)"
+fi
+
 echo
 echo "execution-tier fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

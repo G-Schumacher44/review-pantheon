@@ -62,6 +62,52 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # PR metadata is attacker-controlled on forks (DESIGN.md's "Security posture") — the same
+      # posture as action.yml's own dedicated validation step and the CLI lane's HEAD_SHA/
+      # BASE_SHA checks. Runs before every step below that uses either SHA in a shell command,
+      # including the new wrapper-resolution step (a `git show`/`git diff` call built from an
+      # unvalidated SHA is exactly the shell-command-injection surface this rule exists to close).
+      - name: Validate PR base/head SHAs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          SHA_RE='^[0-9a-f]{7,40}$'
+          if ! [[ "$BASE_SHA" =~ $SHA_RE ]]; then
+            echo "::error::review-pantheon: unsafe base SHA '$BASE_SHA' from PR event context — UNVERIFIED, refusing to use it in any git command."
+            exit 1
+          fi
+          if ! [[ "$HEAD_SHA" =~ $SHA_RE ]]; then
+            echo "::error::review-pantheon: unsafe head SHA '$HEAD_SHA' from PR event context — UNVERIFIED, refusing to use it in any git command."
+            exit 1
+          fi
+
+      # Codex P1 finding (round 2 on the tiered-execution PR): this workflow's Checkout step
+      # above pulls the PR's OWN tree — on a fork PR, `$GITHUB_WORKSPACE/.github/review-agents/
+      # pantheon-git-readonly.sh` is content the PR author controls. Pointing --allowedTools at
+      # that working-tree path (as this lane originally did) means a PR can simply REPLACE the
+      # wrapper script with an arbitrary executable while the exact same permission-rule path
+      # still authorizes running it — the readonly tier would authorize its own replacement.
+      # Fixed the same way this repo already closes the identical class for REVIEW_RULES.md/
+      # DESIGN.md base-pinning (DESIGN.md's "Security posture" — "Base-SHA-pinned context file
+      # reads"): read the wrapper's CONTENT from the PR's BASE commit via `git show`, write it
+      # to a path OUTSIDE the checked-out working tree ($RUNNER_TEMP), and point every
+      # --allowedTools value at THAT path — a PR editing its own head copy never reaches it.
+      - name: Resolve read-only git wrapper (base-pinned)
+        id: resolve-git-wrapper
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          WRAPPER_DEST="$RUNNER_TEMP/pantheon-git-readonly.sh"
+          if ! git show "${BASE_SHA}:.github/review-agents/pantheon-git-readonly.sh" > "$WRAPPER_DEST" 2>/dev/null; then
+            echo "::error::missing .github/review-agents/pantheon-git-readonly.sh at base commit ${BASE_SHA} — run install.sh (review-pantheon) in this repo first (it vendors the wrapper)."
+            exit 1
+          fi
+          chmod +x "$WRAPPER_DEST"
+          echo "wrapper_path=$WRAPPER_DEST" >> "$GITHUB_OUTPUT"
+
       - name: Detect docs-only diff
         id: docs-check
         env:
@@ -103,6 +149,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           REPO_NAME: ${{ github.repository }}
+          GIT_WRAPPER_PATH: ${{ steps.resolve-git-wrapper.outputs.wrapper_path }}
         run: |
           set -euo pipefail
           PERSONA="$GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md"
@@ -124,10 +171,12 @@ jobs:
             echo "- Diff range: ${BASE_SHA}...${HEAD_SHA}"
             echo "- Base branch: $BASE_REF"
             echo "- Execution: readonly — Bash is restricted to a read-only git wrapper this run, not raw \`git\`."
-            echo "  Use \`$GITHUB_WORKSPACE/.github/review-agents/pantheon-git-readonly.sh diff|show|log|status <plain refs/paths/ranges, no flags>\` in place of"
-            echo "  \`git diff|show|log|status\` (e.g. \`$GITHUB_WORKSPACE/.github/review-agents/pantheon-git-readonly.sh diff <range>\`, \`$GITHUB_WORKSPACE/.github/review-agents/pantheon-git-readonly.sh show <ref>:<path>\`)"
+            echo "  Use \`$GIT_WRAPPER_PATH diff|show|log|status <plain refs/paths/ranges, no flags>\` in place of"
+            echo "  \`git diff|show|log|status\` (e.g. \`$GIT_WRAPPER_PATH diff <range>\`, \`$GIT_WRAPPER_PATH show <ref>:<path>\`)"
             echo "  — the wrapper refuses any flag/option and any other subcommand, so this is the only Bash"
-            echo "  invocation available. No other command execution is possible this run."
+            echo "  invocation available. No other command execution is possible this run. This path is"
+            echo "  base-SHA-pinned (\$RUNNER_TEMP, not the checked-out working tree) — see DESIGN.md's"
+            echo "  \"Security posture\" for why: the working tree on a fork PR is the PR's own content."
             if [ -f "$GITHUB_WORKSPACE/REVIEW_RULES.md" ]; then
               echo "- House rules file: REVIEW_RULES.md (present - treat each rule as a blocker-class check)"
             else
@@ -168,22 +217,28 @@ jobs:
           # only — NOT each agent's own verdict vocabulary, which stays sole-sourced in
           # action/decide_verdict.py (see DESIGN.md's "Two runtimes, one rule").
           #
-          # Bash is routed through cli/lib/pantheon-git-readonly.sh — vendored into this repo by
-          # install.sh at .github/review-agents/pantheon-git-readonly.sh (HIGH-1 fix, Codex P1
-          # round — DESIGN.md's "Security posture"): this lane reviews a PR diff, which is
-          # 100%-attacker-controlled content on a fork, and a bare `Bash(git diff *)`-style
-          # prefix pattern can't tell a read-only git subcommand from the same subcommand
-          # carrying a writing/execution-capable flag (`--output=`, `--ext-diff`) — see that
-          # script's own header comment for the finding this closes. Unlike action.yml (the
-          # published composite action, which exposes an `execution` input), this vendored
-          # workflow has no config/input surface at all by design (see DESIGN.md's "Lane
-          # differences" — provider/config are hardcoded here the same way REVIEW_RULES.md/
-          # DESIGN.md's paths are) — readonly is not overridable from outside this file. A Way-A
-          # installer who genuinely needs full Bash (own-repo/trusted-author use only, never for
-          # reviewing a fork PR) edits this vendored copy directly, the same way they'd edit any
-          # other hardcoded value here.
+          # Bash is routed through the wrapper resolved by "Resolve read-only git wrapper
+          # (base-pinned)" above — NOT a path under $GITHUB_WORKSPACE (HIGH-1 fix, Codex P1
+          # round 2 — DESIGN.md's "Security posture"): this lane reviews a PR diff, which is
+          # 100%-attacker-controlled content on a fork, and pointing --allowedTools at a
+          # working-tree path would let the PR simply REPLACE the wrapper script with an
+          # arbitrary executable while the exact same permission-rule path still authorized
+          # running it — the readonly tier would authorize its own replacement. Reading the
+          # wrapper's content from the PR's BASE commit into $RUNNER_TEMP (never the checked-out
+          # working tree) closes that the same way this repo already closes it for
+          # REVIEW_RULES.md/DESIGN.md base-pinning elsewhere. (Round 1 of this same fix replaced
+          # a bare `Bash(git diff *)`-style prefix pattern, which can't tell a read-only git
+          # subcommand from the same subcommand carrying a writing/execution-capable flag like
+          # `--output=`/`--ext-diff` — see cli/lib/pantheon-git-readonly.sh's own header comment
+          # for that finding.) Unlike action.yml (the published composite action, which exposes
+          # an `execution` input), this vendored workflow has no config/input surface at all by
+          # design (see DESIGN.md's "Lane differences" — provider/config are hardcoded here the
+          # same way REVIEW_RULES.md/DESIGN.md's paths are) — readonly is not overridable from
+          # outside this file. A Way-A installer who genuinely needs full Bash (own-repo/
+          # trusted-author use only, never for reviewing a fork PR) edits this vendored copy
+          # directly, the same way they'd edit any other hardcoded value here.
           claude_args: |
-            --allowedTools "Read,Grep,Glob,Bash(${{ github.workspace }}/.github/review-agents/pantheon-git-readonly.sh *)"
+            --allowedTools "Read,Grep,Glob,Bash(${{ steps.resolve-git-wrapper.outputs.wrapper_path }} *)"
             --json-schema '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
       - name: Save raw agent output
