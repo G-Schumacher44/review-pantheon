@@ -11,7 +11,9 @@
 #                is the whole point — deliberately NOT the full ci.yml (no Docker setup-smoke,
 #                no composite-action-self-check) since those need a Docker daemon / PR context
 #                this tag-push trigger doesn't have; the fixture+lint suite below is the part of
-#                ci.yml that's meaningful to re-run against an arbitrary tagged commit.
+#                ci.yml that's meaningful to re-run against an arbitrary tagged commit. Its FIRST
+#                step validates the tag is a strict semver (see below) — everything else in this
+#                job only makes sense to run once that's confirmed.
 #   2. build-and-publish — stages the CLI surface (explicit file list, no globs — see the step
 #                below for why), tars it as review-pantheon-<tag>.tar.gz, generates SHA256SUMS,
 #                and creates the GitHub Release with `gh release create`, notes auto-generated.
@@ -33,6 +35,22 @@ jobs:
     permissions:
       contents: read # only needs to read the tagged checkout
     steps:
+      # GitHub's `v*.*.*` tag-filter trigger above is a GLOB, not a semver validator — `*`
+      # matches any non-`/` characters, so e.g. `v1.2.3-rc1` or `vfoo.bar.baz` also fire this
+      # workflow (Codex finding on this PR). bootstrap.sh's `--version` flag only ever accepts
+      # the strict `^v[0-9]+\.[0-9]+\.[0-9]+$` shape (see its header comment), so without this
+      # check the workflow could publish a Release that lane can never fetch. Fail fast, before
+      # spending any CI time on a tag that will never be consumable.
+      - name: Validate tag is a strict vX.Y.Z semantic version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$TAG' matched this workflow's 'v*.*.*' glob trigger but is NOT a strict vX.Y.Z semantic version (no pre-release/build suffix, digits only). bootstrap.sh's --version flag requires exactly this shape and would refuse to fetch a release built from this tag — see RELEASING.md. Delete this tag and re-tag with a strict vX.Y.Z."
+            exit 1
+          fi
+          echo "tag '$TAG' is a valid vX.Y.Z release tag"
+
       - name: Checkout
         uses: actions/checkout@v4 # matches ci.yml's pin — checks out the pushed tag by default
 
