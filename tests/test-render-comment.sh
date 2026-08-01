@@ -193,6 +193,50 @@ assert_contains "malformed-element" "fold count reflects only the valid object, 
 assert_contains "malformed-element" "table top-finding cell still surfaces the real blocker" "$out" "real blocker"
 
 # ---------------------------------------------------------------------------
+# Fixture: markdown/HTML-hostile content in .file/.issue and a non-numeric .line — regression
+# coverage for this repo's own gate finding on itself (PR #3, artemis's live-review round):
+# .file/.line reached the itemized list WITHOUT going through _pantheon_sanitize_inline, unlike
+# .issue/.scenario/.summary — a model-controlled .file value could carry a backtick and
+# prematurely close the single-backtick `file:line` code span (CommonMark has no backslash-
+# escape for a backtick INSIDE a single-backtick span), a pipe could fracture the table row,
+# and an angle bracket could look like an HTML tag. .line is schema'd as a number but is still
+# model output, so a non-numeric value must degrade to the same "?" placeholder used when the
+# key is missing, not get interpolated raw where a line number belongs. Everything here must
+# still render as a single, structurally intact list item — no broken code span, no extra
+# table columns, no raw HTML tag.
+# ---------------------------------------------------------------------------
+reset_agent_env
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="hostile content finding"
+# shellcheck disable=SC2016
+# The literal backticks below are JSON string content (single-quoted, so bash never
+# interprets them as command substitution) — not shell syntax shellcheck needs to warn about.
+ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"should_fix","file":"src/`weird`.sh<script>|pipe","line":"not-a-number","issue":"pipe | and backtick ` and angle <b>tag</b>","scenario":"n/a"}],"summary":"hostile content test"}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+
+out="$(pantheon_render_comment "$HEAD_SHA" artemis)"
+# The machine tail (nested "Raw verdict JSON") deliberately ships the RAW, unsanitized verdict
+# JSON — that's the whole point of keeping machine-readability (DESIGN.md's "Combined PR
+# comment"), so a raw `<script>` legitimately appears there. Only the HUMAN-READABLE section
+# (headline through the end of the findings fold's prose, before the machine tail) is what
+# this fixture is checking stays sanitized — slice it off before asserting "no raw tag".
+human_readable="${out%%<summary>Raw verdict JSON*}"
+
+assert_contains "hostile-content" "non-numeric line degrades to the '?' placeholder" "$out" ":?\` —"
+assert_not_contains "hostile-content" "the code span isn't prematurely closed by a smuggled backtick" "$out" "\`src/\`weird\`"
+assert_contains "hostile-content" "backtick in .file is neutralized, not dropped silently" "$out" "src/'weird'.sh"
+assert_contains "hostile-content" "pipe in .file is escaped, not left to fracture structure" "$out" '\|pipe:?`'
+assert_contains "hostile-content" "angle brackets in .file are HTML-escaped" "$out" "&lt;script&gt;"
+assert_contains "hostile-content" "angle brackets in .issue are HTML-escaped too" "$out" "&lt;b&gt;tag&lt;/b&gt;"
+assert_not_contains "hostile-content" "no raw HTML tag reaches the human-readable section" "$human_readable" "<script>"
+assert_not_contains "hostile-content" "no raw HTML tag from .issue reaches the human-readable section" "$human_readable" "<b>tag</b>"
+# The renderer's own formatting backticks (the verdict code-span, the identity line's SHA code
+# span) must survive intact — sanitizing a value must never corrupt markup THIS FILE added
+# around it (the bug the fix above introduced and then had to correct: sanitizing an
+# already-backtick-wrapped verdict cell turned its own formatting backticks into quotes too).
+assert_contains "hostile-content" "the verdict table cell keeps its own code-span backticks" "$out" "| artemis | \`FIX_FIRST\` — yellow |"
+assert_contains "hostile-content" "the identity line keeps its own SHA code-span backticks" "$out" "**artemis** @ \`$SHORT_SHA\` — 🟡 FIX_FIRST"
+
+# ---------------------------------------------------------------------------
 # Fixture: one agent skipped (docs-only apollo skip), loud row required
 # ---------------------------------------------------------------------------
 reset_agent_env

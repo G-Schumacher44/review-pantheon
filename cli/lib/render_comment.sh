@@ -40,11 +40,29 @@ set -u 2>/dev/null || true
 # Small helpers (all prefixed _pantheon_ — internal, not part of the public contract)
 # ---------------------------------------------------------------------------
 
-# Markdown-table-safe + single-line: escape pipes, collapse newlines to spaces.
+# Markdown/HTML-hostile-content-safe + single-line, for ANY model-controlled string this
+# renderer interpolates — table cells, prose, AND values placed inside a backtick code span
+# (e.g. the per-finding `` `file:line` `` in the itemized list). Every text field this file
+# reads from an agent's JSON is untrusted the same way PR metadata is (DESIGN.md's "Security
+# posture") — the agent's own output, not something this renderer can assume is well-formed.
+#   - Pipes: escaped (\|), so a stray `|` can't fracture a markdown table row.
+#   - Newlines: collapsed to spaces, so a multi-line value can't fracture a table row or list
+#     item into extra rows/lines.
+#   - Backticks: replaced with a straight quote. There is no backslash-escape for a backtick
+#     INSIDE a single-backtick-fenced code span in CommonMark (the only safe way to include a
+#     literal backtick there is a wider double-backtick fence, which this renderer doesn't
+#     use) — a raw backtick would prematurely close the span and let everything after it
+#     render as uncontrolled markdown. Applied everywhere (not only inside code spans) for one
+#     rule, one function, rather than a second bespoke sanitizer just for code-span contexts.
+#   - Angle brackets: HTML-escaped (&lt;/&gt;), so a value can't be mistaken for (or rendered
+#     as) an HTML tag in GitHub's comment renderer.
 _pantheon_sanitize_inline() {
   local s="$1"
   s="${s//$'\n'/ }"
   s="${s//|/\\|}"
+  s="${s//\`/\'}"
+  s="${s//</\&lt;}"
+  s="${s//>/\&gt;}"
   printf '%s' "$s"
 }
 
@@ -236,7 +254,12 @@ pantheon_render_comment() {
     [ -n "$fcount" ] || fcount=0
     total_findings=$((total_findings + fcount))
 
-    vcell="$(_pantheon_sanitize_inline "\`${verdict}\` — ${color}")"
+    # Sanitize the raw verdict value FIRST, then wrap it in our own backticks — not the other
+    # way around: sanitizing an already-backtick-wrapped string would treat those backticks as
+    # hostile content too (the sanitizer can't tell "markdown we constructed" from "a backtick
+    # smuggled in by the model"), corrupting our own formatting. Same rule applies everywhere
+    # else this file adds its own backticks/bold around a value — sanitize the value, then wrap.
+    vcell="\`$(_pantheon_sanitize_inline "$verdict")\` — ${color}"
     topcell="$(_pantheon_sanitize_inline "$(_pantheon_table_top_cell "$verdict" "$top" "$findings_json")")"
     printf '| %s | %s | %s |\n' "$agent" "$vcell" "$topcell"
   done
@@ -271,7 +294,7 @@ pantheon_render_comment() {
     reason="${!reason_var:-}"
     emoji="$(_pantheon_emoji_for_color "$color")"
 
-    printf "**%s** @ \`%s\` — %s %s\n\n" "$agent" "$short_sha" "$emoji" "$verdict"
+    printf "**%s** @ \`%s\` — %s %s\n\n" "$agent" "$short_sha" "$emoji" "$(_pantheon_sanitize_inline "$verdict")"
 
     summary="$(jq -r '.summary // empty' <<<"$findings_json" 2>/dev/null)"
     [ -n "$summary" ] || summary="$top"
@@ -292,6 +315,14 @@ pantheon_render_comment() {
       issue="$(jq -r '.issue // ""' <<<"$finding_obj")"
       scenario="$(jq -r '.scenario // ""' <<<"$finding_obj")"
       badge="$(_pantheon_severity_badge "$sev")"
+      # .line is schema'd as a number, but it's still model output — coerce anything that
+      # isn't a plain non-negative integer to the same "?" placeholder already used when the
+      # key is missing entirely, rather than interpolating arbitrary text where a line number
+      # is expected. .file goes through the same sanitize pass as every other model-controlled
+      # field (see _pantheon_sanitize_inline) — both sit inside a backtick code span below, so
+      # this is the call site the sanitizer's backtick handling exists for.
+      [[ "$ln" =~ ^[0-9]+$ ]] || ln="?"
+      f="$(_pantheon_sanitize_inline "$f")"
       printf -- "- %s \`%s:%s\` — %s\n" "$badge" "$f" "$ln" "$(_pantheon_sanitize_inline "$issue")"
       if [ -n "$scenario" ]; then
         printf '  scenario: %s\n' "$(_pantheon_sanitize_inline "$scenario")"
