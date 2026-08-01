@@ -182,6 +182,33 @@ check "stray-brace-in-prose-before-the-real-verdict" "artemis" \
   "green" "false"
 
 # ---------------------------------------------------------------------------
+# Extractor round 2 — parse-anchored suffix scan. REPLACES the brace-depth-tracking version
+# above (see cli/lib/verdict.sh's extract_last_json / action/decide_verdict.py's own header
+# comment for the full incident): Artemis caught, live on this PR, that a `{` left unmatched
+# ANYWHERE EARLIER in the output pinned brace-depth above 0 for the rest of the document, so
+# the real trailing verdict's own `{` was never treated as a fresh candidate — a legitimate
+# green verdict came back UNVERIFIED. The "stray-brace-in-prose" fixture above did NOT catch
+# this: it was green-by-construction for exactly the failure it existed to catch, because its
+# stray brace happened to be balanced (`{key}`, closed on the same line). Each fixture below
+# was verified to FAIL against the round-2 (brace-depth) extractor before being counted here —
+# see this PR's commit for the exact repro.
+# ---------------------------------------------------------------------------
+
+check "unmatched-brace-in-prose-before-the-real-verdict" "artemis" \
+  'Note: the config uses a { that never closes in this sentence, worth flagging.
+{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}' \
+  "green" "false"
+
+check "unmatched-brace-in-prose-after-the-real-verdict" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"clean pass, nothing to report"}
+Note: a trailing thought with an unmatched { that never closes.' \
+  "unverified" "false"
+
+check "pathological-all-braces-no-json" "artemis" \
+  '{ { {{ not json at all { { { still not json {{{' \
+  "unverified" "false"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

@@ -17,47 +17,50 @@
 # to abort the caller's shell on a bad candidate (a bad candidate is exactly the input this
 # code exists to classify, not something that should kill the process).
 
-# Last top-level JSON object in the output through EOF — resets the candidate buffer every
-# time a `{` is seen while brace-depth is 0 (a genuinely new top-level object starting), so it
-# ends up holding only the final one (or garbage, which decide_verdict correctly classifies as
-# unverified). Handles "trailing prose after JSON" (prose after a closed object still gets
-# swept into buf — depth is back to 0 by then, and only a fresh `{` resets — so a real
-# trailing-JSON case must have the JSON as the true tail, same contract as before) and "two
-# JSON objects" (last one wins) the same way as the previous column-0-anchored version.
+# Parse-anchored suffix scan (REPLACES an earlier brace-depth-tracking version — see this
+# file's git history for why: it regressed on an unmatched `{` anywhere earlier in the output.
+# A brace left open by prose or a quoted code snippet before the real verdict — plausible in
+# this tool's own domain, code review of brace-heavy files — pinned `depth` above 0 for the
+# rest of the document, so the real trailing JSON's own `{` was never treated as a fresh
+# candidate, and a legitimate verdict came back UNVERIFIED. Artemis caught this live on PR #4;
+# the balanced-braces fixture that existed at the time was green-by-construction for exactly
+# the failure it was meant to catch, because its stray brace happened to be balanced).
 #
-# Two hardenings over the old `/^\{/`-anchored version (mirrored in action/decide_verdict.py's
-# extract_last_json — keep both in sync, same as everywhere else in this file):
-#   - Leading whitespace before the object no longer defeats detection — depth-tracking finds
-#     the `{` wherever it sits on the line, not just at column 0.
-#   - A `{` seen while ALREADY inside an open top-level object (e.g. a pretty-printed verdict
-#     whose nested `findings[]` element also happens to have its own `{` unindented, at column
-#     0) no longer falsely resets the buffer and truncates the real object — only a `{` at
-#     depth 0 counts as a new candidate's start.
-# Not a full JSON tokenizer: brace-counting here isn't string-aware, so a `{`/`}` character
-# sitting inside a JSON string value (e.g. `"issue": "the object needs a { here"`) is counted
-# like any other brace. That's an accepted, documented limitation ("brace-counting, not a
-# parser") — a stray brace in prose ahead of the real verdict is only handled correctly if it's
-# balanced within the line(s) it appears on; jq's own parse of the resulting candidate is still
-# the final fail-closed backstop either way.
+# Correctness now comes from an ACTUAL PARSE ATTEMPT, not from tracking anything about braces.
+# Read the whole candidate text, then scan every `{` character from the END of the text
+# backward; the first (rightmost) one whose suffix — that character straight through EOF —
+# parses as a single, complete JSON value via `jq -e` is the verdict. Immune BY CONSTRUCTION to:
+#   - an unmatched `{` anywhere earlier in the text (that candidate is simply never tried,
+#     because a later `{` — the real object's own — is tried first and succeeds),
+#   - an unmatched `{` anywhere AFTER the real object (its own candidate fails to parse, so the
+#     scan falls through to the real object's `{` — whose candidate then correctly fails too,
+#     since genuine trailing garbage after a complete value is a jq parse error either way; this
+#     is the "nothing after the JSON" contract already enforced by the "trailing prose after
+#     JSON" case, just now covering trailing content that happens to contain a stray brace too),
+#   - leading whitespace before the real object (the candidate starts exactly at the `{`, never
+#     at column 0 specifically),
+#   - a nested, unindented `{` inside an otherwise-valid pretty-printed object (that inner
+#     candidate is a JSON fragment — invalid on its own — so it fails to parse and the scan
+#     correctly falls through to the real, outer `{`).
+# "Two JSON objects, last wins" still holds: the rightmost `{` in the text is the start of
+# whichever object comes last, and if it's complete on its own, nothing about an earlier object
+# is ever consulted. Not a full tokenizer and doesn't need to be — the parser IS the check, so
+# there's no separate brace/string-awareness to get subtly wrong. Outputs from these agents are
+# small; a handful of parse attempts per call is an accepted cost for the correctness this buys
+# (mirrored exactly in action/decide_verdict.py's extract_last_json — keep both in sync, same
+# as everywhere else in this file).
 extract_last_json() {
-  awk '
-    {
-      line = $0
-      len = length(line)
-      linestart = 1
-      for (i = 1; i <= len; i++) {
-        c = substr(line, i, 1)
-        if (c == "{") {
-          if (depth == 0) { buf = ""; linestart = i }
-          depth++
-        } else if (c == "}") {
-          if (depth > 0) depth--
-        }
-      }
-      buf = buf substr(line, linestart) "\n"
-    }
-    END { printf "%s", buf }
-  '
+  local text i candidate
+  text="$(cat)"
+  for (( i = ${#text} - 1; i >= 0; i-- )); do
+    [[ "${text:i:1}" == "{" ]] || continue
+    candidate="${text:i}"
+    if jq -e '.' <<<"$candidate" >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  printf ''
 }
 
 # Per-agent verdict vocabulary -> gate color. Mirrors the VOCAB table in

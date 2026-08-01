@@ -48,30 +48,39 @@ REQUIRED_KEYS = {"agent", "verdict", "has_blocker", "findings", "summary"}
 
 
 def extract_last_json(raw: str) -> str:
-    """Same rule as cli/lib/verdict.sh's extract_last_json: track brace depth across the whole
-    text (not string-aware — a documented, accepted limitation, same as the bash twin) so a `{`
-    seen while ALREADY inside an open top-level object (e.g. a pretty-printed nested findings[]
-    element whose own `{` isn't indented) never falsely resets the candidate, while a `{` seen
-    at depth 0 — anywhere on a line, not just column 0 — always starts a fresh candidate at
-    that character. The candidate always runs from that point through EOF (never stops early at
-    the matching `}`), so trailing prose after a genuinely closed object still makes the whole
-    candidate fail to parse — same 'nothing after the JSON' fail-closed contract as before this
-    fix, just no longer defeated by leading whitespace or an unindented nested `{`."""
-    depth = 0
-    buf_lines: list[str] = []
-    for line in raw.splitlines():
-        linestart = 0
-        for i, c in enumerate(line):
-            if c == "{":
-                if depth == 0:
-                    buf_lines = []
-                    linestart = i
-                depth += 1
-            elif c == "}":
-                if depth > 0:
-                    depth -= 1
-        buf_lines.append(line[linestart:])
-    return "\n".join(buf_lines)
+    """Parse-anchored suffix scan (REPLACES an earlier brace-depth-tracking version — see git
+    history for why: it regressed on an unmatched `{` anywhere earlier in the output. A brace
+    left open by prose or a quoted code snippet before the real verdict — plausible in this
+    tool's own domain, code review of brace-heavy files — pinned `depth` above 0 for the rest
+    of the document, so the real trailing JSON's own `{` was never treated as a fresh
+    candidate, and a legitimate verdict came back UNVERIFIED. Artemis caught this live on
+    PR #4; the balanced-braces fixture that existed at the time was green-by-construction for
+    exactly the failure it was meant to catch, because its stray brace happened to be balanced.
+
+    Correctness now comes from an ACTUAL PARSE ATTEMPT, not from tracking anything about
+    braces: scan every `{` character from the END of raw backward; the first (rightmost) one
+    whose suffix — that character straight through EOF — parses as a single, complete JSON
+    value is the verdict. Immune BY CONSTRUCTION to an unmatched `{` anywhere earlier in the
+    text (that candidate is simply never tried, because a later `{` succeeds first), an
+    unmatched `{` anywhere AFTER the real object (its own candidate fails to parse, and the
+    scan falls through to the real object's `{`, whose candidate then correctly fails too if
+    there's genuine trailing garbage after it — same 'nothing after the JSON' contract as the
+    existing 'trailing prose after JSON' case), leading whitespace, and a nested unindented `{`
+    inside an otherwise-valid pretty-printed object (that inner candidate is an invalid JSON
+    fragment on its own, so the scan falls through to the real, outer `{`). 'Two JSON objects,
+    last wins' still holds: the rightmost `{` starts whichever object comes last, and if it's
+    complete on its own, nothing about an earlier object is ever consulted. Mirrors
+    cli/lib/verdict.sh's extract_last_json exactly — keep both in sync."""
+    for i in range(len(raw) - 1, -1, -1):
+        if raw[i] != "{":
+            continue
+        candidate = raw[i:]
+        try:
+            json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        return candidate
+    return ""
 
 
 def top_finding_of(verdict_obj) -> str:
