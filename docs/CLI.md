@@ -128,11 +128,19 @@ reviewing untrusted content is the whole reason `readonly` exists.
   reviewing the **full PR diff again**, with a note in the prompt explaining why — expected
   after any force-push, not a bug, and not something that needs `.review-gate-state.json`
   cleared by hand.
-- **The recording rule is green/yellow-only, on purpose.** The state file is updated only after
-  a successful `gh pr comment` post **and** only when the overall result is `green` or `yellow`.
-  A `red` or `unverified` outcome leaves it untouched, so the next run retries the whole PR
-  instead of treating a run that never actually gated anything as reviewed. `--dry-run` and a
-  draft-PR skip never reach this step at all — no comment is posted, so no state is written.
+- **The recording rule is green/yellow-only, on purpose.** The state file's `reviewed_sha` entry
+  is written only after a successful `gh pr comment` post **and** only when the overall result is
+  `green` or `yellow`. A `red` or `unverified` outcome leaves it untouched, so the next run
+  retries the whole PR instead of treating a run that never actually gated anything as reviewed.
+  `--dry-run` and a draft-PR skip never reach that write at all — no comment is posted, so no
+  `reviewed_sha` is recorded. **One caveat: `--dry-run` still bootstraps the file itself.**
+  `review-gate` creates `.review-gate-state.json` as `{}` on first run if it doesn't already
+  exist — unconditionally, before the dry-run/draft branches are even reached (`cli/review-gate`'s
+  `[[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"`) — so a `--dry-run` against a target repo
+  that has never run `review-gate` before will leave a fresh, empty `.review-gate-state.json` in
+  the working tree even though it records nothing about the PR. Not a mutation you'd notice (an
+  empty JSON object, git-ignored), but a real one — "no state written" for `--dry-run` means "no
+  PR gets marked reviewed," not "the working tree is untouched."
 
 ## Exit codes + reading a verdict comment
 
@@ -163,8 +171,11 @@ review-gate --pr 42 --dry-run
 
 Real `gh pr view`, real fetched refs, real diff range and docs-only/follow-up detection, real
 prompt assembly per agent — right up to the point of calling a provider. Prints, per agent, the
-command it *would* run and the comment it *would* post, to stdout only. Zero tokens, zero risk,
-no state written. Full walkthrough: [SETUP.md](SETUP.md#first-run--the-demo).
+command it *would* run and the comment it *would* post, to stdout only. Zero tokens, zero risk to
+the PR (nothing posted, no PR ever recorded as reviewed) — though it does bootstrap an empty
+`.review-gate-state.json` if one doesn't exist yet, see [the state/follow-up
+model](#the-state--follow-up-model)'s caveat. Full walkthrough:
+[SETUP.md](SETUP.md#first-run--the-demo).
 
 </details>
 
@@ -204,9 +215,19 @@ review-gate --pr 42 --agents "socrates diogenes plato"
 
 The counsel agents' natural home is the planning conversation, before anything is merge-gated —
 running them through `review-gate` against a PR is the documented exception, not the default
-workflow (see README's ["The panel"](../README.md#the-panel)). Apollo's docs-only skip and the
-blocker invariant still apply per-agent as normal; none of the three counsel verdicts can force
-red on their own the way Artemis/Apollo's can — they inform, they don't gate.
+workflow (see README's ["The panel"](../README.md#the-panel)).
+
+**Mechanically, through this CLI, they gate exactly like Artemis/Apollo do — the "counsel, not
+gate" distinction is a usage convention, not a code path.** `cli/lib/verdict.sh`'s `agent_color()`
+maps each agent's own red-tier word (`socrates:NO_GO`, `diogenes:GUT`, `plato:FRACTURED`,
+alongside `artemis:STOP`/`apollo:RETURN`) to `color=red` identically, and
+`pantheon_overall_color()` takes the worst color across whatever agent list actually ran — it has
+no notion of "gate agent" vs "counsel agent" at all. Run the command above and a `NO_GO` from
+Socrates alone produces the same 🔴 Blocked comment and nonzero exit as a `STOP` from Artemis
+would. If you wire a counsel-only `--agents` list into a CI step the way you would Artemis/Apollo,
+it blocks the same way — there is no code-level safeguard keeping counsel advisory once it's run
+through the gate; that separation is README's documented convention (only Artemis/Apollo run
+automatically in CI) and your own `gate.conf`/CI wiring, not something this CLI enforces for you.
 
 </details>
 

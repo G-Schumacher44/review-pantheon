@@ -4,11 +4,17 @@
 
 - **PRs only.** `dev` is the base branch and is ruleset-protected; `main` is the release branch.
   Nobody — including the maintainer — pushes to either directly.
-- **Every PR is gated twice: the repo's own review method, then a human.** This repo reviews its
-  own PRs with the same panel it ships (see [README's "The panel"](README.md#the-panel)) — Artemis
-  hunts the diff, Apollo verifies the claim against git reality. The gate is fail-closed: a
-  missing or unparseable verdict from either twin is a failed check, not a pass. A human still
-  reads and decides; the gate informs that decision, it doesn't replace it.
+- **This repo reviews its own PRs with the same panel it ships, then a human decides.** CI's
+  `composite-action-self-check` job runs a live self-test of `action.yml` against this repo's own
+  PRs (Artemis + Apollo, `execution: trusted` — this repo reviewing its own PRs from its own
+  checkout is exactly the own-repo/trusted-author case that tier is documented for) — **when it
+  runs.** That live-test step is fail-soft by design, not a required check: it only fires on a
+  `pull_request` event with the token secret present, and is a no-op skip notice otherwise (see
+  `.github/workflows/ci.yml`'s own comments on that job). So the honest claim is two-layered: any
+  verdict the twins DO post is fail-closed (a missing or unparseable one reads `UNVERIFIED`, never
+  green — DESIGN.md rule 2), but CI passing does not by itself guarantee a twin review ran at all.
+  A human still reads and decides either way; the gate informs that decision when present, it
+  never replaces it.
 - **Findings get fixed or tracked — never silently dropped.** Address a finding in the same PR, or
   open an issue for it and resolve the review thread pointing at that issue number. A review
   thread left unresolved with nothing linked is the one state this repo doesn't allow.
