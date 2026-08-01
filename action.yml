@@ -6,7 +6,12 @@
 # target repo so its own runner can see them). Every file this action reads at run time —
 # personas, action/decide_verdict.py, action/lib/*.sh, the JSON schema below — is read from
 # `${{ github.action_path }}`, i.e. review-pantheon's own checkout as GitHub Actions pulls it
-# for the `uses:` reference, not from the calling repo.
+# for the `uses:` reference, not from the calling repo. The one opt-in exception is the
+# `personas_path` input (a consuming workflow author pointing this action at a repo-local
+# persona fork instead) — that content is base-pinned from the PR's base commit via `git show`
+# (see the "Resolve gate configuration" step and the input's own description below), never read
+# from the calling repo's checked-out working tree, for the same fork-PR-injection reason
+# REVIEW_RULES.md/DESIGN.md are (DESIGN.md's "Security posture").
 #
 # anthropics/claude-code-action is pinned below to a real, verified commit SHA — v1.0.183,
 # tag `v1.0.183` (the `v1` tag also currently resolves to this same commit; pin the full SHA,
@@ -123,8 +128,10 @@ inputs:
   personas_path:
     description: >-
       Directory of persona .md files to use INSTEAD of the ones bundled with this action,
-      relative to the checked-out target repo (e.g. ".github/review-agents"). Leave unset to
-      use the bundled personas at this action's own agents/ directory.
+      relative to the target repo (e.g. ".github/review-agents"). Leave unset to use the
+      bundled personas at this action's own agents/ directory. When set, content is resolved
+      from the PR's BASE commit (base-pinned, like REVIEW_RULES.md/DESIGN.md below), never from
+      the checked-out working tree — see DESIGN.md's "Security posture".
     required: false
     default: ""
   rules_file:
@@ -256,7 +263,31 @@ runs:
         if [ -z "$PERSONAS_PATH" ]; then
           PERSONAS_DIR="$ACTION_PATH/agents"
         else
-          PERSONAS_DIR="$GITHUB_WORKSPACE/$PERSONAS_PATH"
+          # personas_path opts a consuming workflow into reading persona content from the
+          # TARGET repo instead of this action's own trusted checkout at $ACTION_PATH — that
+          # puts it in exactly the same PR-controlled-checkout trust boundary as
+          # REVIEW_RULES.md/DESIGN.md above (issue #6's class statement, DESIGN.md's "Security
+          # posture"): a fork PR's own head can edit a file at that path, and the working tree
+          # ($GITHUB_WORKSPACE) at review time IS that fork PR's content. Base-pinned the same
+          # way: resolve each of the five fixed persona names from the PR's BASE commit via
+          # `git show`, into $RUNNER_TEMP, never $GITHUB_WORKSPACE. A persona absent at base
+          # (e.g. only introduced by this PR's own head) is simply not written — build_prompt.sh
+          # already fails loud per-agent on a missing persona file, the same behavior a bundled-
+          # personas install already has for an unsupported agent name.
+          PERSONAS_DIR="$RUNNER_TEMP/pantheon-personas"
+          mkdir -p "$PERSONAS_DIR"
+          any_persona_resolved=false
+          for persona_name in artemis apollo socrates diogenes plato; do
+            if git show "${BASE_SHA}:${PERSONAS_PATH}/${persona_name}.md" > "$PERSONAS_DIR/${persona_name}.md" 2>/dev/null; then
+              any_persona_resolved=true
+            else
+              rm -f "$PERSONAS_DIR/${persona_name}.md"
+            fi
+          done
+          if [ "$any_persona_resolved" != "true" ]; then
+            echo "::error::review-pantheon: personas_path '$PERSONAS_PATH' has no persona file resolvable at the PR's base commit (${BASE_SHA}) — checked for artemis/apollo/socrates/diogenes/plato.md there. A file that exists only on this PR's own head is refused by design (base-pinning) — see DESIGN.md's 'Security posture'. If this is the PR that first adds these files, merge it via another path first, then personas_path will resolve normally on every PR after it."
+            exit 1
+          fi
         fi
         [ -d "$PERSONAS_DIR" ] || { echo "::error::review-pantheon: personas directory not found: $PERSONAS_DIR (check the personas_path input)"; exit 1; }
         echo "personas_dir=$PERSONAS_DIR" >> "$GITHUB_OUTPUT"

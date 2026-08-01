@@ -6,6 +6,14 @@
 # too, so this isn't automatic — see the job `if:` below) to match the CLI lane's draft
 # behavior: no review run, nothing posted.
 #
+# PROVENANCE (issue #6 — see DESIGN.md's "Security posture" for the full class statement and
+# read->provenance matrix): every file below that shapes what the gate DOES, not just its
+# judgment content, is resolved from the PR's BASE commit via `git show` into $RUNNER_TEMP, not
+# read from $GITHUB_WORKSPACE (the PR's own checkout) — the read-only git wrapper, the
+# persona (.md) the agent runs as, and the verdict decider (decide_verdict.py) it's graded by.
+# Only REVIEW_RULES.md/DESIGN.md (judgment CONTENT, not gate behavior) remain a documented
+# exception on this one lane — see DESIGN.md's "Lane differences".
+#
 # PIN NOTE: `anthropics/claude-code-action` is pinned below to v1.0.183's full commit SHA
 # (be7b93b1907a4abad570368f3c74b6fe3807510b — https://github.com/anthropics/claude-code-action/
 # releases/tag/v1.0.183), verified by reading that release's actual action.yml, not assumed:
@@ -119,6 +127,45 @@ jobs:
           chmod +x "$WRAPPER_DEST"
           echo "wrapper_path=$WRAPPER_DEST" >> "$GITHUB_OUTPUT"
 
+      # Issue #6's class-close: the same base-pinning gap the wrapper-resolution step above
+      # closes existed for two more files this workflow reads out of the PR's own checkout — a
+      # fork PR reviewing itself with its own reviewers:
+      #   - Codex P1 (action/review.yml:190 on PR #5): "Decide verdict" ran
+      #     $GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py, the PR's own head copy —
+      #     a fork PR could replace it to run arbitrary Python and emit a fake green verdict
+      #     regardless of what the reviewer actually found.
+      #   - Codex P1 (agents/artemis.md:33 on PR #5): "Build prompt" read
+      #     $GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md, the PR's own head copy —
+      #     a fork PR could rewrite its own reviewing agent's instructions (soften the hunt list,
+      #     tell it to always SHIP, etc.).
+      # Fixed the identical way as the wrapper above: resolve both from the PR's BASE commit via
+      # `git show`, into $RUNNER_TEMP (never the checked-out working tree), and every downstream
+      # step reads the resolved path, not a $GITHUB_WORKSPACE one. Same bootstrap-PR fail-loud
+      # caveat as the wrapper-resolution step above (see its own comment for the full rationale
+      # — falling back to head content "just this once" would reopen exactly what base-pinning
+      # exists to close).
+      - name: Resolve gate scripts (base-pinned)
+        id: resolve-gate-scripts
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          AGENT_NAME: ${{ matrix.agent }}
+        run: |
+          set -euo pipefail
+
+          PERSONA_DEST="$RUNNER_TEMP/${AGENT_NAME}.md"
+          if ! git show "${BASE_SHA}:.github/review-agents/${AGENT_NAME}.md" > "$PERSONA_DEST" 2>/dev/null; then
+            echo "::error::missing .github/review-agents/${AGENT_NAME}.md at base commit ${BASE_SHA}. Two possible causes: (1) install.sh hasn't been run in this repo yet — run it, commit the result, and re-push; or (2) this IS the PR that first runs install.sh and adds this workflow — the persona exists at this PR's head but not yet at base, and base-pinning correctly refuses to read a PR-introduced file from PR content rather than falling back unsafely. For (2): merge this bootstrap PR via another path (manual review, or temporarily unset the REVIEW_GATE_ENABLED repo variable for just this PR) — every PR after it will be gated normally, since the persona will then exist at base."
+            exit 1
+          fi
+          echo "persona_path=$PERSONA_DEST" >> "$GITHUB_OUTPUT"
+
+          DECIDER_DEST="$RUNNER_TEMP/decide_verdict.py"
+          if ! git show "${BASE_SHA}:.github/review-agents/decide_verdict.py" > "$DECIDER_DEST" 2>/dev/null; then
+            echo "::error::missing .github/review-agents/decide_verdict.py at base commit ${BASE_SHA}. Same two possible causes as the persona check above (install.sh not yet run, or this is the bootstrap PR that first adds it) — see that error for the fix."
+            exit 1
+          fi
+          echo "decider_path=$DECIDER_DEST" >> "$GITHUB_OUTPUT"
+
       - name: Detect docs-only diff
         id: docs-check
         env:
@@ -161,11 +208,15 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           REPO_NAME: ${{ github.repository }}
           GIT_WRAPPER_PATH: ${{ steps.resolve-git-wrapper.outputs.wrapper_path }}
+          PERSONA_PATH: ${{ steps.resolve-gate-scripts.outputs.persona_path }}
         run: |
           set -euo pipefail
-          PERSONA="$GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md"
-          if [ ! -f "$PERSONA" ]; then
-            echo "::error::missing $PERSONA — run install.sh (review-pantheon) in this repo first."
+          # Base-pinned (see "Resolve gate scripts (base-pinned)" above) — never
+          # $GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md, the PR's own checked-out
+          # copy (issue #6's class-close).
+          PERSONA="$PERSONA_PATH"
+          if [ -z "$PERSONA" ] || [ ! -f "$PERSONA" ]; then
+            echo "::error::missing base-pinned persona for $AGENT_NAME — the 'Resolve gate scripts (base-pinned)' step didn't produce one; see its own error output above."
             exit 1
           fi
           PROMPT_FILE="$RUNNER_TEMP/${AGENT_NAME}-prompt.md"
@@ -280,11 +331,16 @@ jobs:
         if: always() && (matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true')
         env:
           AGENT_NAME: ${{ matrix.agent }}
+          DECIDER_PATH: ${{ steps.resolve-gate-scripts.outputs.decider_path }}
         run: |
           set -euo pipefail
-          SCRIPT="$GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py"
-          if [ ! -f "$SCRIPT" ]; then
-            echo "::error::missing $SCRIPT — run install.sh (review-pantheon) in this repo first."
+          # Base-pinned (see "Resolve gate scripts (base-pinned)" above) — never
+          # $GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py, the PR's own checked-out
+          # copy (issue #6's class-close: a fork PR could otherwise replace this script to run
+          # arbitrary Python and emit a fake green verdict).
+          SCRIPT="$DECIDER_PATH"
+          if [ -z "$SCRIPT" ] || [ ! -f "$SCRIPT" ]; then
+            echo "::error::missing base-pinned decide_verdict.py — the 'Resolve gate scripts (base-pinned)' step didn't produce one; see its own error output above."
             exit 1
           fi
           python3 "$SCRIPT" "$AGENT_NAME" "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"

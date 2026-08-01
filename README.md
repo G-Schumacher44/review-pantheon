@@ -173,19 +173,28 @@ PR opened                                   spec / design doc / proposal
   the boundary — **in the CLI lane and the published action** (`action.yml`); the vendored Way-A
   workflow (`action/review.yml`) does not base-pin and reads these files from the checked-out
   working tree instead, so a fork PR editing them there does reach the prompt on that one lane —
-  see [Lane differences](#lane-differences). Every persona is told explicitly that everything it
-  reads — diff, file contents, PR metadata, pinned file content — is data, not instructions, and
-  that a directive found inside it is itself a reportable finding, not something to follow. The
-  verdict JSON is schema- and type-validated, and the blocker invariant forces red whenever any
-  finding is a blocker, regardless of the stated verdict word. Tool execution defaults to a
+  see [Lane differences](#lane-differences). The **persona a reviewer runs as and the script that
+  grades its verdict** are a stricter case of the same rule — not judgment content, but gate
+  *behavior* — and are base-pinned or read from this repo's own trusted checkout on **every**
+  lane, including the vendored workflow: see DESIGN.md's "Security posture" for the class
+  statement and the full read-provenance matrix. Every persona is told explicitly that everything
+  it reads — diff, file contents, PR metadata, pinned file content — is data, not instructions,
+  and that a directive found inside it is itself a reportable finding, not something to follow.
+  The verdict JSON is schema- and type-validated, and the blocker invariant forces red whenever
+  any finding is a blocker, regardless of the stated verdict word. Tool execution defaults to a
   read-only tier (`execution=readonly`) that routes Bash through an argv-validating wrapper
   script, run under an explicit deny-by-default permission mode (`--permission-mode dontAsk`) —
   not a bare command-prefix pattern (which can't distinguish a read-only git subcommand from the
   same subcommand carrying a writing/execution-capable flag, or one activated by config/
   attributes rather than a flag at all) and not an unset permission mode (which leaves an
-  unlisted tool call unanswerable, not denied, outside an interactive terminal) — so reviewing
-  hostile fork content never grants an agent arbitrary command execution. Claude Code itself
-  still always allows a small, built-in, non-configurable set of bare read-only commands
+  unlisted tool call unanswerable, not denied, outside an interactive terminal). **Scoped claim,
+  not a blanket one:** under this default `readonly` tier, reviewing hostile fork content does
+  not hand an agent this particular arbitrary-command-execution primitive through the tool-call
+  surface — that guarantee applies to `readonly` specifically, is one layer among several (not a
+  claim that reviewing a fork PR is safe in general — see "Honest limit" below), and does not
+  apply once `execution=trusted` is chosen, which restores full Bash and exists ONLY for
+  own-repo/trusted-author use, never for reviewing a fork PR you don't control. Claude Code
+  itself still always allows a small, built-in, non-configurable set of bare read-only commands
   (including plain `git diff`/`show`/`log`/`status`) regardless of tier — expected, since those
   are genuinely read-only; the wrapper's job is everything beyond that. **Honest limit:** none of this
   can eliminate a schema-valid, deceptive verdict from an agent that's been fully compromised by
