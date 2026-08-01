@@ -46,17 +46,26 @@ you — copy [`gate.conf.example`](../gate.conf.example) yourself.
 | `agents` | `artemis apollo` | Space-separated panel for the standard gate. |
 | `execution` | `readonly` | `readonly` or `trusted` — see below. |
 
-**One key is read differently from the rest, deliberately.** Every key above except `execution`
-is read straight from the target repo's checked-out working tree. `execution=` is read from the
-PR's **base commit** (`git show $BASE_SHA:gate.conf`) instead — never the working tree — because
-a maintainer who runs `gh pr checkout <n>` before invoking `review-gate` (a common local-review
-habit) would otherwise have a hostile PR's own `execution=trusted` silently restore full Bash
-before the gate inspects anything. This is the CLI-lane instance of the same base-pinned-provenance
-rule DESIGN.md's security posture applies to personas, the verdict decider, and the read-only
-wrapper itself — see DESIGN.md's ["Security
+**One key is read differently from the rest, deliberately — and one more probably should be.**
+Every key above except `execution` is read straight from the target repo's checked-out working
+tree. `execution=` is read from the PR's **base commit** (`git show $BASE_SHA:gate.conf`)
+instead — never the working tree — because a maintainer who runs `gh pr checkout <n>` before
+invoking `review-gate` (a common local-review habit) would otherwise have a hostile PR's own
+`execution=trusted` silently restore full Bash before the gate inspects anything. This is the
+CLI-lane instance of the same base-pinned-provenance rule DESIGN.md's security posture applies to
+personas, the verdict decider, and the read-only wrapper itself — see DESIGN.md's ["Security
 posture"](../DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design) for the full
-read-provenance matrix and why the other `gate.conf` keys don't need the same treatment (they
-don't control tool-execution breadth).
+read-provenance matrix.
+
+**`model`/`base_branch`/`rules_file`/`spec_file`/`agents` genuinely don't need the same
+treatment — `provider` is a different story.** `review-gate` validates `provider` only by
+checking that `$PROVIDERS_DIR/$PROVIDER.sh` exists, then unconditionally `source`s it — no
+character-class or enumeration check the way `--agents` gets one. A working-tree-sourced
+`provider=` value under the same `gh pr checkout` scenario `execution=` is base-pinned against
+could, in principle, be crafted to source an attacker-controlled file. **Tracked as
+[issue #13](https://github.com/G-Schumacher44/review-pantheon/issues/13) — not fixed as of this
+writing.** Until it lands, treat `provider=` in a hostile PR's `gate.conf` with the same suspicion
+as `execution=`.
 
 ## Execution tiers: readonly vs trusted
 
@@ -114,8 +123,16 @@ reviewing untrusted content is the whole reason `readonly` exists.
 
 ## The state / follow-up model
 
-`.review-gate-state.json` lives at the target repo's root (git-ignored, bootstraps itself to
-`{}` on first run). Shape: `{"<pr-number>": {"reviewed_sha": "<sha>"}}`.
+`.review-gate-state.json` lives at the target repo's root, bootstraps itself to `{}` on first
+run. Shape: `{"<pr-number>": {"reviewed_sha": "<sha>"}}`.
+
+**"Git-ignored" is a Way-A (`install.sh`) claim, not a universal one.** Only `install.sh` appends
+`.review-gate-state.json` to the target repo's `.gitignore` for you. Running `review-gate`
+straight from a review-pantheon checkout, or via a `bootstrap.sh` (Way B) install, adds no
+`.gitignore` entry to the target repo at all — including on the very first run, which can be a
+`--dry-run`. If you're on the CLI-only path (no `install.sh`), add
+`.review-gate-state.json` to your target repo's `.gitignore` yourself before your first run, or
+the file will sit untracked-but-visible and can get accidentally `git add -A`'d into a commit.
 
 - **Same head SHA already recorded** → the run is a no-op: a note to stderr, exit 0, nothing
   posted.
