@@ -87,9 +87,12 @@ row. "PY" column names the exact mechanism in this module that closes it.
 
   Every row's "PY" column boils down to one structural fact: ``_forced_env()`` builds the
   subprocess environment as a **new dict containing only the keys this module explicitly sets**
-  (PATH and HOME are the sole two ambient values carried forward — git cannot resolve its own
-  helpers or read global config without them, and neither names an executable or write target an
-  attacker controls). Nothing from ``os.environ`` is passed through implicitly. Bash's
+  — PATH is pinned to :data:`TRUSTED_GIT_DIRS` and HOME is pinned via :func:`_real_home_dir`
+  (the passwd-database account home, never the ambient ``HOME`` env var — a Codex finding fixed
+  this after an earlier version of this comment called HOME a safely-forwardable ambient value;
+  it isn't, once a launcher environment can set it, the same class of hijack
+  :func:`_default_user_scripts_dir` was independently fixed for). Nothing from ``os.environ`` is
+  passed through implicitly, PATH and HOME included. Bash's
   ``unset FOO`` and Python's "never put FOO in the dict" are the same closure; the Python version
   additionally closes any FUTURE trace/redirect/config-injection variable git's docs might add
   later, since the default posture is "absent unless this module put it there", not "present
@@ -114,6 +117,11 @@ import subprocess
 import sys
 import sysconfig
 from collections.abc import Sequence
+
+try:
+    import pwd  # POSIX only — absent on Windows, guarded below, never assumed present.
+except ImportError:  # pragma: no cover — no Windows CI leg in this port's own test matrix.
+    pwd = None  # type: ignore[assignment]
 
 __all__ = [
     "WrapperRefused",
@@ -208,10 +216,18 @@ def _forced_env() -> dict[str, str]:
     spawn should never be able to fall back to inheriting one of these from further up an
     ambient parent chain either. Absent-by-omission and explicitly-cleared read the same to a
     child that just reads its own environ, but this way the guarantee doesn't depend on every
-    future maintainer remembering to keep these off the allowlist."""
+    future maintainer remembering to keep these off the allowlist.
+
+    ``HOME`` is pinned via :func:`_real_home_dir` (the passwd-database account home), never the
+    ambient ``os.environ.get("HOME")`` — a second-round Codex finding on this same PR, same
+    "never trust an env-derived HOME" principle :func:`_default_user_scripts_dir` was fixed for:
+    forwarding a hijacked ambient ``HOME`` into this constructed env would let a hostile
+    launcher point git's own config resolution at an attacker-controlled ``~/.gitconfig``, the
+    identical class of injection this module's ``GLOBAL_OVERRIDES``/forced-env posture exists to
+    close everywhere else."""
     env: dict[str, str] = {}
     env["PATH"] = os.pathsep.join(TRUSTED_GIT_DIRS)
-    home = os.environ.get("HOME")
+    home = _real_home_dir()
     if home:
         env["HOME"] = home
     env["GIT_PAGER"] = "cat"
@@ -424,15 +440,46 @@ def execution_context_note(tier: str, wrapper_path: str) -> str:
     )
 
 
+def _real_home_dir() -> str | None:
+    """The REAL account home directory for the process's current UID, resolved via the POSIX
+    passwd database (``pwd.getpwuid(os.getuid()).pw_dir``) — NEVER via
+    ``os.path.expanduser("~")`` or any other mechanism that reads the ``HOME`` environment
+    variable. Codex review finding on this port's own PR (a second round on issue #21 P1's own
+    fix, live in the same file): ``os.path.expanduser("~")`` on POSIX reads ``HOME`` FIRST,
+    falling back to the passwd database only when ``HOME`` is unset — a launcher environment
+    that can set ``HOME`` (a repo-local ``.envrc``/environment loader is the disclosed vector,
+    but any mechanism that lets a hostile checkout influence the parent process's environment
+    before this CLI runs qualifies) could point it AT a directory inside that same hostile
+    checkout, letting a PR-committed ``<hijacked-HOME>/.local/bin/pantheon-git-readonly`` be
+    resolved by :func:`_default_user_scripts_dir` below and then trusted as the SOLE allowed
+    Bash-tool prefix for the readonly execution tier — recreating exactly the class of hole the
+    already-removed ``PYTHONUSERBASE`` lookup was closed for, just one environment variable over.
+    ``pwd.getpwuid(os.getuid()).pw_dir`` is a kernel/system-level fact about the CURRENT
+    PROCESS's real UID — it is not read from, and cannot be redirected by, any environment
+    variable, matching :data:`TRUSTED_GIT_DIRS`'s own "fixed, not attacker-redirectable" posture.
+    Also used by :func:`_forced_env` to pin the ``HOME`` this module's own git subprocess calls
+    receive, for the identical reason — never the ambient (potentially hijacked) ``HOME``.
+
+    Returns ``None`` (never raises, never falls back to ``os.path.expanduser``) when this lookup
+    itself fails — no ``pwd`` module (Windows), or no passwd entry for this UID (some minimal/
+    scratch container users) — rather than silently degrading to a weaker resolution."""
+    if pwd is None:
+        return None
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, OSError):
+        return None
+
+
 def _default_user_scripts_dir() -> str | None:
     """Computes the DEFAULT ``pip install --user`` console-script directory (issue #21 P1,
     docs/PYTHON-PORT.md §5's "no config knob to widen this list" posture applied to the
-    ``--user`` layout) — WITHOUT reading ``PYTHONUSERBASE`` (or any other environment variable
-    naming a filesystem location) to compute it. This is Python's own DEFAULT per-user base
-    formula, replicated by hand from a value this process cannot have redirected:
-    ``os.path.expanduser("~")`` (HOME — already trusted elsewhere in this module, see
-    :func:`_forced_env`'s own comment: "PATH and HOME are the sole two ambient values carried
-    forward... neither names an executable or write target an attacker controls").
+    ``--user`` layout) — WITHOUT reading ``PYTHONUSERBASE``, ``HOME``, or any other environment
+    variable naming a filesystem location, to compute it. This is Python's own DEFAULT per-user
+    base formula, replicated by hand from a value this process cannot have redirected:
+    :func:`_real_home_dir` (the passwd-database account home — see that function's own docstring
+    for why ``os.path.expanduser("~")``/``HOME`` are never trusted for this, a second-round
+    Codex finding on this same fix).
 
     History: an EARLIER version of :func:`resolve_console_script` consulted
     ``sysconfig.get_path("scripts", scheme=f"{os.name}_user")`` directly to support
@@ -447,7 +494,9 @@ def _default_user_scripts_dir() -> str | None:
     make real. This function closes that the same way :data:`TRUSTED_GIT_DIRS` closes the
     analogous git-lookup problem: compute the trusted location from a FIXED formula the
     environment cannot move, rather than either trusting an attacker-influenced env var or
-    silently degrading to a weaker code path.
+    silently degrading to a weaker code path. The FIRST version of this fix used
+    ``os.path.expanduser("~")`` for the "fixed formula" — itself still HOME-env-influenced, a
+    second Codex finding on this same PR; :func:`_real_home_dir` closes that too.
 
     ``sysconfig.get_config_var("PYTHONFRAMEWORK")`` (used below to detect a macOS
     python.org/Apple framework build, whose per-user base is ``~/Library/Python/X.Y`` instead of
@@ -457,13 +506,13 @@ def _default_user_scripts_dir() -> str | None:
     by tests/test_execution.py's ``test_never_consults_sysconfig_get_path`` fixture, which patches
     ``sysconfig.get_path`` — not ``get_config_var`` — to fail loud if ever called).
 
-    Returns ``None`` on a platform this port does not special-case (Windows; or POSIX with no
-    resolvable ``HOME``) — :func:`resolve_console_script`'s adjacent-only check is the only
-    lookup performed in that case, same as before this fix."""
+    Returns ``None`` on a platform/account shape this port does not special-case (Windows; or a
+    UID with no resolvable passwd-database home) — :func:`resolve_console_script`'s
+    adjacent-only check is the only lookup performed in that case, same as before this fix."""
     if os.name != "posix":
         return None
-    home = os.path.expanduser("~")
-    if not home or home == "~":
+    home = _real_home_dir()
+    if not home:
         return None
     if sys.platform == "darwin" and sysconfig.get_config_var("PYTHONFRAMEWORK"):
         return os.path.join(home, "Library", "Python", f"{sys.version_info.major}.{sys.version_info.minor}")

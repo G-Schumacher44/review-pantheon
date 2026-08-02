@@ -226,6 +226,26 @@ else
   fail "--version $TAG: installed review-gate compat shim failed or is missing its deprecation note (status=$pantheon_review_gate_status): $pantheon_review_gate_out"
 fi
 
+# Persona resolution from the REAL, non-editable venv install -- a Codex review finding on this
+# port's own PR: `pip install "$SRC_ROOT"` (this bootstrap.sh step, non-editable) packages only
+# `pantheon*` unless pyproject.toml's package-data mapping carries agents/*.md along too, and
+# pantheon.cli._agents_dir() resolved agents/ as a SIBLING of its own installed location on
+# disk -- true for a dev checkout, never for a real site-packages install. Without the fix,
+# --help still exits 0 (it never touches personas) but every real `pantheon gate` run would fail
+# at prompt construction with "no persona file". Run from $NEUTRAL_DIR (no source checkout
+# anywhere nearby) to prove the installed copy is genuinely self-contained.
+pantheon_agents_out="$(cd "$NEUTRAL_DIR" && "$PREFIX_OK/venv/bin/python3" -c "
+from pantheon import cli
+d = cli._agents_dir()
+print(d)
+print((d / 'artemis.md').is_file())
+" 2>&1)"
+if grep -q "^True$" <<<"$pantheon_agents_out" && grep -qF "$PREFIX_OK/venv" <<<"$pantheon_agents_out"; then
+  pass "--version $TAG: installed pantheon package resolves agents/artemis.md from its own site-packages (no source checkout needed)"
+else
+  fail "--version $TAG: installed pantheon package could NOT resolve agents/artemis.md from the venv install: $pantheon_agents_out"
+fi
+
 # ---------------------------------------------------------------------------
 # Mismatch path, end to end — same fetch, but SHA256SUMS is wrong. Must refuse before
 # extraction: bootstrap.sh exits nonzero and --prefix is never created/populated.
