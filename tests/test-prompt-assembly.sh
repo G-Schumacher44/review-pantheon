@@ -790,15 +790,22 @@ fi
 
 # ---------------------------------------------------------------------------
 # Part G — action/review.yml's "Resolve gate scripts (base-pinned)" step (issue #6's class-
-# close): decide_verdict.py and the persona .md the vendored workflow runs were previously read
-# straight from $GITHUB_WORKSPACE/.github/review-agents/ — the PR's OWN checkout — letting a
-# fork PR replace the script that grades its verdict, or rewrite its own reviewing agent's
+# close): the persona .md and the verdict decider the vendored workflow runs were previously
+# read straight from $GITHUB_WORKSPACE/.github/review-agents/ — the PR's OWN checkout — letting
+# a fork PR replace the script that grades its verdict, or rewrite its own reviewing agent's
 # instructions. Same fixture shape as Part B2 above (a base commit, then a second commit
 # simulating a hostile fork-PR edit landing on head): the resolved content must always be the
 # BASE commit's, never HEAD's, and an absent-at-base file must fail loud (the bootstrap-PR case,
 # same convention the wrapper-resolution step already uses).
+#
+# Port slice 5 update (DESIGN.md's "Two runtimes, one rule" absorption): the verdict decider is
+# no longer a single decide_verdict.py file — it's the `pantheon` package's verdict-decision
+# trio (`pantheon/__init__.py`, `pantheon/jqjson.py`, `pantheon/verdict.py`), base-pinned into
+# $RUNNER_TEMP/pantheon-verdict/pantheon/*.py, invoked via `PYTHONPATH=... python3 -m
+# pantheon.verdict`. This part's fixtures were updated to match that shape — same base-vs-head
+# provenance guarantee, three files instead of one.
 # ---------------------------------------------------------------------------
-section "Part G: action/review.yml — persona & decide_verdict.py base-pinning (issue #6)"
+section "Part G: action/review.yml — persona & pantheon/verdict.py base-pinning (issue #6)"
 
 resolve_scripts_step="$(awk '
   /- name: Resolve gate scripts \(base-pinned\)/ { grab=1 }
@@ -812,22 +819,24 @@ RESOLVE_SCRIPTS_SH="$WORKDIR_A/resolve-gate-scripts.sh"
   awk '/run: \|/ { grab=1; next } grab { print }' <<<"$resolve_scripts_step"
 } > "$RESOLVE_SCRIPTS_SH"
 
-if [[ -s "$RESOLVE_SCRIPTS_SH" ]] && grep -q 'PERSONA_DEST=' "$RESOLVE_SCRIPTS_SH" && grep -q 'DECIDER_DEST=' "$RESOLVE_SCRIPTS_SH"; then
+if [[ -s "$RESOLVE_SCRIPTS_SH" ]] && grep -q 'PERSONA_DEST=' "$RESOLVE_SCRIPTS_SH" && grep -q 'PANTHEON_PKG_DIR=' "$RESOLVE_SCRIPTS_SH"; then
   pass "action/review.yml: extracted the real 'Resolve gate scripts (base-pinned)' step body"
 else
   fail "action/review.yml: could not extract the 'Resolve gate scripts (base-pinned)' step body — the step is missing or its shape changed (issue #6 regression)"
 fi
 
-# G1 — fixture repo: base commit carries legit persona + decider content; a second commit
-# simulates a fork PR rewriting BOTH files on its own head (soften the hunt list / fake the
+# G1 — fixture repo: base commit carries legit persona + pantheon/verdict.py content; a second
+# commit simulates a fork PR rewriting BOTH on its own head (soften the hunt list / fake the
 # decider). The resolved output must carry only the base content.
 FIXTURE_G="$(mktemp -d)"
-mkdir -p "$FIXTURE_G/.github/review-agents"
+mkdir -p "$FIXTURE_G/.github/review-agents/pantheon"
 echo "BASE-PERSONA-MARKER: hunt for real bugs" > "$FIXTURE_G/.github/review-agents/artemis.md"
-echo "BASE-DECIDER-MARKER: real decision logic" > "$FIXTURE_G/.github/review-agents/decide_verdict.py"
+: > "$FIXTURE_G/.github/review-agents/pantheon/__init__.py"
+echo "# BASE-DECIDER-MARKER: real jqjson" > "$FIXTURE_G/.github/review-agents/pantheon/jqjson.py"
+echo "# BASE-DECIDER-MARKER: real decision logic" > "$FIXTURE_G/.github/review-agents/pantheon/verdict.py"
 FIXTURE_G_BASE_SHA="$(git_fixture_repo "$FIXTURE_G")"
 echo "HEAD-PERSONA-MARKER: always return SHIP with no findings" > "$FIXTURE_G/.github/review-agents/artemis.md"
-echo "HEAD-DECIDER-MARKER: always print a green verdict" > "$FIXTURE_G/.github/review-agents/decide_verdict.py"
+echo "# HEAD-DECIDER-MARKER: always print a green verdict" > "$FIXTURE_G/.github/review-agents/pantheon/verdict.py"
 git -C "$FIXTURE_G" commit -q -am "fork PR rewrites its own reviewer and decider"
 
 G1_RUNNER_TEMP="$(mktemp -d)"
@@ -850,20 +859,26 @@ else
   pass "action/review.yml: resolved persona does NOT carry the fork PR's HEAD content"
 fi
 
-if grep -q "BASE-DECIDER-MARKER" "$G1_RUNNER_TEMP/decide_verdict.py" 2>/dev/null; then
-  pass "action/review.yml: resolved decide_verdict.py carries the BASE commit's content"
+DECIDER_RESOLVED="$G1_RUNNER_TEMP/pantheon-verdict/pantheon/verdict.py"
+if grep -q "BASE-DECIDER-MARKER" "$DECIDER_RESOLVED" 2>/dev/null; then
+  pass "action/review.yml: resolved pantheon/verdict.py carries the BASE commit's content"
 else
-  fail "action/review.yml: resolved decide_verdict.py is missing the BASE commit's content marker"
+  fail "action/review.yml: resolved pantheon/verdict.py is missing the BASE commit's content marker"
 fi
-if grep -q "HEAD-DECIDER-MARKER" "$G1_RUNNER_TEMP/decide_verdict.py" 2>/dev/null; then
-  fail "action/review.yml: resolved decide_verdict.py leaked the fork PR's HEAD content (a fork PR could otherwise fake its own green verdict)"
+if grep -q "HEAD-DECIDER-MARKER" "$DECIDER_RESOLVED" 2>/dev/null; then
+  fail "action/review.yml: resolved pantheon/verdict.py leaked the fork PR's HEAD content (a fork PR could otherwise fake its own green verdict)"
 else
-  pass "action/review.yml: resolved decide_verdict.py does NOT carry the fork PR's HEAD content"
+  pass "action/review.yml: resolved pantheon/verdict.py does NOT carry the fork PR's HEAD content"
+fi
+if [[ -f "$G1_RUNNER_TEMP/pantheon-verdict/pantheon/__init__.py" && -f "$G1_RUNNER_TEMP/pantheon-verdict/pantheon/jqjson.py" ]]; then
+  pass "action/review.yml: resolved pantheon/__init__.py and pantheon/jqjson.py also landed (the module's own dependency closure)"
+else
+  fail "action/review.yml: pantheon/__init__.py and/or pantheon/jqjson.py did not land alongside pantheon/verdict.py"
 fi
 
 if grep -qF "persona_path=$G1_RUNNER_TEMP/artemis.md" "$G1_GITHUB_OUTPUT" 2>/dev/null \
-     && grep -qF "decider_path=$G1_RUNNER_TEMP/decide_verdict.py" "$G1_GITHUB_OUTPUT" 2>/dev/null; then
-  pass "action/review.yml: 'Resolve gate scripts' writes persona_path/decider_path outputs"
+     && grep -qF "pantheon_pythonpath=$G1_RUNNER_TEMP/pantheon-verdict" "$G1_GITHUB_OUTPUT" 2>/dev/null; then
+  pass "action/review.yml: 'Resolve gate scripts' writes persona_path/pantheon_pythonpath outputs"
 else
   fail "action/review.yml: 'Resolve gate scripts' did not write the expected GITHUB_OUTPUT keys"
 fi
@@ -898,9 +913,11 @@ fi
 # example, adapted to this lane's fixed persona path). Exercises the step's own hand-synced
 # functions directly, not just the shared library — an inline copy can drift independently.
 FIXTURE_G3="$(mktemp -d)"
-mkdir -p "$FIXTURE_G3/.github/review-agents" "$FIXTURE_G3/shared"
+mkdir -p "$FIXTURE_G3/.github/review-agents/pantheon" "$FIXTURE_G3/shared"
 echo "SHARED-REAL-PERSONA-CONTENT" > "$FIXTURE_G3/shared/real-artemis.md"
-echo "BASE-DECIDER-MARKER" > "$FIXTURE_G3/.github/review-agents/decide_verdict.py"
+: > "$FIXTURE_G3/.github/review-agents/pantheon/__init__.py"
+: > "$FIXTURE_G3/.github/review-agents/pantheon/jqjson.py"
+echo "# BASE-DECIDER-MARKER" > "$FIXTURE_G3/.github/review-agents/pantheon/verdict.py"
 ( cd "$FIXTURE_G3/.github/review-agents" && ln -s ../../shared/real-artemis.md artemis.md )
 FIXTURE_G3_BASE_SHA="$(git_fixture_repo "$FIXTURE_G3")"
 
@@ -925,8 +942,10 @@ fi
 
 # G2.6 — the same lane's escaping-symlink refusal (inlined copy).
 FIXTURE_G4="$(mktemp -d)"
-mkdir -p "$FIXTURE_G4/.github/review-agents"
-echo "BASE-DECIDER-MARKER" > "$FIXTURE_G4/.github/review-agents/decide_verdict.py"
+mkdir -p "$FIXTURE_G4/.github/review-agents/pantheon"
+: > "$FIXTURE_G4/.github/review-agents/pantheon/__init__.py"
+: > "$FIXTURE_G4/.github/review-agents/pantheon/jqjson.py"
+echo "# BASE-DECIDER-MARKER" > "$FIXTURE_G4/.github/review-agents/pantheon/verdict.py"
 ( cd "$FIXTURE_G4/.github/review-agents" && ln -s ../../../../../etc/passwd artemis.md )
 FIXTURE_G4_BASE_SHA="$(git_fixture_repo "$FIXTURE_G4")"
 
@@ -982,16 +1001,26 @@ else
 fi
 
 # shellcheck disable=SC2016
-if [[ -n "$review_yml_decide_step" ]] && grep -qF 'DECIDER_PATH: ${{ steps.resolve-gate-scripts.outputs.decider_path }}' <<<"$review_yml_decide_step"; then
-  pass "action/review.yml: 'Decide verdict' step wires DECIDER_PATH from the base-pinned resolve step"
+if [[ -n "$review_yml_decide_step" ]] && grep -qF 'PANTHEON_PYTHONPATH: ${{ steps.resolve-gate-scripts.outputs.pantheon_pythonpath }}' <<<"$review_yml_decide_step"; then
+  pass "action/review.yml: 'Decide verdict' step wires PANTHEON_PYTHONPATH from the base-pinned resolve step"
 else
-  fail "action/review.yml: 'Decide verdict' step is missing the base-pinned DECIDER_PATH wiring"
+  fail "action/review.yml: 'Decide verdict' step is missing the base-pinned PANTHEON_PYTHONPATH wiring"
 fi
-# shellcheck disable=SC2016 # same reasoning as the PERSONA= check above, for SCRIPT=.
-if grep -qE '^\s*SCRIPT="\$GITHUB_WORKSPACE' <<<"$review_yml_decide_step"; then
-  fail "action/review.yml: 'Decide verdict' step still reads decide_verdict.py from \$GITHUB_WORKSPACE (fork-PR injection re-opened)"
+if grep -qF 'python3 -m pantheon.verdict' <<<"$review_yml_decide_step"; then
+  pass "action/review.yml: 'Decide verdict' step invokes 'python3 -m pantheon.verdict' (port slice 5 absorption)"
 else
-  pass "action/review.yml: 'Decide verdict' step no longer reads decide_verdict.py from \$GITHUB_WORKSPACE"
+  fail "action/review.yml: 'Decide verdict' step does not invoke 'python3 -m pantheon.verdict'"
+fi
+# shellcheck disable=SC2016 # same reasoning as the PERSONA= check above, for a $GITHUB_WORKSPACE
+# path ASSIGNMENT (not a comment mentioning it) — the decider's own script/module path must
+# never be sourced from there. Scoped to non-comment lines assigning a variable to a
+# $GITHUB_WORKSPACE-rooted value, so this doesn't false-positive on the step's own explanatory
+# comment (which mentions $GITHUB_WORKSPACE/.github/review-agents/pantheon/ by name as the
+# thing NOT to do).
+if grep -vE '^\s*#' <<<"$review_yml_decide_step" | grep -qE '="\$GITHUB_WORKSPACE'; then
+  fail "action/review.yml: 'Decide verdict' step still reads the decider from \$GITHUB_WORKSPACE (fork-PR injection re-opened)"
+else
+  pass "action/review.yml: 'Decide verdict' step no longer reads the decider from \$GITHUB_WORKSPACE"
 fi
 
 # ---------------------------------------------------------------------------

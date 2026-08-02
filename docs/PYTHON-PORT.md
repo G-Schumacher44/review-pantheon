@@ -315,25 +315,91 @@ green against the Python binary, per §4's table — not "code merged," not "loo
   [DESIGN.md](../DESIGN.md) rule 5 ("docs match code") re-verified as part of this slice's own
   closing check, not assumed.
 
+### Slice 5 status — complete through this slice, with one disclosed deviation
+
+**Shipped this slice:**
+- `pyproject.toml` is real: static version (`0.0.0.dev0`, still Pre-Alpha), console scripts
+  (`pantheon`, `review-gate`, `pantheon-git-readonly`) all install and run from a real
+  `pipx`/`pip install`. `RELEASING.md` gained a "bump version to match the tag before tagging"
+  ceremony step; `.github/workflows/release.yml`'s `test` job gained a tag-vs-`pyproject.toml`
+  version gate (fail loud on mismatch) plus the same ruff/mypy/pytest quality gates and
+  Python-port fixture suites `ci.yml`'s `lint-and-test` job already ran (a pre-existing drift
+  between the two workflows, closed as part of this work, not a new requirement). The release
+  tarball manifest gained `pantheon/` and `pyproject.toml` (`skills/` was already present from an
+  earlier slice).
+- `bootstrap.sh` installs the `pantheon` package into a venv under `--prefix` (`pip install` from
+  the fetched/local tree) — see §8's own updated section for why a venv, not `--user`.
+- Issue #21's P1 (wrapper-adjacency resolution for non-adjacent console-script layouts, e.g.
+  `pip install --user`) and P2 (dangling-symlink refusal in `pantheon.state`'s bootstrap) are
+  both closed, with fixtures proven failing pre-fix.
+- The verdict-decision rule is absorbed: `pantheon.verdict` is now the ONE implementation, called
+  by `pantheon gate` (the CLI), `action.yml`'s five per-agent decide steps (via
+  `PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict`), and the vendored
+  `action/review.yml`'s own decide step (via a base-pinned copy of `pantheon/__init__.py` +
+  `pantheon/jqjson.py` + `pantheon/verdict.py`, the module's own dependency closure).
+
+**Disclosed deviation from this section's original plan, above:** the exit bar as originally
+written called for `cli/review-gate`, `cli/lib/*.sh`, `cli/providers/*.sh`, the `review-gate`
+Python compat shim, and `action/decide_verdict.py` to all be REMOVED this slice. They are not —
+they're kept, unchanged, for **one more release**, each with a deprecation banner/header pointing
+at `pantheon gate` and this section. This is a deliberate, operator-directed softening of the
+original hard-cutover plan, not an oversight: a same-PR "absorb the verdict rule AND delete every
+file that used to carry it" would leave zero rollback window for anything still invoking the bash
+`review-gate` binary or the standalone `decide_verdict.py` script directly. The actual removal —
+`cli/review-gate`, `cli/lib/*.sh`, `cli/providers/*.sh`, `pantheon.reviewgate_shim`, and
+`action/decide_verdict.py`, all deleted, zero bash CLI surface remaining — is now tracked as the
+first work item of the NEXT release after this one, not a further slice of this port. Until then:
+- `pantheon` is documented everywhere ([README.md](../README.md), [CLI.md](CLI.md),
+  [SETUP.md](SETUP.md), [DESIGN.md](../DESIGN.md)) as the current, canonical CLI.
+- `cli/review-gate` and `action/decide_verdict.py` each carry a header comment stating they are
+  deprecated, why they still exist, and when they're removed.
+- `tests/test-verdict-decision.sh` (bash-internal, sources `cli/lib/verdict.sh` and execs
+  `action/decide_verdict.py`) still passes unchanged — `cli/lib/verdict.sh` is still a real,
+  independent implementation while bash lives, and `action/decide_verdict.py` is now a thin shim
+  delegating to `pantheon.verdict`, proven byte-identical against the same fixture set.
+- **Not attempted this slice, tracked as a genuine follow-up, not silently dropped:** the
+  combined-comment RENDERER (`cli/lib/render_comment.sh` / `action/lib/combine_verdicts.sh` /
+  `action/review.yml`'s own inline comment-build step) is NOT absorbed into `pantheon.render` at
+  any of its three call sites — DESIGN.md's "Two runtimes, one rule" section explains the current
+  state and what's left. `pantheon.render` itself has been ported (Slice 2) and is fully tested;
+  only the Action-lane call sites' switchover is outstanding.
+
 ## 8. `bootstrap.sh` stays bash
 
 `bootstrap.sh` remains a single self-contained bash script — the single-file `curl|bash` install
 constraint is real and doesn't change: a Python bootstrapper would itself need to bootstrap a
 Python interpreter and package manager before it could install anything, which defeats the point
-of a zero-dependency one-liner install. It learns to install the `pantheon` package at Slice 5
-(pip/pipx into its prefix, replacing today's vendor-`cli/lib`-and-`cli/providers`-into-a-prefix
-step). `test-bootstrap-release.sh` (unit-level, sources `bootstrap.sh` directly) is entirely
-unaffected by this port — see §4's row for why. `test-bootstrap-release-e2e.sh` needs its
-Slice-5 update once the install step's shape actually changes.
+of a zero-dependency one-liner install. **Shipped this slice:** it installs the `pantheon`
+package into a venv UNDER `--prefix` (`python3 -m venv "$PREFIX/venv" && "$PREFIX/venv/bin/pip"
+install "$SRC_ROOT"`) — deliberately a venv, not `pip install --user`, for three reasons: (1) it
+respects `--prefix` (`--user` writes to a fixed, prefix-independent location, breaking the "one
+directory, point PATH at it, `rm -rf` to uninstall" contract this script's whole design rests
+on); (2) it stays zero-interactive and single-file bash (`venv`/`pip install` are both plain
+non-interactive subprocess calls, no new helper file); (3) isolation from whatever else is
+already on the machine's `--user` site. The console scripts this produces
+(`$PREFIX/venv/bin/pantheon`) resolve correctly via `pantheon.execution.resolve_console_script`'s
+FIRST check (adjacent to that venv's own `sys.executable`) — issue #21 P1's fix (this section's
+own SECOND check, the `--user`-layout one) matters for installs that bypass `bootstrap.sh`
+entirely (a bare `pip install --user pantheon` run by hand), not for this script's own output.
+The vendored bash CLI (`cli/review-gate`, `cli/lib/*.sh`, `cli/providers/*.sh`) is still
+installed too, unchanged, for the one-release deprecation window (see the Slice-5 status section
+above). `test-bootstrap-release.sh` (unit-level, sources `bootstrap.sh` directly) is entirely
+unaffected by this port — see §4's row for why. `test-bootstrap-release-e2e.sh` was updated for
+the new install step's shape (asserts the venv, its console scripts, and a real `pantheon --help`
+run against the installed prefix, alongside the still-unchanged bash-CLI assertions).
 
 ## 9. Open items (not resolved by this spec)
 
-- **`install.sh`'s own fate.** Way A vendors personas, `action/review.yml`, `decide_verdict.py`,
-  and `cli/lib/pantheon-git-readonly.sh` into a target repo for the Action lane
-  ([DESIGN.md](../DESIGN.md)'s "Layout" section). None of the six operator-decided constraints
-  above address what `install.sh` does once the files it vendors move into a Python package —
-  that's a follow-up decision, needed before Slice 5 can retire the files it currently vendors,
-  not assumed or pre-decided here.
+- **`install.sh`'s own fate — resolved this slice, for the verdict decider only.** Way A now
+  ALSO vendors `pantheon/__init__.py`, `pantheon/jqjson.py`, and `pantheon/verdict.py` into
+  `.github/review-agents/pantheon/` (the module's own dependency closure — the three files
+  `action/review.yml`'s base-pinned "Resolve gate scripts" step needs to run
+  `PYTHONPATH=... python3 -m pantheon.verdict`), alongside its still-unchanged vendoring of
+  personas, `action/review.yml`, the deprecated `decide_verdict.py` compat shim, and
+  `cli/lib/pantheon-git-readonly.sh` ([DESIGN.md](../DESIGN.md)'s "Layout"/"Published action"
+  sections). **Not yet resolved:** what `install.sh` does once the RENDERER (not just the
+  decider) also moves into the package — that's still open, tracked in the same follow-up as
+  the renderer absorption noted in the Slice-5 status section above.
 - **Provider lanes beyond Claude have no dedicated fixture suite today.** `codex.sh`, `gemini.sh`,
   and `cursor.sh` are "best-effort" per [DESIGN.md](../DESIGN.md) and CLI.md, and there is no
   `test-providers.sh` in the current 13-suite list exercising any of the four lanes' `provider_run`

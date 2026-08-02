@@ -5,16 +5,22 @@
 # one that already landed). Two jobs:
 #
 #   1. test    — the SAME suite ci.yml's `lint-and-test` job runs (bash -n, shellcheck,
-#                py_compile, YAML-parse, all seven fixture suites), re-run at the tagged commit
-#                as the release gate. A release built from a commit that fails this suite is
-#                worse than no release, so this job blocking `build-and-publish` (via `needs:`)
-#                is the whole point — deliberately NOT the full ci.yml (no Docker setup-smoke,
-#                no composite-action-self-check) since those need a Docker daemon / PR context
-#                this tag-push trigger doesn't have; the fixture+lint suite below is the part of
-#                ci.yml that's meaningful to re-run against an arbitrary tagged commit. Its first
-#                two steps gate everything else: the tag must be a strict semver AND its commit
-#                must be reachable from origin/main (i.e. RELEASING.md's dev->main promotion
-#                ceremony was actually followed, not a stray tag cut from dev or elsewhere).
+#                py_compile, YAML-parse, every fixture suite including the Python-port ones, the
+#                pantheon package's own pip install + ruff/mypy/pytest quality gates), re-run at
+#                the tagged commit as the release gate. A release built from a commit that fails
+#                this suite is worse than no release, so this job blocking `build-and-publish`
+#                (via `needs:`) is the whole point — deliberately NOT the full ci.yml (no Docker
+#                setup-smoke, no composite-action-self-check) since those need a Docker daemon /
+#                PR context this tag-push trigger doesn't have; the fixture+lint+quality-gate
+#                suite below is the part of ci.yml that's meaningful to re-run against an
+#                arbitrary tagged commit. Its first three steps gate everything else: the tag
+#                must be a strict semver, its commit must be reachable from origin/main (i.e.
+#                RELEASING.md's dev->main promotion ceremony was actually followed, not a stray
+#                tag cut from dev or elsewhere), AND the tag must match pyproject.toml's own
+#                `version` field (RELEASING.md's "bump version to match the tag before tagging"
+#                ceremony step, port slice 5 — fail loud on mismatch rather than publish a
+#                tarball/wheel whose own `pantheon --version`-adjacent metadata disagrees with the
+#                tag it shipped under).
 #   2. build-and-publish — stages the CLI surface (explicit file list, no globs — see the step
 #                below for why), tars it as review-pantheon-<tag>.tar.gz, generates SHA256SUMS,
 #                and creates the GitHub Release with `gh release create`, notes auto-generated.
@@ -72,6 +78,27 @@ jobs:
             exit 1
           fi
           echo "tag '${GITHUB_REF_NAME}' (commit ${GITHUB_SHA}) is reachable from origin/main — promotion ceremony was followed"
+
+      - name: Verify tag matches pyproject.toml's version (RELEASING.md's ceremony step)
+        run: |
+          set -euo pipefail
+          # RELEASING.md's checklist now requires bumping pyproject.toml's `version` (PEP 440,
+          # no "v" prefix) to match the tag BEFORE tagging — port slice 5. Without this gate, a
+          # forgotten bump would publish a tarball/wheel whose own package metadata (and, once a
+          # `pantheon --version`-style surface reads it, the CLI's own self-report) disagrees
+          # with the tag it shipped under, silently.
+          TAG="${GITHUB_REF_NAME}"
+          PYPROJECT_VERSION="$(grep -m1 -E '^version = ' pyproject.toml | sed -E 's/^version = "([^"]*)"/\1/')"
+          if [[ -z "$PYPROJECT_VERSION" ]]; then
+            echo "::error::could not find a 'version = \"...\"' line in pyproject.toml"
+            exit 1
+          fi
+          EXPECTED_TAG="v${PYPROJECT_VERSION}"
+          if [[ "$TAG" != "$EXPECTED_TAG" ]]; then
+            echo "::error::tag '$TAG' does not match pyproject.toml's version '$PYPROJECT_VERSION' (expected tag '$EXPECTED_TAG'). RELEASING.md's ceremony requires bumping pyproject.toml's version to match the tag BEFORE tagging (part of the dev->main promotion PR, or a follow-up commit on main before the tag is cut) — see RELEASING.md's checklist. Delete this tag, bump the version, re-promote/re-tag."
+            exit 1
+          fi
+          echo "tag '$TAG' matches pyproject.toml's version '$PYPROJECT_VERSION'"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -131,11 +158,23 @@ jobs:
       - name: Run verdict-decision fixture tests
         run: bash tests/test-verdict-decision.sh
 
+      - name: Run verdict-decision fixture tests (Python port, docs/PYTHON-PORT.md)
+        run: bash tests/test-verdict-decision-python.sh
+
       - name: Run base-pinned-read fixture tests (symlink-safe resolution)
         run: bash tests/test-base-pinned-read.sh
 
+      - name: Run base-pinned-read Python-port migration-exam fixture tests (pantheon.basepin)
+        run: bash tests/test-base-pinned-read-python.sh
+
       - name: Run combined-comment renderer fixture tests
         run: bash tests/test-render-comment.sh
+
+      - name: Run combined-comment renderer fixture tests (Python port, docs/PYTHON-PORT.md)
+        run: bash tests/test-render-comment-python.sh
+
+      - name: Run JSON-boundary fixture tests (pantheon.jqjson, docs/PYTHON-PORT.md)
+        run: bash tests/test-json-boundary.sh
 
       - name: Run install.sh fixture tests
         run: bash tests/test-install.sh
@@ -146,11 +185,25 @@ jobs:
       - name: Run state-persistence fixture tests
         run: bash tests/test-state-persistence.sh
 
+      - name: Run state-persistence Python-port migration-exam fixture tests (pantheon.state)
+        run: bash tests/test-state-persistence-python.sh
+
+      - name: Run prompt-assembly Python-port migration-exam fixture tests (pantheon.cli)
+        run: bash tests/test-prompt-assembly-python.sh
+
       - name: Run git-readonly-wrapper fixture tests
+        run: bash tests/test-git-readonly-wrapper.sh
+
+      - name: Run git-readonly-wrapper fixture tests against the Python port (pantheon.execution)
+        env:
+          PANTHEON_EXECUTION_IMPL: python
         run: bash tests/test-git-readonly-wrapper.sh
 
       - name: Run execution-tier fixture tests
         run: bash tests/test-execution-tier.sh
+
+      - name: Run execution-tier Python-port migration-exam fixture tests (pantheon.execution)
+        run: bash tests/test-execution-tier-python.sh
 
       - name: Run bootstrap release/checksum fixture tests
         run: bash tests/test-bootstrap-release.sh
@@ -160,6 +213,27 @@ jobs:
 
       - name: Run release.yml tag-validation gate fixture tests
         run: bash tests/test-release-tag-gates.sh
+
+      - name: Install the pantheon package + ruff/mypy/pytest (build-time-only tooling, docs/PYTHON-PORT.md)
+        run: pip install --quiet -e . ruff mypy pytest
+
+      - name: pantheon console script smoke check (--help exits 0)
+        run: pantheon --help
+
+      - name: review-gate compat-shim console script smoke check (--help exits 0)
+        run: review-gate --help
+
+      - name: ruff check pantheon/ (lint)
+        run: ruff check pantheon/ tests/test_*.py
+
+      - name: ruff format --check pantheon/ (format)
+        run: ruff format --check pantheon/ tests/test_*.py
+
+      - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config)
+        run: mypy
+
+      - name: pytest (jqjson matrix + pure-function seams, docs/PYTHON-PORT.md)
+        run: pytest -q
 
       - name: Assert CONTRIBUTING.md's canonical test table matches tests/*.sh exactly
         # Mirrors ci.yml's lint-and-test job's identically-named step — this workflow claims to
@@ -220,9 +294,18 @@ jobs:
           # spec-driven, design-contract — install.sh --claude installs verbatim), so a release
           # tarball missing it breaks install.sh from an extracted release the same way a missing
           # action/ did before that Codex finding.
+          #
+          # pantheon/ and pyproject.toml (port slice 5) are included because bootstrap.sh's
+          # remote-fetch path now `pip install`s the package FROM the fetched/extracted tarball
+          # (see bootstrap.sh's own header comment) — a release tarball missing either one would
+          # make `bootstrap.sh --version vX.Y.Z` (the curl-pipe, no-local-checkout install path)
+          # fail with "no pyproject.toml found" the same class of failure the action/ and skills/
+          # additions above were fixing for install.sh.
           cp -R cli "$STAGE/cli"
           cp -R agents "$STAGE/agents"
           cp -R skills "$STAGE/skills"
+          cp -R pantheon "$STAGE/pantheon"
+          cp pyproject.toml "$STAGE/pyproject.toml"
           cp bootstrap.sh "$STAGE/bootstrap.sh"
           cp install.sh "$STAGE/install.sh"
           mkdir -p "$STAGE/action"

@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# ============================================================================
+# DEPRECATED (port slice 5, docs/PYTHON-PORT.md) — `pantheon gate` (the `pantheon` Python
+# package, pyproject.toml) is the current CLI. This bash implementation is kept for ONE
+# release, unchanged, only so nothing already scripting against it breaks the moment this
+# slice merges — it is removed in the release after this one, alongside `cli/lib/*.sh`,
+# `cli/providers/*.sh`, and the `review-gate` Python compat shim
+# (`pantheon.reviewgate_shim`), per the one-runtime endgame (docs/PYTHON-PORT.md section 3,
+# DESIGN.md's "Two runtimes, one rule"). Switch to `pantheon gate` now — same flags, same
+# `gate.conf` keys, same exit codes (docs/CLI.md), byte-compatible by contract.
+# ============================================================================
 # review-gate — provider-agnostic PR review runner for review-pantheon.
 #
 # Usage:

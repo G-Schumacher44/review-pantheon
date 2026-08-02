@@ -53,6 +53,35 @@ assert_file "default install: personas copied to .github/review-agents" "$T1/.gi
 assert_file "default install: decide_verdict.py copied" "$T1/.github/review-agents/decide_verdict.py"
 assert_file "default install: review.yml workflow copied" "$T1/.github/workflows/review.yml"
 
+# The verdict decider's real implementation, vendored as a package (port slice 5's absorption,
+# DESIGN.md's "Two runtimes, one rule") — action/review.yml's "Resolve gate scripts
+# (base-pinned)" step base-pin-reads exactly these three files at
+# .github/review-agents/pantheon/{__init__,jqjson,verdict}.py; missing any one of them is a dead
+# reference at gate-run time, the same class of failure the pantheon-git-readonly.sh check below
+# already guards for the wrapper.
+for pyfile in __init__.py jqjson.py verdict.py; do
+  assert_file "default install: pantheon/$pyfile copied" "$T1/.github/review-agents/pantheon/$pyfile"
+  if cmp -s "$ROOT/pantheon/$pyfile" "$T1/.github/review-agents/pantheon/$pyfile"; then
+    pass "default install: pantheon/$pyfile matches pantheon/$pyfile verbatim"
+  else
+    fail "default install: pantheon/$pyfile differs from the shipped pantheon/$pyfile"
+  fi
+done
+
+# Live proof the vendored trio is actually IMPORTABLE and produces the same decision a direct
+# `python3 -m pantheon.verdict` call would — not just "the right bytes landed," but "this is a
+# real, self-contained package a base-pinned $PYTHONPATH can run standalone" (action/review.yml's
+# own invocation shape).
+VENDORED_RAW="$(mktemp)"
+printf '%s' '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"ok"}' > "$VENDORED_RAW"
+if vendored_decision="$(PYTHONPATH="$T1/.github/review-agents" python3 -m pantheon.verdict artemis "$VENDORED_RAW" 2>/dev/null)" \
+  && grep -q '"color": "green"' <<<"$vendored_decision"; then
+  pass "default install: vendored pantheon/ package is importable and decides via 'python3 -m pantheon.verdict'"
+else
+  fail "default install: vendored pantheon/ package failed to import/decide (got: $vendored_decision)"
+fi
+rm -f "$VENDORED_RAW"
+
 # pantheon-git-readonly.sh — action/review.yml's claude_args hardcodes this exact vendored path
 # as the readonly tier's sole Bash prefix (Codex P1 finding: a bare `Bash(git diff *)`-style
 # pattern can't tell a read-only git subcommand from the same subcommand carrying a
@@ -275,6 +304,7 @@ cp "$INSTALL" "$FIXTURE_ROOT/install.sh"
 ln -s "$ROOT/action" "$FIXTURE_ROOT/action"
 ln -s "$ROOT/cli" "$FIXTURE_ROOT/cli"
 ln -s "$ROOT/skills" "$FIXTURE_ROOT/skills"
+ln -s "$ROOT/pantheon" "$FIXTURE_ROOT/pantheon"
 cp "$ROOT/REVIEW_RULES.example.md" "$FIXTURE_ROOT/REVIEW_RULES.example.md"
 cp "$ROOT"/agents/*.md "$FIXTURE_ROOT/agents/"
 

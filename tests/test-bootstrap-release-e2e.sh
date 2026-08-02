@@ -36,8 +36,9 @@ TARBALL_NAME="${NAME}.tar.gz"
 
 # ---------------------------------------------------------------------------
 # Build the fixture release tarball — same explicit manifest as release.yml's "Build versioned
-# tarball" step (cli/, agents/, skills/, bootstrap.sh, install.sh, REVIEW_RULES.example.md,
-# gate.conf.example, LICENSE, README.md), staged under a top-level review-pantheon-<tag>/ dir.
+# tarball" step (cli/, agents/, skills/, pantheon/, pyproject.toml, bootstrap.sh, install.sh,
+# REVIEW_RULES.example.md, gate.conf.example, LICENSE, README.md), staged under a top-level
+# review-pantheon-<tag>/ dir.
 # ---------------------------------------------------------------------------
 section "Build fixture release tarball (release.yml's manifest, verbatim)"
 
@@ -47,6 +48,8 @@ mkdir -p "$STAGE"
 cp -R "$ROOT/cli" "$STAGE/cli"
 cp -R "$ROOT/agents" "$STAGE/agents"
 cp -R "$ROOT/skills" "$STAGE/skills"
+cp -R "$ROOT/pantheon" "$STAGE/pantheon"
+cp "$ROOT/pyproject.toml" "$STAGE/pyproject.toml"
 cp "$ROOT/bootstrap.sh" "$STAGE/bootstrap.sh"
 cp "$ROOT/install.sh" "$STAGE/install.sh"
 mkdir -p "$STAGE/action"
@@ -182,6 +185,45 @@ if [[ $help_status -eq 0 ]] && grep -q "^Usage: review-gate --pr" <<<"$help_out"
   pass "--version $TAG: installed review-gate --help resolves its lib/providers from the prefix and runs"
 else
   fail "--version $TAG: installed review-gate --help failed (status=$help_status): $help_out"
+fi
+
+# ---------------------------------------------------------------------------
+# The pantheon package venv (port slice 5, docs/PYTHON-PORT.md §8) — bootstrap.sh now ALSO
+# creates a venv under --prefix and pip-installs the package fetched/extracted above into it,
+# alongside the bash CLI checked above (kept during the deprecation window). Proves the whole
+# real path: a venv landed under the prefix, `pantheon`/`pantheon-git-readonly`/`review-gate`
+# console scripts exist there, `pantheon --help` actually runs, and pantheon.execution's own
+# wrapper-adjacency resolution (issue #21 P1) finds pantheon-git-readonly correctly from this
+# real, non-mocked install (no sys.executable monkeypatching here — this is the real thing).
+# ---------------------------------------------------------------------------
+section "--version $TAG: the pantheon package venv installs under --prefix and runs"
+
+if [[ -x "$PREFIX_OK/venv/bin/pantheon" ]]; then
+  pass "--version $TAG: \$PREFIX/venv/bin/pantheon exists and is executable"
+else
+  fail "--version $TAG: \$PREFIX/venv/bin/pantheon is MISSING or not executable"
+fi
+
+if [[ -x "$PREFIX_OK/venv/bin/pantheon-git-readonly" ]]; then
+  pass "--version $TAG: \$PREFIX/venv/bin/pantheon-git-readonly exists and is executable"
+else
+  fail "--version $TAG: \$PREFIX/venv/bin/pantheon-git-readonly is MISSING or not executable"
+fi
+
+pantheon_help_out="$(cd "$NEUTRAL_DIR" && "$PREFIX_OK/venv/bin/pantheon" --help 2>&1)"
+pantheon_help_status=$?
+if [[ $pantheon_help_status -eq 0 ]] && grep -q "^usage: pantheon " <<<"$pantheon_help_out"; then
+  pass "--version $TAG: installed pantheon --help runs from the prefix venv"
+else
+  fail "--version $TAG: installed pantheon --help failed (status=$pantheon_help_status): $pantheon_help_out"
+fi
+
+pantheon_review_gate_out="$(cd "$NEUTRAL_DIR" && "$PREFIX_OK/venv/bin/review-gate" --help 2>&1)"
+pantheon_review_gate_status=$?
+if [[ $pantheon_review_gate_status -eq 0 ]] && grep -q "DEPRECATED" <<<"$pantheon_review_gate_out"; then
+  pass "--version $TAG: installed review-gate compat shim runs from the prefix venv and prints its deprecation note"
+else
+  fail "--version $TAG: installed review-gate compat shim failed or is missing its deprecation note (status=$pantheon_review_gate_status): $pantheon_review_gate_out"
 fi
 
 # ---------------------------------------------------------------------------

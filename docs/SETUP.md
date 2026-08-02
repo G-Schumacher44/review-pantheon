@@ -1,15 +1,20 @@
 # Setup — install, first run, troubleshooting
 
-This is the CLI-first walkthrough: get `review-gate` installed, run it once against a real PR
+This is the CLI-first walkthrough: get `pantheon` installed, run it once against a real PR
 without spending a token, then run it for real. For the zero-footprint, Action-only surface (no
 CLI, no files in your repo), see
 [Way C](#way-c--published-action-zero-repo-footprint-action-only) below. Binding contract:
 `DESIGN.md`. Doc index: [docs/README.md](README.md). Full flag/`gate.conf` reference once
 you're past first run: [CLI.md](CLI.md).
 
-**v2 preview:** a Python CLI (`pantheon gate` / `pantheon counsel`) exists alongside the bash
-`review-gate` this guide walks through — see [docs/PYTHON-PORT.md](PYTHON-PORT.md). Bash stays
-canonical (this doc's install steps below are unchanged) until the port's Slice 5 switchover.
+**`pantheon` is the current CLI (port slice 5, [docs/PYTHON-PORT.md](PYTHON-PORT.md))** —
+`pantheon gate` / `pantheon counsel`, installable via `pipx`/`pip` (stdlib-only, no runtime
+dependency). `review-gate` still works as a **deprecated, one-release compat shim** forwarding
+straight into `pantheon gate` — everything below that names `review-gate` applies identically to
+`pantheon gate`, and Way A/B's install steps now install both (the bash CLI stays vendored only
+for this transition window — see [docs/PYTHON-PORT.md](PYTHON-PORT.md)'s Slice-5 status
+section). Switch to `pantheon gate` now; `review-gate` (both the bash script and the Python
+shim) is removed in the release after this one.
 
 ## Prerequisites
 
@@ -17,9 +22,9 @@ canonical (this doc's install steps below are unchanged) until the port's Slice 
 |---|---|---|
 | `bash` | Everything | 3.2+ (stock macOS) through 5.x (Linux). No bashisms newer than that. **Windows:** the CLI surface needs a POSIX shell — use WSL or Git Bash. The Action surface runs on GitHub's Linux runners and works from any OS with no local shell at all. |
 | `git` | Everything | The CLI locates the target repo via `git rev-parse --show-toplevel` and fetches PR refs directly (`refs/pull/<n>/head`) — no local branch checkout needed. |
-| `jq` | Everything | Verdict extraction and validation (`cli/lib/verdict.sh`) is `jq`-based. |
-| `gh`, authenticated | Everything | `review-gate` shells out to `gh pr view` / `gh pr comment`. Run `gh auth status` first if unsure. |
-| `python3` | Action surface only | `action/decide_verdict.py` is the Action's verdict decider. The CLI surface doesn't need Python at all — its decider is `cli/lib/verdict.sh` (bash + `jq`). |
+| `jq` | The deprecated bash CLI only | Verdict extraction and validation in `cli/lib/verdict.sh` (bash + `jq`) — not needed for `pantheon gate` (its `pantheon.verdict` module needs only `python3`, below). |
+| `gh`, authenticated | Everything | `pantheon gate` shells out to `gh pr view` / `gh pr comment`. Run `gh auth status` first if unsure. |
+| `python3` (>=3.9) | Everything (CLI and Action) | `pantheon` (the CLI) and `pantheon.verdict` (the Action's verdict decider, port slice 5) are both stdlib-only Python — no runtime dependency to install beyond the interpreter itself. |
 | `curl` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Only needed for the no-local-checkout install path — fetches the repo tarball from GitHub's codeload endpoint. Not needed for a local-checkout install, `install.sh`, or normal CLI/Action use. |
 | `tar` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Extracts the tarball `curl` fetches. Same scope as `curl` above — not needed otherwise. |
 | One provider CLI | Actually calling a model | `claude` (Claude Code CLI) is the default lane and the only one integration-tested. `codex`, `gemini`, `cursor-agent` are best-effort — see DESIGN.md's ["Provider lanes"](../DESIGN.md#provider-lanes) section. `--dry-run` (below) needs none of these installed. |
@@ -46,8 +51,9 @@ Code that's the counsel agents, the four canonical skills (`gate`, `counsel`, `s
 tools get their own best-effort per-tool projections (see DESIGN.md). Idempotent — see
 `install.sh`'s own header comment and the README's [Quick start](../README.md#quick-start).
 
-You still run the CLI surface (`cli/review-gate`) from the review-pantheon checkout itself, not
-from the target repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
+You still run the CLI surface (`pantheon gate`, or the deprecated `cli/review-gate`/`review-gate`)
+from the review-pantheon checkout itself (`pip install -e .` into a venv), not from the target
+repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
 
 **Post-install checklist:**
 
@@ -107,15 +113,19 @@ parameterized by destination root, not a duplicated code path.
 ```bash
 git clone <this repo> review-pantheon
 ./review-pantheon/bootstrap.sh --prefix ~/.review-pantheon
-export PATH="$HOME/.review-pantheon/cli:$PATH"
+export PATH="$HOME/.review-pantheon/venv/bin:$HOME/.review-pantheon/cli:$PATH"
 ```
 
-Installs `review-gate`, its provider lanes, and the five personas into a prefix directory
-(default `~/.review-pantheon`) — nothing is written into any target repo. Add the printed
+Installs the `pantheon` package into a venv under the prefix (port slice 5,
+[docs/PYTHON-PORT.md](PYTHON-PORT.md)) — `pantheon`/`pantheon-git-readonly`/the deprecated
+`review-gate` compat shim all land in `$PREFIX/venv/bin` — AND still vendors the deprecated bash
+`review-gate`, its provider lanes, and the five personas into `$PREFIX/cli` for this transition
+window, same as before. Nothing is written into any target repo either way. Add the printed
 `export PATH=...` line to your shell rc yourself (`bootstrap.sh` won't edit it for you). From
-then on, `review-gate --pr <n>` works from inside any repo with a `gh`-authenticated remote,
-same as running it from an in-repo checkout. This is the CLI surface only — it doesn't install the
-GitHub Action; pair it with Way A or Way C in a given repo if you want both surfaces.
+then on, `pantheon gate --pr <n>` (or the deprecated `review-gate --pr <n>`) works from inside
+any repo with a `gh`-authenticated remote, same as running it from an in-repo checkout. This is
+the CLI surface only — it doesn't install the GitHub Action; pair it with Way A or Way C in a
+given repo if you want both surfaces.
 
 Also works via `curl | bash` once this repo is public on GitHub:
 
@@ -128,12 +138,15 @@ via GitHub's codeload endpoint instead. That endpoint 404s against a private rep
 repo is public, the curl path fails with an explicit message and a `git clone` fallback command,
 rather than silently doing nothing. Clone-and-run (the first form above) works today regardless.
 
-Idempotent, same cmp-and-skip contract as `install.sh`: re-running only touches files that
-changed; a file you've hand-edited in the prefix is left alone and reported skipped. Be aware
-this contract can't tell "hand-edited" from "stale": a file left over from an older
-`bootstrap.sh` run that simply differs from the currently-shipped source is skipped the exact
-same way, so it won't pick up upstream fixes on its own — upgrading an existing prefix means
-removing the file (or the whole prefix) first, then re-running.
+Idempotent, same cmp-and-skip contract as `install.sh` for the vendored bash files: re-running
+only touches files that changed; a file you've hand-edited in the prefix is left alone and
+reported skipped. Be aware this contract can't tell "hand-edited" from "stale": a file left over
+from an older `bootstrap.sh` run that simply differs from the currently-shipped source is
+skipped the exact same way, so it won't pick up upstream fixes on its own — upgrading an
+existing prefix means removing the file (or the whole prefix) first, then re-running. The
+`pantheon` package venv is idempotent by a different mechanism — `python3 -m venv`/`pip install`
+are themselves safe to re-run and pick up a changed source tree automatically, no stale-file
+caveat there.
 
 Want to pin to a specific tagged release instead of tracking `dev`'s current HEAD? Add
 `--version vX.Y.Z` to the remote-fetch (`curl | bash`) form above — it fetches that release's
@@ -149,8 +162,9 @@ mismatch rather than installing an unverified archive. See RELEASING.md for how 
 Skip `install.sh` and `bootstrap.sh` entirely. Copy [`examples/review-gate.yml`](../examples/review-gate.yml)
 to `.github/workflows/review-gate.yml` in your repo and wire one secret — that file is the
 whole install. `action.yml` at this repo's root is a composite GitHub Action; the `uses:
-G-Schumacher44/review-pantheon@v1` reference reads personas and the verdict-decision script
-from its own checkout, so nothing lands in your repo at all. See `DESIGN.md`'s ["Published
+G-Schumacher44/review-pantheon@v1` reference reads personas and the `pantheon` package's
+verdict-decision module (`pantheon.verdict`, port slice 5) from its own checkout, so nothing
+lands in your repo at all. See `DESIGN.md`'s ["Published
 action"](../DESIGN.md#published-action) section for what's bundled, what's overridable
 (`personas_path`, `agents`, `rules_file`, `spec_file`, `model`, `execution`), and the sequential-vs-matrix
 tradeoff this surface makes.
@@ -196,11 +210,12 @@ or `bootstrap.sh` to have been run against that repo at all:
 
 ```bash
 cd /path/to/any/repo/with/an/open/pr
-/path/to/review-pantheon/cli/review-gate --pr <number> --dry-run
+/path/to/review-pantheon/venv/bin/pantheon gate --pr <number> --dry-run
 ```
 
-(Or, with Way B installed and on `PATH`: `review-gate --pr <number> --dry-run` from inside that
-repo.)
+(Or, with Way B installed and on `PATH`: `pantheon gate --pr <number> --dry-run` from inside that
+repo. The deprecated `cli/review-gate --pr <number> --dry-run` / `review-gate --pr <number>
+--dry-run` still work identically during the compat window.)
 
 `--dry-run` does real work, right up to the point of spending a token or writing anything:
 
@@ -212,7 +227,7 @@ repo.)
    live run would.
 5. Builds the real prompt file per agent — persona body + the generated context block (diff
    range, base branch, house-rules file, output-contract reminder) — and writes it to a temp dir.
-6. Prints, per agent, the provider command it *would* run: `[dry-run] would run: cli/providers/<lane>.sh provider_run "<model>" "<prompt_file>"`.
+6. Prints, per agent, the provider call it *would* make: `[dry-run] would run: provider=<lane> model='<model>' prompt_file=<prompt_file>` (the deprecated bash CLI prints the equivalent as `[dry-run] would run: cli/providers/<lane>.sh provider_run "<model>" "<prompt_file>"`).
 7. Prints the exact comment it *would* post to the PR — headline, verdict table (each row reads
    `DRY_RUN`), and the full-findings block — to stdout, never to GitHub.
 
@@ -221,9 +236,9 @@ recorded as reviewed — `.review-gate-state.json`'s `reviewed_sha` entry is onl
 successful `gh pr comment` **and** only when the overall result is green or yellow; an unverified
 or red result leaves it untouched, so the next run retries from the last SUCCESSFULLY reviewed SHA
 — the full PR only if there was never one — instead of quietly treating a failed run as reviewed).
-One caveat: `review-gate` bootstraps `.review-gate-state.json` to `{}` on first run if the file
+One caveat: `pantheon gate` bootstraps `.review-gate-state.json` to `{}` on first run if the file
 doesn't exist yet, unconditionally, before the `--dry-run` check — so a dry run against a repo
-that's never run `review-gate` before does leave a fresh, empty state file in the working tree.
+that's never run `pantheon gate` before does leave a fresh, empty state file in the working tree.
 Full detail: [CLI.md](CLI.md#the-state--follow-up-model).
 
 ## First live run
@@ -231,7 +246,7 @@ Full detail: [CLI.md](CLI.md#the-state--follow-up-model).
 Drop `--dry-run` and it runs for real:
 
 ```bash
-review-gate --pr <number>
+pantheon gate --pr <number>
 ```
 
 Each agent's provider lane actually runs, its output goes through the same extraction and
@@ -263,7 +278,7 @@ follows worst-wins precedence (🟢 green, 🟡 yellow/loud-skip, 🟠 unverifie
 red/blocked) — full rule in [DESIGN.md](../DESIGN.md#verdict-contract), comment shape in
 [DESIGN.md](../DESIGN.md#combined-pr-comment).
 
-Exit codes: `0` on green or yellow, nonzero on red or unverified — `review-gate`'s exit status
+Exit codes: `0` on green or yellow, nonzero on red or unverified — `pantheon gate`'s exit status
 is meant to be usable as a CI/script gate on its own, independent of reading the posted comment.
 A draft PR is a special case: exit `0`, nothing posted, nothing reviewed (see
 [Troubleshooting](#troubleshooting) below).
@@ -274,7 +289,7 @@ A draft PR is a special case: exit `0`, nothing posted, nothing reviewed (see
 <summary>Draft PR — the run exits 0 but nothing was posted</summary>
 
 ```
-review-gate: PR #42 is a draft — skipping loudly. No review run, no comment posted.
+pantheon: PR #42 is a draft — skipping loudly. No review run, no comment posted.
 DRAFT — not reviewed, nothing posted
 ```
 
@@ -303,7 +318,7 @@ order `cli/lib/verdict.sh`'s `decide_verdict` checks them:
 4. **Provider lane failure** — the CLI itself exited nonzero or timed out (see below) before
    producing any output to extract from.
 
-Check `review-gate`'s stderr (`note "$agent: $reason — UNVERIFIED"`) for which of these fired,
+Check `pantheon gate`'s stderr for which of these fired,
 then check the raw provider output for that agent — usually the model padded its JSON with
 prose, or the persona prompt got truncated.
 
@@ -345,7 +360,7 @@ Follow-up mode normally reviews only `last_reviewed_sha..head` and asks the agen
 own prior comment first. If the PR's head was force-pushed, rebased, or had its history
 rewritten since the last review, the previously reviewed SHA may no longer be an ancestor of the
 new head — an existence check alone isn't enough to catch this (the old commit object can still
-be fetchable, just not connected to the new history). `review-gate` checks ancestry explicitly
+be fetchable, just not connected to the new history). `pantheon gate` checks ancestry explicitly
 (`git merge-base --is-ancestor`) and falls back to reviewing the **full PR diff** again when it
 fails, with a note in the prompt explaining why:
 
@@ -360,14 +375,18 @@ This is expected after any force-push — not a bug, and not something you need 
 </details>
 
 <details>
-<summary>Path resolution — running review-gate from a Way B (bootstrap) install</summary>
+<summary>Path resolution — running pantheon gate from a Way B (bootstrap) install</summary>
 
-`review-gate` locates its own `agents/` and `cli/providers/` directories relative to its own
-real location (symlink-resolved), not relative to the target repo it's reviewing. This works
-whether it's invoked in-repo (`cli/review-gate`), from a `bootstrap.sh` prefix directly
-(`~/.review-pantheon/cli/review-gate`), or through a symlink onto your own `PATH` pointing at
-either of those. If you see a `source: no such file or directory` error mentioning
-`cli/lib/verdict.sh`, the install is incomplete (missing `cli/lib/` or `cli/providers/` next to
-`review-gate`) rather than a symlink problem — re-run `bootstrap.sh`.
+`pantheon gate` locates `agents/` relative to the installed `pantheon` package's own location
+(a package-layout caveat disclosed in `pantheon/cli.py`'s own module docstring), not relative to
+the target repo it's reviewing. This works whether it's invoked from a `pip install -e .` dev
+checkout, a `bootstrap.sh` prefix venv (`~/.review-pantheon/venv/bin/pantheon`), or a `pipx`
+install. The deprecated bash `review-gate` resolves its own `agents/`/`cli/providers/`
+directories relative to its own real location (symlink-resolved) the same way, whether invoked
+in-repo (`cli/review-gate`), from a `bootstrap.sh` prefix directly
+(`~/.review-pantheon/cli/review-gate`), or through a symlink onto your own `PATH`; a `source: no
+such file or directory` error mentioning `cli/lib/verdict.sh` there means the install is
+incomplete (missing `cli/lib/` or `cli/providers/` next to `review-gate`) rather than a symlink
+problem — re-run `bootstrap.sh`.
 
 </details>

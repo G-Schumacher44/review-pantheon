@@ -2,11 +2,16 @@
 #
 # The zero-footprint install: a target repo's whole integration is the ~20-line workflow stub
 # at examples/review-gate.yml — nothing is copied into the target repo (contrast with
-# install.sh's Way A, which vendors personas + action/review.yml + decide_verdict.py into the
-# target repo so its own runner can see them). Every file this action reads at run time —
-# personas, action/decide_verdict.py, action/lib/*.sh, the JSON schema below — is read from
-# `${{ github.action_path }}`, i.e. review-pantheon's own checkout as GitHub Actions pulls it
-# for the `uses:` reference, not from the calling repo. The one opt-in exception is the
+# install.sh's Way A, which vendors personas + action/review.yml + a deprecated
+# decide_verdict.py compat shim + the pantheon package into the target repo so its own runner
+# can see them). Every file this action reads at run time — personas, the pantheon package
+# (whose `pantheon.verdict` module now decides every verdict — port slice 5's absorption of the
+# former standalone action/decide_verdict.py, see DESIGN.md's "Two runtimes, one rule"),
+# action/lib/*.sh, the JSON schema below — is read from `${{ github.action_path }}`, i.e.
+# review-pantheon's own checkout as GitHub Actions pulls it for the `uses:` reference (imported
+# via `PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict`, not a `pip install` —
+# no network/build step needed for a stdlib-only package run straight from its own checkout),
+# not from the calling repo. The one opt-in exception is the
 # `personas_path` input (a consuming workflow author pointing this action at a repo-local
 # persona fork instead) — that content is base-pinned from the PR's base commit via `git show`
 # (see the "Resolve gate configuration" step and the input's own description below), never read
@@ -50,8 +55,9 @@
 #     '<name>')`. That's structural duplication (GitHub Actions leaves no alternative for a
 #     `uses:` step specifically), not logic duplication — the logic each trio shares
 #     (prompt-building, verdict-deciding) lives once in action/lib/*.sh and
-#     action/decide_verdict.py, called five times with different arguments, not five times
-#     hand-written.
+#     `pantheon.verdict` (port slice 5 — was the standalone action/decide_verdict.py, now the
+#     package module both this file and action/review.yml call), invoked five times with
+#     different arguments, not five times hand-written.
 #   - Every agent here runs SEQUENTIALLY in one job, not as parallel matrix legs the way
 #     action/review.yml's artemis/apollo run. Simplicity over parallelism: one job means the
 #     per-agent decide steps' outputs are readable directly via `steps.<id>.outputs` by the
@@ -375,9 +381,9 @@ runs:
 
         # The verdict-contract JSON schema (DESIGN.md's "Verdict contract") — structural only,
         # deliberately NOT enforcing each agent's own verdict vocabulary here (that would be a
-        # THIRD copy of the vocab->color rule alongside cli/lib/verdict.sh and
-        # action/decide_verdict.py; decide_verdict.py stays the sole place that lives). One
-        # schema shared by every agent, computed once.
+        # SECOND copy of the vocab->color rule alongside `pantheon.verdict`, the one place that
+        # rule lives as of port slice 5's absorption — see DESIGN.md's "Two runtimes, one rule").
+        # One schema shared by every agent, computed once.
         JSON_SCHEMA='{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
         # JSON_SCHEMA above contains only double quotes, never a single quote, so wrapping it
@@ -489,7 +495,7 @@ runs:
       if: contains(inputs.agents, 'artemis')
       continue-on-error: true
       shell: bash
-      run: python3 "${{ github.action_path }}/action/decide_verdict.py" artemis "$RUNNER_TEMP/artemis-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict artemis "$RUNNER_TEMP/artemis-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # apollo — the docs-only exception: skips loudly instead of running (DESIGN.md)
@@ -555,7 +561,7 @@ runs:
       if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
       continue-on-error: true
       shell: bash
-      run: python3 "${{ github.action_path }}/action/decide_verdict.py" apollo "$RUNNER_TEMP/apollo-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict apollo "$RUNNER_TEMP/apollo-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # socrates / diogenes / plato — counsel agents. Not part of the default `agents` panel;
@@ -615,7 +621,7 @@ runs:
       if: contains(inputs.agents, 'socrates')
       continue-on-error: true
       shell: bash
-      run: python3 "${{ github.action_path }}/action/decide_verdict.py" socrates "$RUNNER_TEMP/socrates-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict socrates "$RUNNER_TEMP/socrates-raw.txt"
 
     - name: Build prompt (diogenes)
       id: build-prompt-diogenes
@@ -670,7 +676,7 @@ runs:
       if: contains(inputs.agents, 'diogenes')
       continue-on-error: true
       shell: bash
-      run: python3 "${{ github.action_path }}/action/decide_verdict.py" diogenes "$RUNNER_TEMP/diogenes-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict diogenes "$RUNNER_TEMP/diogenes-raw.txt"
 
     - name: Build prompt (plato)
       id: build-prompt-plato
@@ -725,7 +731,7 @@ runs:
       if: contains(inputs.agents, 'plato')
       continue-on-error: true
       shell: bash
-      run: python3 "${{ github.action_path }}/action/decide_verdict.py" plato "$RUNNER_TEMP/plato-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict plato "$RUNNER_TEMP/plato-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # Combine + enforce — runs regardless of which/whether prior steps failed, because every

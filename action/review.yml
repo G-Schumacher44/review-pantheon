@@ -10,9 +10,16 @@
 # read->provenance matrix): every file below that shapes what the gate DOES, not just its
 # judgment content, is resolved from the PR's BASE commit via `git show` into $RUNNER_TEMP, not
 # read from $GITHUB_WORKSPACE (the PR's own checkout) — the read-only git wrapper, the
-# persona (.md) the agent runs as, and the verdict decider (decide_verdict.py) it's graded by.
-# Only REVIEW_RULES.md/DESIGN.md (judgment CONTENT, not gate behavior) remain a documented
-# exception on this one lane — see DESIGN.md's "Lane differences".
+# persona (.md) the agent runs as, and the verdict decider it's graded by. Port slice 5's
+# absorption (DESIGN.md's "Two runtimes, one rule") moved the verdict decider from a single
+# standalone `decide_verdict.py` file to the `pantheon.verdict` MODULE, which itself depends on
+# `pantheon.jqjson` — so "the verdict decider" is now THREE base-pinned files
+# (`pantheon/__init__.py`, `pantheon/jqjson.py`, `pantheon/verdict.py`), each resolved by the
+# identical base-pinned mechanism, into a package-shaped `$RUNNER_TEMP` directory the "Decide
+# verdict" step below points `PYTHONPATH` at — same provenance guarantee as the single-file
+# version, just resolving the (small) dependency closure `import`ing that module actually needs
+# rather than one file. Only REVIEW_RULES.md/DESIGN.md (judgment CONTENT, not gate behavior)
+# remain a documented exception on this one lane — see DESIGN.md's "Lane differences".
 #
 # PIN NOTE: `anthropics/claude-code-action` is pinned below to v1.0.183's full commit SHA
 # (be7b93b1907a4abad570368f3c74b6fe3807510b — https://github.com/anthropics/claude-code-action/
@@ -404,17 +411,28 @@ jobs:
           fi
           echo "persona_path=$PERSONA_DEST" >> "$GITHUB_OUTPUT"
 
-          DECIDER_DEST="$RUNNER_TEMP/decide_verdict.py"
-          decider_rc=0
-          pantheon_base_pinned_read "$BASE_SHA" ".github/review-agents/decide_verdict.py" "$DECIDER_DEST" || decider_rc=$?
-          if [ "$decider_rc" -eq 1 ]; then
-            echo "::error::refused to resolve .github/review-agents/decide_verdict.py at base commit ${BASE_SHA} — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
-            exit 1
-          elif [ "$decider_rc" -eq 2 ]; then
-            echo "::error::missing .github/review-agents/decide_verdict.py at base commit ${BASE_SHA}. Same two possible causes as the persona check above (install.sh not yet run, or this is the bootstrap PR that first adds it) — see that error for the fix."
-            exit 1
-          fi
-          echo "decider_path=$DECIDER_DEST" >> "$GITHUB_OUTPUT"
+          # The verdict decider — port slice 5's absorption (this file's own header comment):
+          # `pantheon.verdict` plus the one module it depends on for JSON parsing
+          # (`pantheon.jqjson`) plus the package's own `__init__.py`, base-pinned into a
+          # PACKAGE-SHAPED directory ($RUNNER_TEMP/pantheon-verdict/pantheon/*.py) so
+          # `PYTHONPATH=$RUNNER_TEMP/pantheon-verdict python3 -m pantheon.verdict` resolves
+          # `import pantheon` / `from pantheon import jqjson` correctly — same base-pinning
+          # mechanism as the persona/wrapper reads above, just three files landing under one
+          # package directory instead of one file at $RUNNER_TEMP's top level.
+          PANTHEON_PKG_DIR="$RUNNER_TEMP/pantheon-verdict/pantheon"
+          mkdir -p "$PANTHEON_PKG_DIR"
+          for pyfile in __init__.py jqjson.py verdict.py; do
+            pyfile_rc=0
+            pantheon_base_pinned_read "$BASE_SHA" ".github/review-agents/pantheon/${pyfile}" "$PANTHEON_PKG_DIR/${pyfile}" || pyfile_rc=$?
+            if [ "$pyfile_rc" -eq 1 ]; then
+              echo "::error::refused to resolve .github/review-agents/pantheon/${pyfile} at base commit ${BASE_SHA} — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
+              exit 1
+            elif [ "$pyfile_rc" -eq 2 ]; then
+              echo "::error::missing .github/review-agents/pantheon/${pyfile} at base commit ${BASE_SHA}. Same two possible causes as the persona check above (install.sh not yet run, or this is the bootstrap PR that first adds it) — see that error for the fix."
+              exit 1
+            fi
+          done
+          echo "pantheon_pythonpath=$RUNNER_TEMP/pantheon-verdict" >> "$GITHUB_OUTPUT"
 
       - name: Detect docs-only diff
         id: docs-check
@@ -527,7 +545,8 @@ jobs:
           # comment) — the tool allowlist travels inside `claude_args` as `--allowedTools`
           # instead. `--json-schema` is the verdict-contract shape (DESIGN.md), structural
           # only — NOT each agent's own verdict vocabulary, which stays sole-sourced in
-          # action/decide_verdict.py (see DESIGN.md's "Two runtimes, one rule").
+          # `pantheon.verdict` (port slice 5's absorption — see DESIGN.md's "Two runtimes, one
+          # rule").
           #
           # Bash is routed through the wrapper resolved by "Resolve read-only git wrapper
           # (base-pinned)" above — NOT a path under $GITHUB_WORKSPACE (HIGH-1 fix, Codex P1
@@ -572,28 +591,28 @@ jobs:
           RAW_OUTPUT: ${{ steps.run-agent.outputs.structured_output }}
         run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"
 
-      # Same decision rule as the CLI lane's cli/lib/verdict.sh (extract trailing JSON,
-      # validate the schema, map verdict->color, enforce the blocker invariant) — this runs
-      # the installed copy of action/decide_verdict.py so there is exactly one Python
+      # Same decision rule as every other lane, now the SAME CODE, not just the same rule
+      # (port slice 5's absorption, DESIGN.md's "Two runtimes, one rule") — `pantheon.verdict`,
+      # resolved base-pinned above into a package-shaped $RUNNER_TEMP directory, invoked via
+      # `python3 -m` with PYTHONPATH pointed at that directory so there is exactly one Python
       # implementation of the rule, not a copy embedded in this YAML that can drift from it.
       - name: Decide verdict
         id: decide
         if: always() && (matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true')
         env:
           AGENT_NAME: ${{ matrix.agent }}
-          DECIDER_PATH: ${{ steps.resolve-gate-scripts.outputs.decider_path }}
+          PANTHEON_PYTHONPATH: ${{ steps.resolve-gate-scripts.outputs.pantheon_pythonpath }}
         run: |
           set -euo pipefail
           # Base-pinned (see "Resolve gate scripts (base-pinned)" above) — never
-          # $GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py, the PR's own checked-out
-          # copy (issue #6's class-close: a fork PR could otherwise replace this script to run
+          # $GITHUB_WORKSPACE/.github/review-agents/pantheon/, the PR's own checked-out copy
+          # (issue #6's class-close: a fork PR could otherwise replace this package to run
           # arbitrary Python and emit a fake green verdict).
-          SCRIPT="$DECIDER_PATH"
-          if [ -z "$SCRIPT" ] || [ ! -f "$SCRIPT" ]; then
-            echo "::error::missing base-pinned decide_verdict.py — the 'Resolve gate scripts (base-pinned)' step didn't produce one; see its own error output above."
+          if [ -z "$PANTHEON_PYTHONPATH" ] || [ ! -f "$PANTHEON_PYTHONPATH/pantheon/verdict.py" ]; then
+            echo "::error::missing base-pinned pantheon/verdict.py — the 'Resolve gate scripts (base-pinned)' step didn't produce one; see its own error output above."
             exit 1
           fi
-          python3 "$SCRIPT" "$AGENT_NAME" "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"
+          PYTHONPATH="$PANTHEON_PYTHONPATH" python3 -m pantheon.verdict "$AGENT_NAME" "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"
 
       - name: Save verdict artifact
         if: always()
