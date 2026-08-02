@@ -30,16 +30,19 @@ Prerequisites (bash, git, jq, gh, python3 for the Action surface, one provider C
 [docs/SETUP.md](docs/SETUP.md#prerequisites) for the full table and what each one gates.
 
 Run the suites — each is a standalone fixture test, no runner needed. **This table is the
-canonical, complete list — verified against `git ls-tree -r tests/`** (15 files; DESIGN.md's
+canonical, complete list — verified against `git ls-tree -r tests/`** (18 files; DESIGN.md's
 "Layout" section points here instead of re-listing them, see DESIGN.md rule 5 on the two staying
 in sync):
 
 | Script | Covers |
 |---|---|
 | `tests/test-verdict-decision.sh` | The verdict-decision rule, cross-checked against both runtimes (`cli/lib/verdict.sh`, `action/decide_verdict.py`). |
+| `tests/test-verdict-decision-python.sh` | The black-box Python-port equivalent of the suite above, against `pantheon.verdict` (docs/PYTHON-PORT.md section 4) — same fixtures, driven via `python3 -m pantheon.verdict` instead of sourcing bash. |
 | `tests/test-base-pinned-read.sh` | `cli/lib/pantheon-base-pin.sh` — base-SHA-pinned reads, including the symlink-resolution edge case. |
 | `tests/test-base-pinned-read-python.sh` | The Python `pantheon.basepin` port's Slice-3 migration exam — docs/PYTHON-PORT.md §4's black-box/Python-native equivalent for `test-base-pinned-read.sh` (bash-internal, so not parameterizable in place). Drives `python -m pantheon.basepin` as a real subprocess against the same symlink/escape/chain-depth fixtures, plus issue #10's trailing-slash class. |
 | `tests/test-render-comment.sh` | `cli/lib/render_comment.sh`, the combined-PR-comment renderer. |
+| `tests/test-render-comment-python.sh` | The black-box Python-port equivalent of the suite above, against `pantheon.render` (docs/PYTHON-PORT.md section 4) — same fixtures, driven via `python3 -m pantheon.render` instead of sourcing bash. |
+| `tests/test-json-boundary.sh` | `pantheon/jqjson.py`, the single jq-compatible JSON parse/serialize boundary (docs/PYTHON-PORT.md section 5's "JSON boundary" bullet) — a mechanical assertion that `pantheon/verdict.py` and `pantheon/render.py` route every JSON parse/serialize through it, never Python's `json` module directly. |
 | `tests/test-install.sh` | `install.sh`'s editor/CLI projection targets. |
 | `tests/test-prompt-assembly.sh` | Prompt assembly, including the spec-aware Apollo path. |
 | `tests/test-state-persistence.sh` | `cli/review-gate`'s follow-up-mode state file. |
