@@ -232,7 +232,7 @@ def test_redact_paths_is_the_only_redaction_chokepoint_in_this_module() -> None:
         if '"<repo>"' in src[i:j]:
             sub_calls_with_repo_placeholder += 1
     assert sub_calls_with_repo_placeholder == 1, (
-        f"expected exactly one `.sub(...)` call whose arguments contain the \"<repo>\" placeholder "
+        f'expected exactly one `.sub(...)` call whose arguments contain the "<repo>" placeholder '
         f"(inside redact_paths), found {sub_calls_with_repo_placeholder} -- a new redaction call "
         "site must route through redact_paths, not reimplement its own substitution"
     )
