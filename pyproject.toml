@@ -1,0 +1,52 @@
+# pyproject.toml — SKELETON for the "pantheon" package, review-pantheon's Python CLI port (v2
+# track). See docs/PYTHON-PORT.md for the binding spec this skeleton implements. This file is
+# committed ahead of any port code on purpose (docs/PYTHON-PORT.md's own PR) — the
+# [project.scripts] entry point below references pantheon.cli:main, a module that does not exist
+# yet. Do not expect `pip install .` against this state of the tree to succeed; the pantheon/
+# package directory lands starting at Slice 2 of docs/PYTHON-PORT.md's slice plan.
+#
+# stdlib-only at runtime is a hard constraint (docs/PYTHON-PORT.md section 1) —
+# [project.dependencies]
+# must stay empty for the life of this package. The build backend below (setuptools) is a
+# build-time-only dependency, never installed for an end user of the published package, and does
+# not compromise that constraint.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pantheon"
+version = "0.0.0.dev0"
+description = "review-pantheon's Python CLI (v2 port, pre-release skeleton) — see docs/PYTHON-PORT.md"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Garrett Schumacher" }]
+dependencies = []
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "License :: OSI Approved :: MIT License",
+  "Environment :: Console",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/G-Schumacher44/review-pantheon"
+Documentation = "https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/PYTHON-PORT.md"
+Issues = "https://github.com/G-Schumacher44/review-pantheon/issues"
+
+[project.scripts]
+pantheon = "pantheon.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pantheon*"]

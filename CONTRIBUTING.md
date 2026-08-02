@@ -103,8 +103,10 @@ docker run --rm review-pantheon-smoke
 See the [issues list](https://github.com/G-Schumacher44/review-pantheon/issues) for open work and
 known gaps. The CLI is bash by design for v1 — the read-only-git wrapper, the deciders, the
 provider lanes all lean on that being a hard constraint, not an oversight. A Python CLI port is a
-planned v2 track; discussion and contributions toward it are welcome, but it's a separate surface
-from the current bash implementation, not a rewrite-in-place.
+planned v2 track, specced in [docs/PYTHON-PORT.md](docs/PYTHON-PORT.md) — read that before opening
+a PR toward it. Discussion and contributions are welcome, but until that spec's slice plan clears
+its exit bar and retires the bash surface, it's a separate surface from the current bash
+implementation, not a rewrite-in-place.
 
 ## License
 
