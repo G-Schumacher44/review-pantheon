@@ -173,14 +173,18 @@ hardening history).
   green. The gate extracts the trailing JSON object from whatever the model printed, validates it
   against the schema and that agent's own verdict vocabulary with `jq`; any failure demotes the
   result — it never upgrades one.
-- **Read-only, by construction — under `readonly`.** Every persona is bound to read-only git
-  (`git show`, `git diff`, `git log`, `git status`) and forbidden from mutating the tree, index, or
-  HEAD; the `readonly` execution tier (the default) makes this a tool boundary the wrapper
-  mechanically enforces, not just a persona instruction. **Under `execution=trusted` it's persona
-  instruction only** — the wrapper isn't in the loop at all, so nothing mechanical stops a
-  compromised or misbehaving agent from mutating the tree; `trusted` exists for
-  own-repo/trusted-author use only, never for reviewing a fork PR you don't control. If a check
-  needs a tree change to answer, the agent stops and reports the gap instead.
+- **Read-only, by construction — under `readonly`, for calls the wrapper sees.** Every persona is
+  bound to read-only git (`git show`, `git diff`, `git log`, `git status`) and forbidden from
+  mutating the tree, index, or HEAD; the `readonly` execution tier (the default) makes this a
+  tool boundary the wrapper mechanically enforces for calls that reach it, not just a persona
+  instruction. **Not absolute: Claude's own always-approved bare git calls bypass the wrapper
+  entirely** and aren't covered by its `GIT_OPTIONAL_LOCKS=0`/`GIT_NO_LAZY_FETCH=1` protections —
+  see [SECURITY.md](SECURITY.md#bypassing-the-wrapper-is-not-the-same-as-having-no-side-effects)
+  for the scope note. **Under `execution=trusted` it's persona instruction only** — the wrapper
+  isn't in the loop at all, so nothing mechanical stops a compromised or misbehaving agent from
+  mutating the tree; `trusted` exists for own-repo/trusted-author use only, never for reviewing a
+  fork PR you don't control. If a check needs a tree change to answer, the agent stops and
+  reports the gap instead.
 - **Injection-aware, honestly scoped.** The identifiers that reach a shell command — PR number,
   branch names, head/base SHA — are validated against strict character-class regexes first; the
   PR title and every file's contents are NOT regex-validated (they reach the prompt as typed) but
