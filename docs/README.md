@@ -16,6 +16,10 @@
 | [agents/socrates.md](../agents/socrates.md) | Counsel agent — options analyst. Maps distinct approaches and a go/no-go call before anything is built. |
 | [agents/diogenes.md](../agents/diogenes.md) | Counsel agent — simplicity auditor. Assumes it works; asks only whether it's more than it needs to be. |
 | [agents/plato.md](../agents/plato.md) | Counsel agent — coherence auditor. Assumes it works; asks whether it has one consistent shape or drifting sprawl. |
+| [skills/gate/SKILL.md](../skills/gate/SKILL.md) | Claude Code skill — operating the gate from a session: dry-run first, reading the combined verdict, follow-up mode, findings discipline. |
+| [skills/counsel/SKILL.md](../skills/counsel/SKILL.md) | Claude Code skill — convening the counsel tier: which lens when, invocation, anti-patterns. |
+| [skills/spec-driven/SKILL.md](../skills/spec-driven/SKILL.md) | Claude Code skill — the transferable spec-driven methodology, for any adopting repo. |
+| [skills/design-contract/SKILL.md](../skills/design-contract/SKILL.md) | Claude Code skill — authoring a binding contract doc (DESIGN.md-style): what to include, what to leave out. |
 | [docs/README.md](README.md) | This index. |
 
 See the root [README.md](../README.md) for the quickstart, the panel, and how the gate stays honest.

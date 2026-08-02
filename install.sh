@@ -21,6 +21,12 @@
 # a hand-maintained duplicate. See DESIGN.md's "Provider lanes" and "Generated per-tool
 # projections" sections for the design.
 #
+# --claude additionally installs the four canonical skills (skills/{gate,counsel,spec-driven,
+# design-contract}/SKILL.md — the single hand-maintained source, same shape as agents/*.md under
+# rule 4) verbatim into .claude/skills/<name>/SKILL.md, plus a generated /gate command
+# (.claude/commands/gate.md, alongside the existing /counsel) that thin-invokes the gate skill.
+# Claude-Code-only: no other tool flag touches skills/.
+#
 # --user (combined with one or more of the above): installs the SAME generated projections at
 # USER level ($HOME) instead of into a target repo, so the personas follow you across every
 # project instead of being installed per-repo. No target-repo argument is accepted with --user —
@@ -41,7 +47,9 @@ Usage: install.sh /abs/path/to/target-repo [--claude] [--cursor] [--codex] [--ge
        install.sh --user [--claude] [--cursor] [--codex] [--gemini]
 
   (no flags)   Gate-only install: personas + verdict script + GitHub Action (default, unchanged).
-  --claude     Also install personas as Claude Code subagents + a /counsel command.
+  --claude     Also install personas as Claude Code subagents, the four canonical skills
+               (.claude/skills/{gate,counsel,spec-driven,design-contract}/), + /counsel and
+               /gate commands.
   --cursor     Also generate Cursor subagents, .cursor/agents/*.md (best-effort — see DESIGN.md).
   --codex      Also generate Codex Skills, .agents/skills/*/SKILL.md (best-effort — see DESIGN.md).
   --gemini     Also generate Gemini CLI commands, .gemini/commands/*.toml (best-effort — see DESIGN.md).
@@ -98,6 +106,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 AGENTS_SRC="$SCRIPT_DIR/agents"
+SKILLS_SRC="$SCRIPT_DIR/skills"
 DECIDE_SRC="$SCRIPT_DIR/action/decide_verdict.py"
 ACTION_SRC="$SCRIPT_DIR/action/review.yml"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
@@ -123,6 +132,7 @@ install_file() {
 }
 
 [[ -d "$AGENTS_SRC" ]] || die "missing $AGENTS_SRC — run this from a review-pantheon checkout"
+[[ -d "$SKILLS_SRC" ]] || die "missing $SKILLS_SRC — run this from a review-pantheon checkout"
 
 # Gate files (personas into .github/review-agents, decide_verdict.py, the workflow, the house
 # rules template, .gitignore) are a repo concept — a PR gate belongs to one repo's CI — so
@@ -218,15 +228,21 @@ escape_bs_quote() {
 # generation logic. generator_field/generator_body/escape_bs_quote above are already dest-root-
 # agnostic (they only read from $AGENTS_SRC).
 
-# install_claude <dest_root> — personas verbatim into <dest_root>/.claude/agents/, plus a
-# generated /counsel command at <dest_root>/.claude/commands/counsel.md. VERIFIED at both project
-# and user scope against current official docs (code.claude.com/docs/en/sub-agents,
-# code.claude.com/docs/en/slash-commands, fetched 2026-07-30): subagents load from both
-# `.claude/agents/` (project) and `~/.claude/agents/` (user — "available in every project on your
-# machine"). Slash commands are documented as merged into Skills going forward, but the docs
-# explicitly say ".claude/commands/ files keep working" — that mechanism is symmetric across
+# install_claude <dest_root> — personas verbatim into <dest_root>/.claude/agents/, the four
+# canonical skills verbatim into <dest_root>/.claude/skills/<name>/SKILL.md, plus generated
+# /counsel and /gate commands at <dest_root>/.claude/commands/{counsel,gate}.md. VERIFIED at both
+# project and user scope against current official docs (code.claude.com/docs/en/sub-agents,
+# code.claude.com/docs/en/skills, code.claude.com/docs/en/slash-commands, fetched 2026-08-01):
+# subagents load from both `.claude/agents/` (project) and `~/.claude/agents/` (user — "available
+# in every project on your machine"); skills load identically from `.claude/skills/<name>/SKILL.md`
+# (project) and `~/.claude/skills/<name>/SKILL.md` (personal — "all your projects") — a SKILL.md
+# needs only a `description` field (recommended, not required) for Claude to know when to load it;
+# `name` is optional and defaults to the directory name, which is what these skills rely on since
+# their directory names (gate, counsel, spec-driven, design-contract) are already the intended
+# command/skill names. Slash commands are documented as merged into Skills going forward, but the
+# docs explicitly say ".claude/commands/ files keep working" — that mechanism is symmetric across
 # scopes (Claude Code scans a `commands/` dir wherever it finds one under `.claude/`), so
-# `~/.claude/commands/counsel.md` works the same way `.claude/commands/counsel.md` does today.
+# `~/.claude/commands/{counsel,gate}.md` work the same way their project-level counterparts do.
 install_claude() {
   local dest_root="$1"
   local claude_agents_dest="$dest_root/.claude/agents"
@@ -234,6 +250,43 @@ install_claude() {
   for persona in "$AGENTS_SRC"/*.md; do
     install_file "$persona" "$claude_agents_dest/$(basename "$persona")"
   done
+
+  # Skills — skills/{gate,counsel,spec-driven,design-contract}/SKILL.md is the single
+  # hand-maintained source (same shape as agents/*.md under DESIGN.md rule 4); copied verbatim,
+  # never regenerated per install, into .claude/skills/<name>/SKILL.md.
+  local claude_skills_dest="$dest_root/.claude/skills"
+  for skill_dir in "$SKILLS_SRC"/*/; do
+    local skill_name
+    skill_name="$(basename "$skill_dir")"
+    mkdir -p "$claude_skills_dest/$skill_name"
+    install_file "$skill_dir/SKILL.md" "$claude_skills_dest/$skill_name/SKILL.md"
+  done
+
+  local gate_tmp
+  gate_tmp="$(mktemp)"
+  cat > "$gate_tmp" <<'GATE_EOF'
+---
+description: Run review-pantheon's review gate (Artemis + Apollo) against a PR — dry-run first, then live, and read the combined verdict per the gate skill's discipline.
+argument-hint: [--pr <number> [--dry-run]]
+---
+
+<!-- GENERATED by install.sh --claude — do not edit by hand; re-run install.sh --claude to
+     refresh it. Thin invoker: the actual procedure lives in the gate skill installed alongside
+     this file at .claude/skills/gate/SKILL.md. Edit that skill in review-pantheon's own
+     skills/gate/SKILL.md (the canonical source), not this command. -->
+
+# /gate — run the review-pantheon gate
+
+PR reference / flags: $ARGUMENTS
+
+Follow the procedure in the installed `gate` skill (`.claude/skills/gate/SKILL.md`) — dry-run
+first, reading the combined verdict correctly, follow-up mode, and the findings discipline — to
+run `review-gate` against the PR referenced above (ask which PR if none was given). Default to a
+`--dry-run` pass first unless the arguments explicitly request a live run.
+GATE_EOF
+
+  install_file "$gate_tmp" "$dest_root/.claude/commands/gate.md"
+  rm -f "$gate_tmp"
 
   local counsel_tmp
   counsel_tmp="$(mktemp)"
@@ -413,7 +466,7 @@ fi
 
 if [[ "$DO_USER" == "true" ]]; then
   INSTALLED_TOOLS=()
-  [[ "$DO_CLAUDE" == "true" ]] && INSTALLED_TOOLS+=("claude ($DEST_ROOT/.claude/agents/, $DEST_ROOT/.claude/commands/counsel.md)")
+  [[ "$DO_CLAUDE" == "true" ]] && INSTALLED_TOOLS+=("claude ($DEST_ROOT/.claude/agents/, $DEST_ROOT/.claude/skills/{gate,counsel,spec-driven,design-contract}/, $DEST_ROOT/.claude/commands/{counsel,gate}.md)")
   [[ "$DO_CURSOR" == "true" ]] && INSTALLED_TOOLS+=("cursor ($DEST_ROOT/.cursor/agents/)")
   [[ "$DO_CODEX" == "true" ]] && INSTALLED_TOOLS+=("codex ($DEST_ROOT/.agents/skills/)")
   [[ "$DO_GEMINI" == "true" ]] && INSTALLED_TOOLS+=("gemini ($DEST_ROOT/.gemini/commands/)")
