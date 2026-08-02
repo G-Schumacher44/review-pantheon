@@ -301,6 +301,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# `.agent`/`.verdict` fields ending in a trailing newline must still decide GREEN, matching real
+# bash: cli/lib/verdict.sh's `agent_field="$(jq -r '.agent' <<<"$verdict_json")"` /
+# `verdict="$(jq -r '.verdict' <<<"$verdict_json")"` are $(...) captures, already stripped of
+# their trailing newlines by the time bash's own comparisons run.
+check "trailing-newline-in-agent-and-verdict-fields-still-decides-green" "artemis" \
+  '{"agent":"artemis\n","verdict":"SHIP\n","has_blocker":false,"findings":[],"summary":"s"}' \
+  "green" "false"
+# Verified live against the real bash decider (cli/lib/verdict.sh, sourced directly) for this
+# exact input: bash decides green (matching this check's expectation). Pre-fix, pantheon.verdict
+# compared the raw, un-subst'd "artemis\n"/"SHIP\n" strings directly and decided unverified.
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

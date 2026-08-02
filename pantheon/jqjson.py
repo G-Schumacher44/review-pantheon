@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -266,23 +267,37 @@ def jq_text(value: Any) -> str:
 
 
 def subst(text: str) -> str:
-    """bash's ``$(...)`` command-substitution semantics: strip trailing newlines from ``text`` —
-    ALL of them, not just one, and ONLY newlines (no other trailing whitespace is touched; this
-    is POSIX/bash's own documented ``$(...)`` behavior, nothing to do with jq itself). Every jq
-    extraction either runtime's bash implementation ever performs is captured through exactly
-    this mechanism (``var="$(jq -r '...' <<<"$json")"``), so a jq-extracted value that itself
-    ends in a newline — or a display field this port's own ``jq_text`` stringified into text
-    ending in one — is ALREADY missing those trailing newlines by the time bash's own variable
-    holds it, before that variable is ever compared (an emptiness check) or interpolated again.
+    """bash's ``$(...)`` command-substitution semantics — TWO effects, both applied here, both
+    with nothing to do with jq itself (they're plain-bash properties of capturing a subprocess's
+    stdout this way):
+
+      1. ALL trailing newlines are stripped (POSIX/bash's own documented ``$(...)`` behavior).
+      2. Every NUL byte anywhere in the captured text is dropped, not just trailing ones — bash
+         represents its variables as C strings internally and simply cannot hold a NUL at all;
+         verified live (bash itself prints "ignored null byte in input" the moment a NUL reaches
+         a command substitution). Critically, this happens BEFORE bash's own variable holds the
+         value at all — meaning it happens before ANY comparison against that variable, not just
+         before final display. Caught live on this PR: a severity of ``"blocker\\x00"`` correctly
+         matches bash's ``case "blocker" in blocker) ...`` (NUL already gone by comparison time)
+         but was still failing this module's own ``==`` comparisons before this fix, because the
+         NUL-stripping this module already had (``pantheon.render.sanitize_inline``) only ran at
+         final DISPLAY time, after the comparison had already happened and already failed.
+
+    Every jq extraction either runtime's bash implementation ever performs is captured through
+    exactly this mechanism (``var="$(jq -r '...' <<<"$json")"``), so a jq-extracted value — or a
+    display field this port's own ``jq_text`` stringified — is ALREADY missing its trailing
+    newlines AND any embedded NUL by the time bash's own variable holds it, before that variable
+    is ever compared (an emptiness check, a vocabulary/severity match) or interpolated again.
     A caller applies this at exactly the sites whose bash counterpart used ``$(...)`` before
-    such a check or interpolation — not universally, since plenty of values this port reads
-    (an agent's stated ``verdict``, its ``top`` fallback text) come from a bash counterpart that
-    reads an env var DIRECTLY (``${!var:-default}``), never through ``$(...)``, and so were never
-    subject to this stripping in the first place. A non-``str`` input is returned unchanged —
-    safe to call defensively on a value that might not have gone through :func:`jq_text` yet."""
+    such a check or interpolation — not universally, since plenty of values this port reads (an
+    agent's stated ``verdict`` field's OWN identity in some contexts, its ``top`` fallback text)
+    come from a bash counterpart that reads an env var DIRECTLY (``${!var:-default}``), never
+    through ``$(...)``, and so were never subject to this stripping in the first place. A
+    non-``str`` input is returned unchanged — safe to call defensively on a value that might not
+    have gone through :func:`jq_text` yet."""
     if not isinstance(text, str):
         return text
-    return text.rstrip("\n")
+    return text.replace("\x00", "").rstrip("\n")
 
 
 def loads(text: str) -> Any:
@@ -311,26 +326,64 @@ def loads(text: str) -> Any:
     return value
 
 
-def _prepare_for_dump(value: Any, raw_registry: dict) -> Any:
+def _collect_strings(value: Any, out: list) -> None:
+    """Recursively collects every string in ``value`` (dict keys included) into ``out`` —
+    used by :func:`_make_unique_token` to verify a generated placeholder token collides with
+    nothing already present in the tree being serialized, before that token is ever used."""
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            _collect_strings(k, out)
+            _collect_strings(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _collect_strings(v, out)
+
+
+def _make_unique_token(existing_strings: list) -> str:
+    """Generates a placeholder token for :func:`_prepare_for_dump` that is PROVABLY absent
+    from every string already in the tree — not merely "unlikely to collide". An earlier
+    version used a deterministic, sequential token (``jqjson-raw-0``, ``jqjson-raw-1``, ...);
+    since this is a public open-source repo, that token's exact text is readable by anyone,
+    including whoever is crafting the untrusted model output this module parses — a payload
+    that deliberately contains the literal placeholder string as genuine content (e.g. an
+    ``.issue`` field equal to the placeholder's own text) would have its own content silently
+    corrupted into an unrelated preserved number by :func:`dumps`'s later global string-replace
+    pass, since that pass has no way to distinguish "the placeholder I inserted" from
+    "identical text the model happened to submit". Fixed two ways at once: the token's own
+    identifying component is 128 bits of ``secrets``-module cryptographic randomness (not a
+    guessable sequence number), AND — for a provable guarantee rather than a merely-
+    overwhelming-probability one — the candidate is checked against every string already in
+    the tree and regenerated on the (already astronomically unlikely) chance of a collision,
+    exactly like the finding demanded ("use a collision-proof encoding strategy rather than
+    assuming the placeholder cannot occur"). Still wrapped in Private-Use-Area code points
+    (U+E000) so ``json.dumps(..., ensure_ascii=False)`` never escapes it, keeping the later
+    string-replace pass's search pattern simple."""
+    while True:
+        candidate = f"jqjson-raw-{secrets.token_hex(16)}"
+        if not any(candidate in s for s in existing_strings):
+            return candidate
+
+
+def _prepare_for_dump(value: Any, raw_registry: dict, existing_strings: list) -> Any:
     """Recursively walks ``value``, replacing every :data:`NAN` sentinel with ``None`` (which
     ``json.dumps`` then serializes as ordinary JSON ``null`` — matching jq's own NaN print form)
-    and every :class:`_RawBigNumber` with a unique placeholder token registered in
-    ``raw_registry``, so :func:`dumps` can splice the raw numeral text back in UNQUOTED after
-    ``json.dumps`` runs (there is no supported way to make the stdlib encoder emit an arbitrary
-    unquoted token directly — the ``default`` hook's return value is itself re-encoded, not
-    spliced in raw). The placeholder uses Private-Use-Area code points (U+E000 range), which
-    ``json.dumps(..., ensure_ascii=False)`` never escapes and which no legitimate model output is
-    remotely likely to contain, so the later string-replace pass can't collide with real content."""
+    and every :class:`_RawBigNumber` with a unique placeholder token (see
+    :func:`_make_unique_token`) registered in ``raw_registry``, so :func:`dumps` can splice the
+    raw numeral text back in UNQUOTED after ``json.dumps`` runs (there is no supported way to
+    make the stdlib encoder emit an arbitrary unquoted token directly — the ``default`` hook's
+    return value is itself re-encoded, not spliced in raw)."""
     if value is NAN:
         return None
     if isinstance(value, _RawBigNumber):
-        token = f"jqjson-raw-{len(raw_registry)}"
+        token = _make_unique_token(existing_strings)
         raw_registry[token] = str(value)
         return token
     if isinstance(value, dict):
-        return {k: _prepare_for_dump(v, raw_registry) for k, v in value.items()}
+        return {k: _prepare_for_dump(v, raw_registry, existing_strings) for k, v in value.items()}
     if isinstance(value, list):
-        return [_prepare_for_dump(v, raw_registry) for v in value]
+        return [_prepare_for_dump(v, raw_registry, existing_strings) for v in value]
     return value
 
 
@@ -366,7 +419,9 @@ def dumps(obj: Any, *, indent: int | None = None, ensure_ascii: bool = False) ->
     ``ensure_ascii=False`` path — the only one exercised by ``pantheon.render``'s own tests up to
     that point — was already verified working.)"""
     raw_registry: dict = {}
-    prepared = _prepare_for_dump(obj, raw_registry)
+    existing_strings: list = []
+    _collect_strings(obj, existing_strings)
+    prepared = _prepare_for_dump(obj, raw_registry, existing_strings)
     text = json.dumps(prepared, indent=indent, ensure_ascii=ensure_ascii, allow_nan=False)
     for token, raw in raw_registry.items():
         quoted_token = json.dumps(token, ensure_ascii=ensure_ascii)

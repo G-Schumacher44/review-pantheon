@@ -242,8 +242,18 @@ def decide(expected_agent: str, raw: str) -> dict:
             "verdict_json": verdict_obj,
         }
 
-    agent_field = verdict_obj.get("agent")
-    verdict = verdict_obj.get("verdict")
+    # Both routed through jq_text (jq -r's raw-output stringification — `.agent` isn't
+    # type-strict-validated above, so it could be any JSON type) then subst (bash's $(...)
+    # trailing-newline-and-NUL strip) BEFORE the comparisons below — mirroring bash's own
+    # `agent_field="$(jq -r '.agent' <<<"$verdict_json")"` / `verdict="$(jq -r '.verdict'
+    # <<<"$verdict_json")"` variable assignments exactly: bash's case/equality checks run AFTER
+    # that $(...) capture already happened, not on the raw field text. Caught live on this PR: a
+    # verdict object with `"agent":"artemis\n"` decided GREEN in bash (the trailing newline
+    # already stripped by the time bash's `[[ "$agent_field" != "$expected_agent" ]]` runs) but
+    # UNVERIFIED here, comparing the raw un-stripped string directly — a genuine decision-color
+    # divergence, not just a display-text one.
+    agent_field = jqjson.subst(jqjson.jq_text(verdict_obj.get("agent")))
+    verdict = jqjson.subst(jqjson.jq_text(verdict_obj.get("verdict")))
     top = top_finding_of(verdict_obj)
 
     reason = ""
