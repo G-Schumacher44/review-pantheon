@@ -30,7 +30,7 @@ Prerequisites (bash, git, jq, gh, python3 for the Action surface, one provider C
 [docs/SETUP.md](docs/SETUP.md#prerequisites) for the full table and what each one gates.
 
 Run the suites — each is a standalone fixture test, no runner needed. **This table is the
-canonical, complete list — verified against `git ls-tree -r tests/`** (15 files; DESIGN.md's
+canonical, complete list — verified against `git ls-tree -r tests/`** (17 files; DESIGN.md's
 "Layout" section points here instead of re-listing them, see DESIGN.md rule 5 on the two staying
 in sync):
 

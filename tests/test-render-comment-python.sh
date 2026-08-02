@@ -341,6 +341,71 @@ out="$(render "$HEAD_SHA" artemis)"
 assert_contains "multi-byte-truncation" "the table cell keeps the boundary character whole" "$out" "${MB_PREFIX_88}→…"
 
 # ---------------------------------------------------------------------------
+# Additional Python-port regression coverage (beyond the 1:1 bash-suite mirror above) — the
+# repo's own self-hosted gate (Codex) found these four divergences on this PR, each proven
+# failing pre-fix against a live repro (bash vs. Python, byte-diffed) before the corresponding
+# pantheon/render.py fix landed. Asserted here as direct byte-identity checks against the real
+# bash renderer (cli/lib/render_comment.sh, sourced fresh per case), not string-contains checks,
+# since "byte-identical output" is the exact property each of these gaps violated.
+# ---------------------------------------------------------------------------
+
+# bash_render <head_sha> <agent...> — the bash-side counterpart to render(), used only in this
+# section for direct byte-identity comparison against the same command-substitution capture
+# shape render() already uses (both sides losing a trailing newline the same way is fine; what
+# matters is comparing like-for-like).
+bash_render() {
+  # shellcheck disable=SC1091
+  (source "$ROOT/cli/lib/render_comment.sh" && pantheon_render_comment "$@")
+}
+
+assert_byte_identical() {
+  local case_name="$1"
+  local bash_out py_out
+  bash_out="$(bash_render "$HEAD_SHA" artemis)"
+  py_out="$(render "$HEAD_SHA" artemis)"
+  if [[ "$bash_out" == "$py_out" ]]; then
+    pass "$case_name: byte-identical to cli/lib/render_comment.sh"
+  else
+    fail "$case_name: byte-identical to cli/lib/render_comment.sh" "outputs differ (see diff below)"
+    diff <(printf '%s' "$bash_out") <(printf '%s' "$py_out") | head -20
+  fi
+}
+
+# Divergence 1: NaN in a display field must print jq's "null" (jq's own print form for its NaN
+# coercion), not Python's re-emitted literal "NaN" token.
+reset_agent_env
+ARTEMIS_COLOR=green ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="no findings"
+ARTEMIS_FINDINGS='{"summary":NaN,"findings":[]}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+assert_byte_identical "nan-in-summary-prints-jq-null"
+
+# Divergence 2: a completely UNSET FINDINGS env var must reproduce bash's own
+# `${!findings_var:-\{\}}` default-value quirk (the literal 3-char string `\{}`, invalid JSON) in
+# the machine tail's raw-text fallback — not a "clean" `{}`.
+reset_agent_env
+ARTEMIS_COLOR=green ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="no findings"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP
+unset ARTEMIS_FINDINGS
+assert_byte_identical "unset-findings-var-machine-tail-matches-bash-quirk"
+
+# Divergence 3: FINDINGS set to valid JSON that ISN'T an object (a bare array) — the machine tail
+# must pretty-print the parsed array (matching jq's `.` filter, which doesn't care that it's not
+# an object), not collapse it to `{}`.
+reset_agent_env
+ARTEMIS_COLOR=green ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="no findings"
+ARTEMIS_FINDINGS='[1,2,3]'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+assert_byte_identical "non-object-json-findings-pretty-prints-in-machine-tail"
+
+# Divergence 4: Infinity in a display field must render as jq's coerced max-double text, not
+# Python's re-emitted literal "Infinity" token (also not valid JSON in the machine tail).
+reset_agent_env
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="x"
+ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"note","file":"a","line":1,"issue":"x","scenario":"y"}],"summary":Infinity}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+assert_byte_identical "infinity-in-summary-prints-jq-max-double"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

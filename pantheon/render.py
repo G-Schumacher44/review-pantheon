@@ -45,18 +45,114 @@ _SEVERITY_RANK = {"blocker": 0, "should_fix": 1, "note": 2}
 _LINE_RE = re.compile(r"^[0-9]+$")
 _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
+# jq's max/min IEEE-754 double — what jq's parser coerces the non-standard Infinity/-Infinity
+# JSON-extension tokens to (see _jq_compat_constant below).
+_JQ_MAX_DOUBLE = 1.7976931348623157e308
+
+
+class _JqNaN:
+    """Sentinel for jq's own NaN handling — deliberately NOT Python's ``None``. jq's parser
+    accepts the non-standard ``NaN`` JSON-extension token (same as Python's json module) but
+    represents it internally as a number that always PRINTS as the text ``null`` wherever jq
+    finally serializes it (``-r`` raw mode, a pretty/compact dump) — a jq-implementation quirk,
+    since NaN has no representable value in JSON's own number grammar. Critically, verified live,
+    it is NOT treated as an actual JSON null for jq's own truthiness/`` // `` (alternative
+    operator) purposes: ``echo '{"summary":NaN}' | jq -r '.summary // empty'`` prints the text
+    ``null`` — proof the ``//`` operator did NOT fire (a real null there would make ``// empty``
+    produce nothing at all, since null is one of the two falsy values ``//`` checks). Mapping
+    jq's NaN to Python's actual ``None`` would get this backwards: this module's own
+    ``_or_default`` (this file's ``// default`` equivalent) already, correctly, treats a real
+    ``None`` as "substitute the default" — exactly the behavior a genuine JSON null gets in jq,
+    and exactly the behavior jq's own NaN handling does NOT get. This sentinel's ``__str__``/
+    ``__repr__`` return ``"null"`` (matching jq's print form everywhere this module stringifies a
+    value — see :func:`_jq_raw` and ``pantheon.verdict``'s ``top_finding_of``, which relies on
+    this via ordinary f-string interpolation), while remaining a distinct, non-``None``,
+    non-``False`` object everywhere else, so :func:`_or_default` and every other identity/type
+    check in this module keeps it exactly as truthy as jq does."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "null"
+
+    def __str__(self) -> str:
+        return "null"
+
+
+_JQ_NAN = _JqNaN()
+
+
+def _jq_json_default(value: Any) -> Any:
+    """``json.dumps``'s ``default`` hook for :data:`_JQ_NAN`, wherever it might be nested inside
+    a value this module serializes (the machine tail's pretty dump). The returned ``None`` is
+    re-encoded normally by the encoder as JSON ``null`` — matching jq's own serialization of NaN
+    — it is not spliced in raw."""
+    if value is _JQ_NAN:
+        return None
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")  # pragma: no cover
+
+
+def _jq_compat_constant(name: str) -> Any:
+    """``json.loads``'s ``parse_constant`` hook, at every parse site in this module that feeds a
+    value into display or the machine tail. Python's json module extends the JSON grammar with
+    three non-standard tokens (``NaN``, ``Infinity``, ``-Infinity``) and, by default, keeps them
+    as literal ``float('nan')``/``float('inf')``/``float('-inf')`` objects. jq's parser accepts
+    the same extension tokens but does NOT keep them as-is — verified live against real jq (1.7.1
+    local, 1.7 in the exact Ubuntu 24.04/Dockerfile.smoke CI environment): ``Infinity``/
+    ``-Infinity`` coerce to the max/min IEEE-754 double (an ordinary, truthy JSON number in jq's
+    own type system — a plain Python float is the correct, direct equivalent, no sentinel
+    needed). ``NaN`` is the special case :class:`_JqNaN` exists for — see that class's docstring.
+    Left unfixed, a raw Python ``float('nan')``/``float('inf')`` surviving to display diverges
+    from bash's actual output text, AND — worse — a raw ``float('nan')`` reaching ``json.dumps``
+    later re-emits the bare, non-standard ``NaN`` token in the machine-readable "Raw verdict
+    JSON" block, which is not valid JSON per RFC 8259, unlike jq's own (already-coerced,
+    always-valid) equivalent output. Coercing at PARSE time — not by adding ``allow_nan=False``
+    at every ``json.dumps`` call, which would only turn this into a crash for any parse site this
+    specific fix missed — means no raw NaN/Infinity float value exists in this module's data
+    model past this point, so nothing downstream needs to know about the non-standard tokens at
+    all. (Caught live — the repo's own self-hosted gate on this PR flagged this.)"""
+    if name == "NaN":
+        return _JQ_NAN
+    if name == "Infinity":
+        return _JQ_MAX_DOUBLE
+    if name == "-Infinity":
+        return -_JQ_MAX_DOUBLE
+    raise ValueError(f"unexpected JSON constant: {name}")  # pragma: no cover — json's own grammar
+
 
 @dataclass
 class AgentRenderData:
     """One agent's render-time inputs — the structured equivalent of the bash contract's six
-    per-agent env vars (``<NAME>_COLOR`` etc., see this module's docstring)."""
+    per-agent env vars (``<NAME>_COLOR`` etc., see this module's docstring).
+
+    ``findings_json`` is the STRUCTURED view every display helper in this module reads
+    (``{}`` if the source text failed to parse, or parsed to something other than a JSON
+    object — matching the fail-closed-to-``{}`` guards those helpers already apply).
+    ``findings_raw`` is the exact source text, kept separately, purely for the machine tail's
+    fallback-to-raw-text behavior (see :func:`_machine_tail_text`) — mirroring
+    ``cli/lib/render_comment.sh``'s own ``jq '.' <<<"$findings_json" 2>/dev/null ||
+    printf '%s\\n' "$findings_json"`` pattern, which shows the PARSED-and-pretty-printed value on
+    success (of any JSON type, not just objects) but falls back to the untouched raw text on a
+    parse failure — including bash's own ``\\{}``-shaped default-value quirk for a completely
+    unset env var (see :func:`_agent_data_from_env`), which is itself invalid JSON and so
+    triggers that same raw-text fallback in bash's real output."""
 
     color: str = "unverified"
     verdict: str = "UNVERIFIED"
     top: str = ""
     findings_json: dict = field(default_factory=dict)
+    findings_raw: str | None = None
     invariant: bool = False
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        # A direct caller (this module's programmatic API, not the env-var bridge below) that
+        # only sets findings_json gets a findings_raw derived from it automatically, so the
+        # machine tail stays in sync with findings_json by default — an explicit findings_raw
+        # (what the env-var bridge always provides, and what a test deliberately exercising the
+        # raw-text-fallback path can still pass) overrides this.
+        if self.findings_raw is None:
+            self.findings_raw = json.dumps(self.findings_json, ensure_ascii=False, default=_jq_json_default)
 
 
 # ---------------------------------------------------------------------------
@@ -86,12 +182,18 @@ def _jq_raw(value: Any) -> str:
     gate flagged this on the same PR, immediately after the boolean fix above landed.) The
     resulting multi-line text is safe to hand to :func:`sanitize_inline` unchanged: its newline
     -> space collapse already normalizes it the same way bash's ``$(...)`` command substitution
-    plus that function's bash equivalent does for a multi-line jq value."""
+    plus that function's bash equivalent does for a multi-line jq value.
+
+    A :data:`_JQ_NAN` sentinel (a display field whose source JSON contained the non-standard
+    ``NaN`` extension token) stringifies via its own ``__str__`` below, which already returns
+    ``"null"`` — matching jq's own print form for the same value (see that class's docstring)."""
     if isinstance(value, str):
         return value
     if isinstance(value, bool):
         return "true" if value else "false"
-    return json.dumps(value, indent=2, ensure_ascii=False)
+    if value is _JQ_NAN:
+        return str(value)
+    return json.dumps(value, indent=2, ensure_ascii=False, default=_jq_json_default)
 
 
 def sanitize_inline(s: Any) -> str:
@@ -287,6 +389,24 @@ def _or_default(value: Any, default: str) -> Any:
     return value
 
 
+def _machine_tail_text(raw_text: str) -> str:
+    """The machine tail's per-agent code-fence content — mirrors
+    ``cli/lib/render_comment.sh``'s ``jq '.' <<<"$findings_json" 2>/dev/null ||
+    printf '%s\\n' "$findings_json"`` exactly: pretty-print the PARSED value (2-space indent, raw
+    UTF-8, jq-compatible NaN/Infinity coercion via :func:`_jq_compat_constant`) if ``raw_text``
+    parses as JSON — of WHATEVER type it parses to, not narrowed to an object, since jq's ``.``
+    filter happily pretty-prints a bare array/scalar too — otherwise fall back to ``raw_text``
+    completely untouched. This is deliberately a DIFFERENT rule than the structured render
+    helpers use (``_safe_findings`` et al., which narrow anything non-object/non-array to an
+    empty/absent result): the machine tail's whole purpose is showing what's actually there,
+    parseable or not, exactly like bash's own fallback does."""
+    try:
+        parsed = json.loads(raw_text, parse_constant=_jq_compat_constant)
+    except json.JSONDecodeError:
+        return raw_text
+    return json.dumps(parsed, indent=2, ensure_ascii=False, default=_jq_json_default)
+
+
 def _escape_lone_surrogates(s: str) -> str:
     """A Python ``str`` can hold a lone (unpaired) surrogate code point (U+D800-U+DFFF) —
     reachable here via a JSON ``\\ud800``-style escape in an agent's raw output, which
@@ -420,11 +540,10 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
     lines.append("")
     for agent in agents:
         d = data_for(agent)
-        findings_obj = d.findings_json if isinstance(d.findings_json, dict) else {}
         lines.append(f"**{agent}**")
         lines.append("")
         lines.append("```json")
-        lines.append(json.dumps(findings_obj, indent=2, ensure_ascii=False))
+        lines.append(_machine_tail_text(d.findings_raw))
         lines.append("```")
         lines.append("")
     lines.append("</details>")
@@ -449,9 +568,22 @@ def _agent_data_from_env(agent: str) -> AgentRenderData:
     color = os.environ.get(f"{upper}_COLOR") or "unverified"
     verdict = os.environ.get(f"{upper}_VERDICT") or "UNVERIFIED"
     top = os.environ.get(f"{upper}_TOP", "")
-    findings_raw = os.environ.get(f"{upper}_FINDINGS") or "{}"
+    # bash's own contract, verbatim: `findings_json="${!findings_var:-\{\}}"` — bash's `:-`
+    # operator substitutes its default word for BOTH an unset var and one set to an empty
+    # string (unlike `${var-default}`, which only fires on unset). The literal default word
+    # itself is NOT the 2-char `{}` it looks like at a glance: verified live
+    # (`x="${FOO:-\{\}}"; printf '%s' "$x"` with FOO unset) that bash's own escaping rules
+    # collapse it to the 3-char string `\{}` — a backslash followed by a plain, unescaped `{}`
+    # pair — not `{}` and not the 4-char `\{\}` either. That string is invalid JSON (a JSON
+    # document can't start with a backslash), so it triggers the same jq-parse-failure ->
+    # raw-text-fallback path as any other malformed FINDINGS text (see _machine_tail_text) —
+    # confirmed live against the real bash renderer for both the fully-unset-var case AND the
+    # set-to-empty-string case (both produce the identical `\{}` machine-tail text). Matching
+    # this exactly (not the "clean" `{}` this bridge used before) is what makes the machine
+    # tail byte-identical to bash's for an agent whose FINDINGS var was never populated.
+    findings_raw = os.environ.get(f"{upper}_FINDINGS") or "\\{}"
     try:
-        findings_json = json.loads(findings_raw)
+        findings_json = json.loads(findings_raw, parse_constant=_jq_compat_constant)
     except json.JSONDecodeError:
         findings_json = {}
     if not isinstance(findings_json, dict):
@@ -463,6 +595,7 @@ def _agent_data_from_env(agent: str) -> AgentRenderData:
         verdict=verdict,
         top=top,
         findings_json=findings_json,
+        findings_raw=findings_raw,
         invariant=invariant,
         reason=reason,
     )

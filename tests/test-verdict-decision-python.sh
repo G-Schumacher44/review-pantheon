@@ -180,6 +180,64 @@ check "verdict-followed-by-second-json-doc-trailing-scalar" "artemis" \
   "unverified" "false"
 
 # ---------------------------------------------------------------------------
+# Additional Python-port regression coverage (beyond the 1:1 bash-suite mirror above) — the
+# repo's own self-hosted gate (Codex) found these on this PR, both proven failing pre-fix
+# against a live repro before the corresponding pantheon/verdict.py fix landed:
+#
+#   - NaN in a display field (not the type-strict-validated surface) must not crash decide(),
+#     and the resulting decision dict must itself be JSON-safe to re-serialize (main()'s own
+#     json.dumps(decision) call) — pre-fix, a raw Python float('nan') survived parsing and
+#     `json.dumps(decision)` re-emitted the bare, non-standard `NaN` token (invalid per RFC 8259).
+#   - top_finding_of's f-string interpolation of a NaN-valued .line must print jq's own "null"
+#     text, not Python's default str(None) == "None" — pre-fix (a plain `None` mapping instead
+#     of the _JqNaN sentinel) this printed "blocker: x (a:None)" instead of "blocker: x (a:null)".
+#
+# These aren't decision-color divergences (NaN never reaches the type-strict-validated surface,
+# so color/verdict/invariant_fired are unaffected either way — verified separately) — they're
+# about decide()'s own JSON-safety and text output, which the 23-fixture mirror above doesn't
+# exercise since none of its fixtures contain non-standard JSON constants.
+# ---------------------------------------------------------------------------
+
+check_no_crash_and_valid_json() {
+  local name="$1" agent="$2" raw="$3"
+  local raw_file py_stdout py_exit
+  raw_file="$(mktemp)"
+  printf '%s' "$raw" > "$raw_file"
+  py_stdout="$(cd "$ROOT" && python3 -m pantheon.verdict "$agent" "$raw_file" 2>/dev/null)"
+  py_exit=$?
+  rm -f "$raw_file"
+  if [[ "$py_exit" -ne 0 && "$py_exit" -ne 1 ]]; then
+    echo "FAIL $name: python3 -m pantheon.verdict exited $py_exit (expected 0 or 1, a crash/traceback exits differently)"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if ! jq -e . <<<"$py_stdout" >/dev/null 2>&1; then
+    echo "FAIL $name: decision JSON itself failed to parse (a bare NaN/Infinity token would do this): $py_stdout"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  echo "PASS $name (decide() did not crash; its own JSON output is valid JSON)"
+  PASS=$((PASS + 1))
+}
+
+check_no_crash_and_valid_json "nan-in-summary-does-not-crash-and-json-dumps-cleanly" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":NaN}'
+
+# top_finding text must interpolate jq's "null" print form for a NaN .line, not Python's "None".
+raw_file="$(mktemp)"
+printf '%s' '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"blocker","file":"a","line":NaN,"issue":"x","scenario":"y"}],"summary":"s"}' > "$raw_file"
+py_decision="$(cd "$ROOT" && python3 -m pantheon.verdict artemis "$raw_file" 2>/dev/null)"
+rm -f "$raw_file"
+py_top="$(jq -r '.top_finding' <<<"$py_decision" 2>/dev/null)"
+if [[ "$py_top" == "blocker: x (a:null)" ]]; then
+  echo "PASS nan-line-interpolates-as-jq-null-not-python-none (top_finding='$py_top')"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL nan-line-interpolates-as-jq-null-not-python-none: got '$py_top', expected 'blocker: x (a:null)'"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

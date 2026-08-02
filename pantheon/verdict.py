@@ -59,6 +59,83 @@ TYPE_STRICT_REASON = (
     "must be a string in {blocker,should_fix,note})"
 )
 
+# jq's max IEEE-754 double — what jq's parser coerces the non-standard Infinity/-Infinity
+# JSON-extension tokens to (see _jq_compat_constant below). Mirrors pantheon.render's constant
+# of the same name/value exactly — kept in sync by contract, same as everywhere else in this
+# repo two implementations of one rule coexist (DESIGN.md's "Two runtimes, one rule").
+_JQ_MAX_DOUBLE = 1.7976931348623157e308
+
+
+class _JqNaN:
+    """Sentinel for jq's own NaN handling — deliberately NOT Python's ``None``. Mirrors
+    ``pantheon.render``'s class of the same name exactly (kept in sync by contract): jq's parser
+    accepts the non-standard ``NaN`` JSON-extension token but represents it internally as a value
+    that always PRINTS as the text ``null`` wherever jq finally serializes/interpolates it, while
+    remaining NOT an actual JSON null for jq's own truthiness/``//`` purposes — verified live,
+    ``echo '{"summary":NaN}' | jq -r '.summary // empty'`` prints ``null`` (proof ``//`` did NOT
+    fire; a real null there would print nothing). This module's own decision logic never branches
+    on a display field's truthiness the way ``pantheon.render``'s ``_or_default`` does, but
+    :func:`top_finding_of` DOES interpolate raw finding fields (file/issue/line) directly into an
+    f-string — and Python's default ``str(None)`` is the literal text ``"None"``, not jq's
+    ``"null"``. This sentinel's ``__str__``/``__repr__`` return ``"null"`` so that ordinary
+    f-string interpolation already matches jq's print form with no special-casing needed at the
+    call site."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "null"
+
+    def __str__(self) -> str:
+        return "null"
+
+
+_JQ_NAN = _JqNaN()
+
+
+def _jq_json_default(value: object) -> object:
+    """``json.dumps``'s ``default`` hook for :data:`_JQ_NAN`, wherever it might be nested inside
+    ``decision["verdict_json"]`` (``main()``'s own ``json.dumps(decision)`` call). The returned
+    ``None`` is re-encoded normally by the encoder as JSON ``null`` — matching jq's own
+    serialization of NaN — it is not spliced in raw."""
+    if value is _JQ_NAN:
+        return None
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")  # pragma: no cover
+
+
+def _jq_compat_constant(name: str) -> object:
+    """``json.loads``'s ``parse_constant`` hook, at every parse site in this module. Python's
+    json module extends the JSON grammar with three non-standard tokens (``NaN``, ``Infinity``,
+    ``-Infinity``) and, by default, keeps them as literal ``float('nan')``/``float('inf')``/
+    ``float('-inf')`` objects. jq's parser accepts the same extension tokens but does NOT keep
+    them as-is — verified live against real jq (1.7.1 local, 1.7 in the exact Ubuntu 24.04/
+    Dockerfile.smoke CI environment): ``Infinity``/``-Infinity`` coerce to the max/min IEEE-754
+    double (an ordinary, ``//``-truthy JSON number — a plain Python float is the correct, direct
+    equivalent, no sentinel needed). ``NaN`` is the special case :class:`_JqNaN` exists for — see
+    that class's docstring.
+
+    This module's own DECISION (color/verdict/invariant_fired) is unaffected either way — NaN/
+    Infinity can only ever reach an unvalidated DISPLAY field (summary, a finding's file/issue/
+    scenario/line), never the type-strict-validated invariant-read surface (verdict/has_blocker/
+    findings/severity), which already rejects a non-string/non-boolean value regardless of this
+    hook. This exists for what THIS module hands back as ``verdict_json`` (the full parsed
+    object, display fields included) and ``top_finding``: a raw ``float('nan')`` surviving there
+    would let ``main()``'s own ``json.dumps(decision)`` re-emit the bare, non-standard ``NaN``
+    token — invalid per RFC 8259, unlike jq's own (already-coerced, always-valid) output for the
+    same input — and would diverge from ``pantheon.render``'s display text (and this module's own
+    ``top_finding_of`` interpolation) for the same value. Coercing at PARSE time means no raw
+    NaN/Infinity float value exists in this module's data model past this point. (Caught live —
+    the repo's own self-hosted gate on this PR flagged this, against ``pantheon.render``'s side
+    of the same class of gap; verdict.py mirrors the same fix for consistency and because its own
+    ``verdict_json``/``top_finding`` output has the identical exposure.)"""
+    if name == "NaN":
+        return _JQ_NAN
+    if name == "Infinity":
+        return _JQ_MAX_DOUBLE
+    if name == "-Infinity":
+        return -_JQ_MAX_DOUBLE
+    raise ValueError(f"unexpected JSON constant: {name}")  # pragma: no cover — json's own grammar
+
 
 def extract_last_json(raw: str) -> str:
     """Parse-anchored suffix scan — identical algorithm to cli/lib/verdict.sh's
@@ -89,7 +166,7 @@ def extract_last_json(raw: str) -> str:
             continue
         candidate = raw[i:]
         try:
-            json.loads(candidate)
+            json.loads(candidate, parse_constant=_jq_compat_constant)
         except json.JSONDecodeError:
             continue
         return candidate
@@ -170,7 +247,7 @@ def decide(expected_agent: str, raw: str) -> dict:
         }
 
     try:
-        verdict_obj = json.loads(candidate)
+        verdict_obj = json.loads(candidate, parse_constant=_jq_compat_constant)
     except json.JSONDecodeError as e:
         reason = f"trailing JSON did not parse: {e}"
         return {
@@ -272,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         decision = decide(expected_agent, raw)
 
-    print(json.dumps(decision))
+    print(json.dumps(decision, default=_jq_json_default))
 
     if decision["color"] in ("red", "unverified"):
         print(
