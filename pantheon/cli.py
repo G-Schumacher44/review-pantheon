@@ -172,6 +172,40 @@ def _die(msg: str) -> NoReturn:
     raise GateError(msg)
 
 
+# A FIXED, non-env-derived list of system temp roots — NEVER ``tempfile.gettempdir()``'s own
+# search order (``TMPDIR``, then ``TEMP``, then ``TMP``, all read from ambient env before it
+# falls back to a platform default). Adversarial review, round 7, Codex P1: CRITICAL-1's neutral
+# provider cwd is created under ``tempfile.TemporaryDirectory()`` — a hostile checkout's own
+# env-loading mechanism (a ``.envrc``, an environment-setting CI step reading repo content — the
+# same disclosed vector this whole env-hijack family already names) exporting
+# ``TMPDIR=$PWD/fake-tmp`` would put the "neutral" workdir right back INSIDE the repository,
+# defeating the neutral-cwd control entirely — the identical class of bug already closed for
+# PATH (``pantheon.providers._filtered_path``), HOME/``CLAUDE_CONFIG_DIR``/the ``XDG_*`` dirs
+# (``pantheon.providers._provider_env``), and console-script resolution
+# (``pantheon.execution.resolve_console_script``). Mirrors
+# ``pantheon.execution.TRUSTED_GIT_DIRS``'s own "fixed, not attacker-redirectable" posture — the
+# first existing-and-writable entry wins; no config knob to widen this list, same rationale (a
+# widening knob just relocates the same trust decision to another attacker-reachable input).
+_TRUSTED_TEMP_BASE_DIRS: tuple[str, ...] = (
+    "/tmp",
+    "/var/tmp",
+)
+
+
+def _trusted_temp_base() -> str | None:
+    """The first directory from :data:`_TRUSTED_TEMP_BASE_DIRS` that exists and is writable by
+    this process — never ``tempfile.gettempdir()``, whose own ``TMPDIR``/``TEMP``/``TMP``
+    env-var lookup is exactly the ambient-env vector this function exists to avoid. Returns
+    ``None`` when none of the fixed candidates are usable (an unusual, restricted/scratch
+    environment) — the caller must fail closed (``_die``) rather than silently falling back to
+    ``tempfile``'s own env-driven default in that case; a workdir this function can't vouch for
+    is not a workdir this run should trust as "neutral"."""
+    for candidate in _TRUSTED_TEMP_BASE_DIRS:
+        if os.path.isdir(candidate) and os.access(candidate, os.W_OK):
+            return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------------------------
@@ -1101,7 +1135,20 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
                 "full PR diff again."
             )
 
-    with tempfile.TemporaryDirectory(prefix="pantheon-") as workdir:
+    # NEVER tempfile.TemporaryDirectory()'s own default (ambient TMPDIR/TEMP/TMP lookup) —
+    # adversarial review, round 7, Codex P1: see _trusted_temp_base's own docstring for the
+    # exfiltration this closes. Fail closed rather than silently falling back to the env-driven
+    # default when no fixed candidate is usable.
+    temp_base = _trusted_temp_base()
+    if temp_base is None:
+        _die(
+            "no trusted temp-base directory available (checked: "
+            + ", ".join(_TRUSTED_TEMP_BASE_DIRS)
+            + ") — refusing to fall back to tempfile's own ambient-TMPDIR default (the exact "
+            "env-hijack vector this check exists to close), UNVERIFIED, posting nothing"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="pantheon-", dir=temp_base) as workdir:
         ctx = GateContext(
             repo_root=repo_root,
             pr_number=pr_number,
@@ -1128,6 +1175,24 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
         # rest of `workdir`'s own TemporaryDirectory context.
         neutral_cwd = os.path.join(workdir, "provider-cwd")
         os.makedirs(neutral_cwd, exist_ok=True)
+
+        # Verified, not just trusted-by-construction — round 7's own second half: a fixed temp
+        # base (above) closes the ambient-TMPDIR vector, but doesn't by itself prove neutral_cwd
+        # ends up outside repo_root — a real, non-hypothetical collision (a worktree or CI
+        # workspace checked out UNDER /tmp itself, not a hypothetical) would otherwise slip past
+        # a base-choice-only fix silently. Reuses pantheon.providers' own containment-check
+        # primitives (trusted_roots/resolves_inside_a_trusted_root) — the identical check
+        # _provider_env's own PATH-SHAPED-key gate already applies, shared rather than
+        # re-derived. Fails the whole gate closed (never launches a single provider) if it ever
+        # fires — this is the LAST line of defense for the control CRITICAL-1 depends on
+        # entirely; there is no "run anyway, just less safely" fallback for it.
+        if providers.resolves_inside_a_trusted_root(neutral_cwd, providers.trusted_roots(repo_root)):
+            _die(
+                f"neutral provider workdir {neutral_cwd} resolves inside a trusted root (the "
+                f"working directory or the repo checkout {repo_root}) even from a fixed temp "
+                "base — refusing to launch any provider (would reopen CRITICAL-1's config/MCP/"
+                "hooks exfiltration vector), UNVERIFIED, posting nothing"
+            )
 
         agent_data: dict[str, render.AgentRenderData] = {}
         for agent in agents:

@@ -218,6 +218,8 @@ __all__ = [
     "KNOWN_PROVIDERS",
     "default_allowed_tools",
     "provider_run",
+    "trusted_roots",
+    "resolves_inside_a_trusted_root",
     "main",
 ]
 
@@ -332,7 +334,7 @@ def _read_prompt(prompt_file: str) -> str:
 #   one of these AT a directory inside the checkout would let the provider CLI's own NORMAL
 #   startup load attacker-controlled MCP servers/hooks, entirely outside `--allowedTools`'s
 #   reach. These are listed in :data:`_PATH_SHAPED_ENV_KEYS` below and go through
-#   :func:`_safe_path_env_value` — verified (via :func:`_resolves_inside_a_trusted_root`) to
+#   :func:`_safe_path_env_value` — verified (via :func:`resolves_inside_a_trusted_root`) to
 #   resolve OUTSIDE the repo root/cwd before being forwarded; a value that resolves INSIDE either
 #   is dropped (never forwarded, loudly), regardless of how it got set. ``HOME`` specifically is
 #   never even READ from ambient env at all — see :func:`_provider_env`'s own body for why a
@@ -435,7 +437,7 @@ _PROVIDER_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
 )
 
 # PATH-SHAPED keys from the allowlist above that need the containment check
-# (:func:`_resolves_inside_a_trusted_root`) before being forwarded — see the allowlist's own
+# (:func:`resolves_inside_a_trusted_root`) before being forwarded — see the allowlist's own
 # header comment for the full rationale. ``HOME`` is deliberately NOT in this set: a
 # validate-or-drop check is weaker than never reading the ambient value in the first place (a
 # value could resolve OUTSIDE the repo root today and still have been set by the exact same
@@ -473,13 +475,21 @@ _PROVIDER_PYTHON_ENV_DEFENSIVE_CLEAR: dict[str, str] = {
 }
 
 
-def _trusted_roots(repo_root: str | None = None) -> list[str]:
+def trusted_roots(repo_root: str | None = None) -> list[str]:
     """The realpath-resolved directories a checkout-controlled value must never resolve inside —
     the current working directory ALWAYS, plus ``repo_root`` when given (round 2's fix on
     :func:`_filtered_path`, factored out here so :func:`_provider_env`'s own containment check —
     round 6 — shares the identical root set rather than each caller keeping its own copy of the
     same security-critical list). See :func:`_filtered_path`'s own docstring for why BOTH are
-    needed (cwd alone misses a repo-controlled entry when launched from a nested directory)."""
+    needed (cwd alone misses a repo-controlled entry when launched from a nested directory).
+
+    **Public (not ``_``-prefixed) specifically so ``pantheon.cli`` can reuse it too** (adversarial
+    review, round 7, Codex P1 — CRITICAL-1's neutral-cwd control reopened a THIRD way:
+    ``tempfile.TemporaryDirectory()`` honors ambient ``TMPDIR``, so a hostile checkout exporting
+    it could put the "neutral" provider cwd back inside the repository. ``pantheon.cli.run_gate``
+    uses this same root set, together with :func:`resolves_inside_a_trusted_root`, to verify the
+    neutral workdir it creates actually resolves outside every trusted root before using it —
+    fail-closed if not, rather than trusting a fixed temp-base choice alone to be sufficient."""
     roots = [os.path.realpath(os.getcwd())]
     if repo_root:
         real_repo_root = os.path.realpath(repo_root)
@@ -488,7 +498,7 @@ def _trusted_roots(repo_root: str | None = None) -> list[str]:
     return roots
 
 
-def _resolves_inside_a_trusted_root(path: str, roots: list[str]) -> bool:
+def resolves_inside_a_trusted_root(path: str, roots: list[str]) -> bool:
     """Whether ``path`` (realpath-resolved, following symlinks — never compared as a raw
     string) is one of ``roots`` or lives somewhere underneath one. Shared by
     :func:`_filtered_path` (a PATH entry) and :func:`_safe_path_env_value` (a path-shaped env
@@ -515,12 +525,12 @@ def _filtered_path(repo_root: str | None = None) -> str:
     provider CLIs are installed through too many different mechanisms for a fixed directory
     allowlist (contrast ``pantheon.cli``'s/``pantheon.execution``'s ``TRUSTED_GIT_DIRS``,
     appropriate for git/gh specifically) to be practical here."""
-    roots = _trusted_roots(repo_root)
+    roots = trusted_roots(repo_root)
     kept: list[str] = []
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         if not entry or not os.path.isabs(entry):
             continue
-        if _resolves_inside_a_trusted_root(entry, roots):
+        if resolves_inside_a_trusted_root(entry, roots):
             continue
         kept.append(entry)
     return os.pathsep.join(kept)
@@ -536,10 +546,10 @@ def _safe_path_env_value(key: str, value: str, roots: list[str]) -> str | None:
     the hostile value, rather than aborting, is the correct fail-closed shape here (deny the
     CAPABILITY the hostile value would have granted, without taking down an otherwise-legitimate
     run over an env var most callers never even set). A relative ``value`` is realpath-resolved
-    against THIS process's own cwd by :func:`_resolves_inside_a_trusted_root` — the common case
+    against THIS process's own cwd by :func:`resolves_inside_a_trusted_root` — the common case
     (the gate is invoked from inside the repo checkout) naturally lands it under the cwd trusted
     root already in ``roots``, so no separate relative-path special-case is needed."""
-    if _resolves_inside_a_trusted_root(value, roots):
+    if resolves_inside_a_trusted_root(value, roots):
         print(
             f"pantheon: warning: ambient {key} resolves inside a trusted root (the working "
             "directory or the repo checkout) — refusing to forward it to the provider CLI (would "
@@ -575,7 +585,7 @@ def _provider_env(repo_root: str | None = None) -> dict[str, str]:
     if real_home:
         env["HOME"] = real_home
 
-    roots = _trusted_roots(repo_root)
+    roots = trusted_roots(repo_root)
     for key in _PROVIDER_ENV_PASSTHROUGH_KEYS:
         if key == "HOME":
             continue  # handled above — never read from ambient env at all, see this function's own docstring.

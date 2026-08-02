@@ -577,6 +577,106 @@ def test_run_gate_checks_update_state_return_value_before_computing_exit_code() 
     )
 
 
+# ---------------------------------------------------------------------------------------------
+# _trusted_temp_base() / neutral-cwd containment — adversarial review, round 7, Codex P1:
+# tempfile.TemporaryDirectory() honors ambient TMPDIR, so a hostile checkout exporting it could
+# put CRITICAL-1's "neutral" provider cwd right back inside the repository, defeating that
+# control entirely. Fixed the family way: a fixed, non-env-derived temp base
+# (_trusted_temp_base), plus a post-creation verification (reusing
+# pantheon.providers.resolves_inside_a_trusted_root/trusted_roots) that fails the whole gate
+# closed if neutral_cwd ever resolves inside repo_root or cwd anyway.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_trusted_temp_base_returns_the_first_existing_writable_candidate(monkeypatch, tmp_path) -> None:
+    usable = tmp_path / "usable-temp-root"
+    usable.mkdir()
+    monkeypatch.setattr(cli_module, "_TRUSTED_TEMP_BASE_DIRS", ("/does/not/exist", str(usable), "/also/missing"))
+
+    assert cli_module._trusted_temp_base() == str(usable)
+
+
+def test_trusted_temp_base_returns_none_when_no_candidate_is_usable(monkeypatch) -> None:
+    monkeypatch.setattr(cli_module, "_TRUSTED_TEMP_BASE_DIRS", ("/definitely/does/not/exist/anywhere",))
+
+    assert cli_module._trusted_temp_base() is None
+
+
+def test_trusted_temp_base_ignores_ambient_tmpdir_entirely(monkeypatch, tmp_path) -> None:
+    # The actual fix: TMPDIR is hijacked to point at a directory INSIDE a fixture checkout, but
+    # _trusted_temp_base() must never consult it — only the fixed _TRUSTED_TEMP_BASE_DIRS list.
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    hostile_tmpdir = repo_root / "fake-tmp"
+    hostile_tmpdir.mkdir()
+    monkeypatch.setenv("TMPDIR", str(hostile_tmpdir))
+
+    base = cli_module._trusted_temp_base()
+
+    assert base is not None
+    assert not base.startswith(str(repo_root))
+    assert base in cli_module._TRUSTED_TEMP_BASE_DIRS
+
+
+def test_run_gate_never_calls_tempfile_temporarydirectory_without_an_explicit_trusted_dir() -> None:
+    # Structural regression guard, same "grep the source for the call shape" convention as the
+    # update_state() guard above: run_gate() must never construct its workdir via a bare
+    # tempfile.TemporaryDirectory(prefix=...) with no dir= argument — that shape is exactly what
+    # silently re-inherits ambient TMPDIR.
+    import inspect
+
+    source = inspect.getsource(cli_module.run_gate)
+    assert 'tempfile.TemporaryDirectory(prefix="pantheon-", dir=temp_base)' in source, (
+        "run_gate()'s TemporaryDirectory() call site changed shape — it must pass an explicit "
+        "dir= sourced from _trusted_temp_base(), never tempfile's own ambient-TMPDIR default"
+    )
+    assert "temp_base = _trusted_temp_base()" in source, (
+        "run_gate() no longer resolves its temp base via _trusted_temp_base() — the fixed, "
+        "non-env-derived candidate list"
+    )
+    assert "providers.resolves_inside_a_trusted_root(neutral_cwd, providers.trusted_roots(repo_root))" in source, (
+        "run_gate() no longer verifies neutral_cwd resolves outside every trusted root after "
+        "creating it — the last-line-of-defense check for a trusted-base choice that still "
+        "collides with the checkout"
+    )
+
+
+def test_neutral_cwd_still_resolves_outside_the_checkout_when_tmpdir_is_hijacked(monkeypatch, tmp_path) -> None:
+    # The coordinator's own fixture: TMPDIR pointed inside a fixture checkout -> the provider cwd
+    # this whole mechanism produces must still resolve outside it. Replicates run_gate()'s own
+    # sequence exactly (trusted_temp_base -> TemporaryDirectory(dir=...) -> neutral_cwd ->
+    # containment check) rather than driving run_gate() itself end-to-end (which needs a real
+    # gh/network fixture — same disclosed limitation as the update_state() guard above).
+    import tempfile
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    hostile_tmpdir = repo_root / "fake-tmp"
+    hostile_tmpdir.mkdir()
+    monkeypatch.setenv("TMPDIR", str(hostile_tmpdir))
+
+    temp_base = cli_module._trusted_temp_base()
+    assert temp_base is not None
+
+    with tempfile.TemporaryDirectory(prefix="pantheon-", dir=temp_base) as workdir:
+        neutral_cwd = os.path.join(workdir, "provider-cwd")
+        os.makedirs(neutral_cwd, exist_ok=True)
+
+        # (a) neutral_cwd resolves OUTSIDE the fixture checkout -- the actual control this whole
+        # fix protects.
+        assert not os.path.realpath(neutral_cwd).startswith(os.path.realpath(str(repo_root)) + os.sep)
+        # (b) neutral_cwd was never created anywhere under the hijacked TMPDIR either -- proving
+        # the ambient value was genuinely ignored, not just "happened not to matter this time".
+        assert not os.path.realpath(neutral_cwd).startswith(os.path.realpath(str(hostile_tmpdir)) + os.sep)
+        # (c) the CRITICAL-1 marker-config repro stays blocked: a "marker MCP/hook config" planted
+        # at the hijacked TMPDIR location is never reachable from neutral_cwd at all -- there is
+        # no path from one to the other for a provider's own startup-time discovery to walk.
+        marker = hostile_tmpdir / ".claude" / "settings.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text('{"hooks": {"marker": "FIRED"}}')
+        assert not os.path.exists(os.path.join(neutral_cwd, ".claude", "settings.json"))
+
+
 def test_build_prompt_writes_non_ascii_pr_title_as_utf8_bytes_on_disk(tmp_path, monkeypatch) -> None:
     # Live proof (no locale mocking needed): write via the real code path, then read the file
     # back as RAW BYTES (bypassing Python's own default-encoding open()) and confirm those bytes
