@@ -195,9 +195,16 @@ does not meet that slice's exit bar, full stop.
   hierarchy; enumerating that vocabulary is the anti-pattern this rule exists to stop repeating.
   `pantheon.jqjson.loads` raises exactly one exception type (`JqParseError`) for ANY parse
   failure, deliberately, and `pantheon.jqjson.dumps` forces `allow_nan=False` as a fail-loud
-  backstop. Every module below that touches JSON at all names `pantheon.jqjson` as a dependency in
-  its own entry; `tests/test-json-boundary.sh` is the acceptance fixture — a mechanical (not
-  reviewed-by-eye) assertion that no other module reaches past the boundary.
+  backstop. The module owns a second boundary too, found immediately after the first landed:
+  Python-VALUE-to-DISPLAY-TEXT — `pantheon.jqjson.jq_text` (jq `-r`'s raw-output stringification
+  of a parsed scalar, not Python's own `str()`/f-string interpolation) and `pantheon.jqjson.subst`
+  (bash's own `$(...)` command-substitution trailing-newline strip, a plain-bash semantic
+  applied wherever a caller's bash counterpart captured a jq extraction that way before an
+  emptiness check or final interpolation) — both bash-semantics shims live in this one module
+  alongside the parse/serialize half, not a second file. Every module below that touches JSON at
+  all names `pantheon.jqjson` as a dependency in its own entry; `tests/test-json-boundary.sh` is
+  the acceptance fixture — a mechanical (not reviewed-by-eye) assertion that no other module
+  reaches past either boundary.
 
 ## 6. Module layout
 

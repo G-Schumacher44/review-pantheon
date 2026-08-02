@@ -115,18 +115,34 @@ def top_finding_of(verdict_obj: dict) -> str:
     """Same fallback chain as cli/lib/verdict.sh's top_finding computation and
     action/decide_verdict.py's top_finding_of: first finding's "severity: issue (file:line)", or
     "no findings" if there are none or the shape is malformed enough that the fields can't be
-    read. A field holding ``pantheon.jqjson.NAN`` (a parsed NaN token) interpolates as the text
-    "null" here via that sentinel's own ``__str__`` — matching jq's own print form for the same
-    value, not Python's default ``str(None) == "None"`` (see ``pantheon.jqjson.JqNaN``'s
-    docstring)."""
+    read.
+
+    Every field is stringified via ``pantheon.jqjson.jq_text`` — jq -r's raw-output form (a
+    boolean prints its lowercase spelling, a JSON null prints the literal text "null", the
+    ``pantheon.jqjson.NAN`` sentinel prints "null" too via that sentinel's own quirk) — NOT a
+    bare f-string interpolation of the raw parsed value, which would use Python's own
+    ``str()``/``repr()`` instead (``None`` -> the literal text "None", ``True`` -> "True", a
+    dict -> its Python-quoted ``repr()``, none of which match what real jq's own string
+    interpolation (``"\\(...)"``) would produce for the same value — caught live on this PR: a
+    boolean ``.file`` rendered as Python's "True" here where bash's real decider renders "true").
+    The fully-composed string is then run through ``pantheon.jqjson.subst`` ONCE — mirroring
+    bash's own mechanics exactly: cli/lib/verdict.sh builds this ENTIRE "severity: issue
+    (file:line)" string inside a SINGLE jq expression, captured by ONE ``$(...)`` command
+    substitution, so bash's trailing-newline stripping happens once, on the whole assembled
+    text — not per-field before interpolation, the way ``pantheon.render``'s per-field
+    extractions need it (see that module's own use of ``subst`` for why the two shapes differ)."""
     findings = verdict_obj.get("findings") or []
     if not findings:
         return "no findings"
     f = findings[0]
     try:
-        return f"{f['severity']}: {f['issue']} ({f['file']}:{f['line']})"
+        composed = (
+            f"{jqjson.jq_text(f['severity'])}: {jqjson.jq_text(f['issue'])} "
+            f"({jqjson.jq_text(f['file'])}:{jqjson.jq_text(f['line'])})"
+        )
     except (KeyError, TypeError):
         return "no findings"
+    return jqjson.subst(composed)
 
 
 def blocker_present(verdict_obj: dict) -> bool:

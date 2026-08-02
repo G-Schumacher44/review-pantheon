@@ -266,6 +266,22 @@ check "5000-digit-integer-in-display-field-is-unverified-not-a-crash" "artemis" 
 # the fail-closed "unverified" this check() call now asserts -- pantheon.jqjson's deliberate
 # catch-ALL posture (not an enumerated list of exception types) is what closes this.
 
+# pantheon.jqjson's second boundary (display-TEXT, jq_text): top_finding_of's composed string
+# must stringify a boolean/null field the way jq's own string interpolation would (lowercase
+# true/false, the literal text "null"), not Python's default str()/repr() (True/False/None).
+raw_file="$(mktemp)"
+printf '%s' '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"blocker","file":true,"line":1,"issue":null}],"summary":"s"}' > "$raw_file"
+py_decision="$(cd "$ROOT" && python3 -m pantheon.verdict artemis "$raw_file" 2>/dev/null)"
+rm -f "$raw_file"
+py_top="$(jq -r '.top_finding' <<<"$py_decision" 2>/dev/null)"
+if [[ "$py_top" == "blocker: null (true:1)" ]]; then
+  echo "PASS bool-and-null-fields-interpolate-jq-compatible-not-python-repr (top_finding='$py_top')"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL bool-and-null-fields-interpolate-jq-compatible-not-python-repr: got '$py_top', expected 'blocker: null (true:1)'"
+  FAIL=$((FAIL + 1))
+fi
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

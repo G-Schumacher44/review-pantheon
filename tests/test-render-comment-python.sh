@@ -416,6 +416,17 @@ ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
 assert_byte_identical "1e400-overflow-preserves-jq-canonical-number-in-machine-tail"
 
+# Divergence 6 (pantheon.jqjson's second boundary — display-TEXT, jqjson.subst): bash's
+# `summary="$(jq -r '.summary // empty' <<<"$findings_json")"` runs through a $(...) command
+# substitution, which strips ALL trailing newlines from the captured text BEFORE bash's own
+# `[ -n "$summary" ]` emptiness check ever runs. A summary of exactly a trailing newline ("\n")
+# must therefore be treated as EMPTY and fall through to $top — not render as a blank line.
+reset_agent_env
+ARTEMIS_COLOR=green ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="fallback-top-text"
+ARTEMIS_FINDINGS='{"summary":"\n","findings":[]}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+assert_byte_identical "trailing-newline-only-summary-falls-through-to-top"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

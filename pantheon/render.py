@@ -95,43 +95,6 @@ class AgentRenderData:
 # ---------------------------------------------------------------------------
 
 
-def _jq_raw(value: Any) -> str:
-    """Mimics jq -r's raw-output stringification of a JSON value that reached a display field
-    after passing :func:`_or_default` (i.e. not JSON null/false) — jq prints a string unquoted
-    and a JSON boolean as its own lowercase literal spelling (``true``/``false``), NOT Python's
-    Title-case ``str(bool)`` (``True``/``False``). Every display field this module reads from an
-    agent's JSON (severity, file, issue, scenario, summary, the top-finding fallback text) routes
-    through this before :func:`sanitize_inline` normalizes it further, so a malformed agent
-    object that smuggles a JSON boolean in where a string is expected renders the same text
-    bash's ``jq -r '.field // default'`` would, not Python's own ``str()`` of that type. (Caught
-    live — the repo's own self-hosted gate on this PR flagged ``unrecognized-severity(True)`` vs
-    bash's ``unrecognized-severity(true)`` for exactly this case.)
-
-    A non-scalar value (a JSON array/object smuggled into a field this module treats as display
-    text) falls through to jqjson's own pretty-printer — verified live against real ``jq -r``:
-    for a non-string value, ``-r`` mode falls back to jq's own DEFAULT (non-``-c``) pretty-
-    printer, which is 2-space-indented and prints non-ASCII raw (unescaped), not jq's compact
-    form and not Python's own json module's default (which is compact AND ASCII-escapes non-
-    ASCII by default) — both defaults diverge from jq's here, in different ways, so both must be
-    pinned explicitly to match. (Caught live — the repo's own self-hosted gate flagged this on
-    the same PR, immediately after the boolean fix above landed.) The resulting multi-line text
-    is safe to hand to :func:`sanitize_inline` unchanged: its newline -> space collapse already
-    normalizes it the same way bash's ``$(...)`` command substitution plus that function's bash
-    equivalent does for a multi-line jq value.
-
-    A :data:`pantheon.jqjson.NAN` sentinel (a display field whose source JSON contained the
-    non-standard ``NaN`` extension token) stringifies via its own ``__str__``, which already
-    returns ``"null"`` — matching jq's own print form for the same value (see
-    ``pantheon.jqjson.JqNaN``'s docstring)."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is jqjson.NAN:
-        return str(value)
-    return jqjson.dumps(value, indent=2, ensure_ascii=False)
-
-
 def sanitize_inline(s: Any) -> str:
     """Markdown/HTML-hostile-content-safe + single-line, for ANY model-controlled string this
     renderer interpolates — table cells, prose, AND values placed inside a backtick code span.
@@ -139,8 +102,16 @@ def sanitize_inline(s: Any) -> str:
     operations (order matters — see that function's header comment for why each step is where it
     is):
 
-      - Stringified via :func:`_jq_raw` first (jq-compatible scalar formatting — see that
-        function's docstring), not a bare ``str()``.
+      - Stringified via ``pantheon.jqjson.jq_text`` first (jq -r's raw-output form — see that
+        function's docstring), not a bare ``str()``. By the time a value reaches here it has
+        USUALLY already passed through ``jq_text``/``jqjson.subst`` at its extraction site (see
+        :func:`render_comment`'s per-field extraction, which mirrors bash's own
+        ``var="$(jq -r ... <<<"$json")"`` variable-assignment shape) — calling ``jq_text`` again
+        here is then a harmless no-op (a string passes through unchanged), and is what keeps this
+        function safe to call directly on a value that HASN'T been through that pipeline yet
+        (``d.verdict``/``d.reason``, which come from a bash counterpart that reads an env var
+        DIRECTLY, never through ``$(...)``, and so were never jq-stringified or newline-stripped
+        in the first place — see ``pantheon.jqjson.subst``'s own docstring for that distinction).
       - NUL (U+0000) dropped outright. Not a markdown/HTML concern like the rest of this
         function — it's a bash-parity one: bash's ``$(...)`` command substitution cannot hold a
         NUL byte and silently drops it (a documented bash limitation, not something
@@ -167,7 +138,7 @@ def sanitize_inline(s: Any) -> str:
     ever reaches bash's output via the ``-r`` (raw-string) mode this human-readable path uses;
     the machine tail was never at risk.
     """
-    s = _jq_raw(s)
+    s = jqjson.jq_text(s)
     s = s.replace("\x00", "")
     s = s.replace("\n", " ")
     s = s.replace("|", "\\|")
@@ -197,7 +168,16 @@ def emoji_for_color(color: str) -> str:
 def severity_badge(severity: Any) -> str:
     """Mirrors ``_pantheon_severity_badge``: the three known severities get a fixed label; an
     out-of-enum severity is visibly flagged (not silently treated as a fourth kind of legitimate
-    badge) and sanitized like every other model-controlled field."""
+    badge) and sanitized like every other model-controlled field.
+
+    ``severity`` is expected to already be ``pantheon.jqjson.jq_text``/``jqjson.subst``-processed
+    text by the time it reaches here (see :func:`render_comment`'s extraction site) — mirroring
+    bash's own ``sev="$(jq -r '.severity // "note"' <<<"$finding_obj")"`` variable, which is
+    ALREADY the fully-stringified, trailing-newline-stripped text by the time bash's ``case``
+    statement compares it. Comparing against the raw, un-stringified parsed value here instead
+    would miss a match bash's real pipeline makes — e.g. a JSON boolean ``true`` severity, or a
+    string severity with a trailing newline bash's ``$(...)`` would have already stripped before
+    comparing it to ``"blocker"``."""
     if severity == "blocker":
         return "**blocker**"
     if severity == "should_fix":
@@ -253,11 +233,13 @@ def _top_finding_text(verdict_obj: Any) -> str:
     """Highest-severity finding's issue text, or "" if there are none — mirrors
     ``_pantheon_top_finding_text`` (including its ``.issue // ""`` fallback: a JSON ``null`` OR
     ``false`` issue value degrades to "", matching jq's ``//`` operator, not just a missing
-    key)."""
+    key). Bash's own ``_pantheon_top_finding_text`` is captured by its caller via ``$(...)``
+    (``best="$(_pantheon_top_finding_text "$findings_json")"``), so this applies
+    ``pantheon.jqjson.subst`` to the stringified result, matching that trailing-newline strip."""
     sorted_findings = _sorted_findings(verdict_obj)
     if not sorted_findings:
         return ""
-    return _jq_raw(_or_default(sorted_findings[0].get("issue"), ""))
+    return jqjson.subst(jqjson.jq_text(_or_default(sorted_findings[0].get("issue"), "")))
 
 
 def _table_top_cell(verdict: str, top_text: str, verdict_obj: Any) -> str:
@@ -304,15 +286,16 @@ def _finding_line_or_placeholder(raw_line: Any) -> str:
     isn't a plain non-negative integer to the same "?" placeholder used when the key is missing
     entirely, rather than interpolating arbitrary text where a line number is expected. Mirrors
     the bash renderer's ``[[ "$ln" =~ ^[0-9]+$ ]] || ln="?"`` coercion, applied to whatever
-    ``jq -r '.line // "?"'`` would have printed first."""
-    if raw_line is None or raw_line is False:
-        text = "?"
-    elif isinstance(raw_line, bool):
-        text = "?"
-    elif isinstance(raw_line, int):
-        text = str(raw_line)
-    else:
-        text = str(raw_line)
+    ``ln="$(jq -r '.line // "?"' <<<"$finding_obj")"`` would have already produced — the full
+    ``// default`` -> jq-``-r``-stringify -> ``$(...)``-newline-strip chain (``jqjson.jq_text``
+    then ``jqjson.subst``), not just a bare ``str()``. Without the ``subst`` step, a ``.line``
+    value that was itself a string ending in a newline (e.g. ``"42\\n"``) would keep that
+    embedded newline in the returned text — Python's ``re`` module's ``$`` anchor matches just
+    before a single trailing newline by default, so the digit-regex check below would ACCEPT
+    ``"42\\n"`` without ever stripping it, corrupting the markdown list item this value is
+    interpolated into (a raw newline splits one list item into two lines) — a distinct, latent
+    bug this fix also closes, not just a byte-parity nicety."""
+    text = jqjson.subst(jqjson.jq_text(_or_default(raw_line, "?")))
     return text if _LINE_RE.match(text) else "?"
 
 
@@ -435,12 +418,15 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
         lines.append(f"**{agent}** @ `{short_sha}` — {emoji} {sanitize_inline(d.verdict)}")
         lines.append("")
 
-        # jq_raw-ify BEFORE testing emptiness, not after: `.summary // empty` piped through
-        # `jq -r` turns a numeric `0` or an empty array/object into the non-empty DISPLAY
-        # strings "0"/"[]"/"{}" in bash — testing Python truthiness on the raw, un-stringified
-        # JSON value instead would treat all three as falsy and wrongly fall through to `d.top`
-        # (caught live — the repo's own self-hosted gate flagged this on the same PR).
-        summary = _jq_raw(_or_default(findings_obj.get("summary") if isinstance(findings_obj, dict) else None, ""))
+        # jq_text-ify AND subst (trailing-newline-strip) BEFORE testing emptiness, not after:
+        # bash's own `summary="$(jq -r '.summary // empty' <<<"$findings_json")"` already ran
+        # BOTH the `// default` -> jq -r stringify -> $(...) newline-strip chain before its own
+        # `[ -n "$summary" ]` emptiness check ever runs. Skipping jq_text lets `0`/`[]`/`{}`
+        # wrongly read as falsy in Python (caught live — the repo's own self-hosted gate flagged
+        # this); skipping subst lets a summary of exactly a trailing newline (e.g. "\n") wrongly
+        # read as non-empty in Python where bash's $(...) would have already stripped it to ""
+        # and fallen through to `d.top` (caught live in a later round, same PR).
+        summary = jqjson.subst(jqjson.jq_text(_or_default(findings_obj.get("summary") if isinstance(findings_obj, dict) else None, "")))
         if not summary:
             summary = d.top
         if not summary:
@@ -455,14 +441,18 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
         any_finding = False
         for finding in _sorted_findings(findings_obj):
             any_finding = True
-            sev = _or_default(finding.get("severity"), "note")
-            f_field = sanitize_inline(_or_default(finding.get("file"), "?"))
+            # Every one of these five mirrors a bash `var="$(jq -r '.field // default'
+            # <<<"$finding_obj")"` assignment — full jq_text-then-subst chain at the extraction
+            # site itself (not deferred to display time), matching bash's own variable semantics:
+            # by the time bash's `sev`/`f`/`issue`/`scenario` hold a value, jq's stringification
+            # AND $(...)'s trailing-newline strip have ALREADY run — including before severity's
+            # own case-statement comparison, which is why `sev` is pre-processed here rather than
+            # left for severity_badge() to stringify only in its unrecognized-severity fallback.
+            sev = jqjson.subst(jqjson.jq_text(_or_default(finding.get("severity"), "note")))
+            f_field = sanitize_inline(jqjson.subst(jqjson.jq_text(_or_default(finding.get("file"), "?"))))
             ln = _finding_line_or_placeholder(finding.get("line"))
-            issue = _or_default(finding.get("issue"), "")
-            # Same jq_raw-before-emptiness-check fix as `summary` above, and for the same
-            # reason: `.scenario // ""` piped through jq -r makes 0/[]/{} non-empty display
-            # text; a Python truthiness test on the raw value would wrongly drop the line.
-            scenario = _jq_raw(_or_default(finding.get("scenario"), ""))
+            issue = jqjson.subst(jqjson.jq_text(_or_default(finding.get("issue"), "")))
+            scenario = jqjson.subst(jqjson.jq_text(_or_default(finding.get("scenario"), "")))
             badge = severity_badge(sev)
             lines.append(f"- {badge} `{f_field}:{ln}` — {sanitize_inline(issue)}")
             if scenario:

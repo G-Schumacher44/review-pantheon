@@ -19,10 +19,21 @@ named exception classes. This module is the structural fix: the ONE place every 
 every JSON serialize in this port goes through, so this port's own tests can assert — mechanically,
 not by review — that no other file reaches past it to call ``json.loads``/``json.dumps`` directly.
 
-Two functions:
+This module owns TWO boundaries, not just one — a fourth review round found the first three
+fixes (constant coercion, UTF-8 validity, overflow-number preservation) closed the JSON
+TEXT<->Python-VALUE boundary, but left a second, related boundary wide open: Python-VALUE-to-
+DISPLAY-TEXT. Real jq's ``-r`` (raw-output) stringification of a parsed scalar (``null`` ->
+``"null"``, a boolean -> its lowercase spelling, a number via jq's own formatting) is not the
+same operation as Python's default ``str()``/f-string interpolation of that same value (``None``
+-> the literal text ``"None"``, ``True`` -> ``"True"``, a dict -> its Python ``repr()``) — and
+every jq extraction bash's own runtime ever performs happens inside a ``$(...)`` command
+substitution, which strips ALL trailing newlines from whatever text results, a plain-bash
+semantic with nothing to do with jq itself. Four functions, not two:
 
-  loads(text)                          -> a Python value, jq-parse-compatible
-  dumps(obj, *, indent=None, ensure_ascii=False) -> str, jq-serialize-compatible
+  loads(text)                                    -> a Python value, jq-parse-compatible
+  dumps(obj, *, indent=None, ensure_ascii=False)  -> str, jq-serialize-compatible
+  jq_text(value)                                  -> str, jq -r's raw-output stringification
+  subst(text)                                     -> str, bash's $(...) trailing-newline strip
 
 ``loads`` raises exactly one exception type, :class:`JqParseError`, for ANY failure — parse
 error, a non-standard-constant edge case, a digit-limit overflow, a lone surrogate, a stack
@@ -31,6 +42,12 @@ know to catch. Every caller (``pantheon.verdict``'s ``decide()``, ``pantheon.ren
 ``_agent_data_from_env``/``_machine_tail_text``) treats a caught :class:`JqParseError` exactly
 the way it already treated ``json.JSONDecodeError`` before this module existed: fail closed —
 UNVERIFIED for a decision, ``{}``/raw-text-fallback for a display value.
+
+``jq_text``/``subst`` close the second boundary the same way: every place either module
+interpolates a parsed JSON scalar into human-readable text goes through ``jq_text`` instead of
+a bare f-string/``str()``; every place a caller's bash counterpart captured a jq extraction via
+``$(...)`` before an emptiness check or final interpolation applies ``subst`` to the result —
+``tests/test-json-boundary.sh`` extends its mechanical assertion to cover both.
 """
 from __future__ import annotations
 
@@ -38,7 +55,7 @@ import json
 import re
 from typing import Any
 
-__all__ = ["JqParseError", "JqNaN", "loads", "dumps"]
+__all__ = ["JqParseError", "JqNaN", "loads", "dumps", "jq_text", "subst"]
 
 
 class JqParseError(Exception):
@@ -181,6 +198,61 @@ def _verify_utf8(value: Any) -> None:
     elif isinstance(value, list):
         for v in value:
             _verify_utf8(v)
+
+
+def jq_text(value: Any) -> str:
+    """jq -r's raw-output stringification of a parsed JSON scalar — the DISPLAY-TEXT half of
+    this module's boundary, not the parse/serialize half. jq's ``-r`` mode prints a string
+    unquoted, a JSON boolean as its own lowercase spelling (``true``/``false``), a JSON ``null``
+    as the literal text ``null``, and any number (including a :class:`_RawBigNumber`-preserved
+    overflow literal or the :data:`NAN` sentinel — verified live to already print as ``null``
+    via its own ``__str__``) via this module's own :func:`dumps` — one source, so any future
+    dumps-side jq-compat fix (a new overflow shape, say) applies to display text automatically
+    too, rather than needing a second copy of the same judgment call.
+
+    Python's own default stringification of these same values diverges in exactly the ways this
+    port's own gate found live: ``str(None) == "None"`` (not jq's ``"null"``),
+    ``str(True) == "True"`` (not jq's ``"true"``), ``str({"x": 1}) == "{'x': 1}"`` (Python
+    ``repr``-style single quotes, not JSON's double-quoted, jq-pretty-printed form). Every place
+    either ``pantheon.verdict`` or ``pantheon.render`` interpolates a parsed JSON scalar into
+    human-readable text — a finding's severity/file/line/issue/scenario, a verdict's summary —
+    routes through this function instead of a bare f-string/``str()`` call; a caller-constructed
+    Python string that ISN'T sourced from parsed JSON (e.g. this port's own literal prose) never
+    needs to."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is NAN:
+        return str(value)
+    # Numbers (plain int/float, or a _RawBigNumber-preserved overflow literal) and containers
+    # (dict/list) all route through this module's own dumps() — one source for jq-compatible
+    # number/overflow formatting, matching jq -r's own fallback for a non-string value: for
+    # anything that isn't a string, -r mode falls back to jq's DEFAULT pretty-printer (2-space
+    # indent, raw UTF-8) — verified live, not jq's compact form and not a bare str()/repr().
+    return dumps(value, indent=2, ensure_ascii=False)
+
+
+def subst(text: str) -> str:
+    """bash's ``$(...)`` command-substitution semantics: strip trailing newlines from ``text`` —
+    ALL of them, not just one, and ONLY newlines (no other trailing whitespace is touched; this
+    is POSIX/bash's own documented ``$(...)`` behavior, nothing to do with jq itself). Every jq
+    extraction either runtime's bash implementation ever performs is captured through exactly
+    this mechanism (``var="$(jq -r '...' <<<"$json")"``), so a jq-extracted value that itself
+    ends in a newline — or a display field this port's own ``jq_text`` stringified into text
+    ending in one — is ALREADY missing those trailing newlines by the time bash's own variable
+    holds it, before that variable is ever compared (an emptiness check) or interpolated again.
+    A caller applies this at exactly the sites whose bash counterpart used ``$(...)`` before
+    such a check or interpolation — not universally, since plenty of values this port reads
+    (an agent's stated ``verdict``, its ``top`` fallback text) come from a bash counterpart that
+    reads an env var DIRECTLY (``${!var:-default}``), never through ``$(...)``, and so were never
+    subject to this stripping in the first place. A non-``str`` input is returned unchanged —
+    safe to call defensively on a value that might not have gone through :func:`jq_text` yet."""
+    if not isinstance(text, str):
+        return text
+    return text.rstrip("\n")
 
 
 def loads(text: str) -> Any:
