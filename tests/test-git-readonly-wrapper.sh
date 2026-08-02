@@ -9,10 +9,36 @@
 #
 # No test framework — plain bash, `bash tests/test-git-readonly-wrapper.sh` is the whole
 # invocation (wired into .github/workflows/ci.yml and tests/test-setup-smoke.sh).
+#
+# Migration-exam parameterization (docs/PYTHON-PORT.md §4, Slice 3): this suite was already
+# black-box in shape (invokes the wrapper as a real subprocess with real argv, never sources
+# it), so it is adapted in place rather than forked into a second file — set
+# PANTHEON_EXECUTION_IMPL=python to target `python -m pantheon.execution wrapper ...` (the
+# pantheon/execution.py module's own CLI entry point, added purely to keep this fixture's
+# black-box shape) instead of the bash script. Every behavioral assertion below is byte-identical
+# between the two IMPLs — only WRAPPER_CMD (what gets exec'd) and the two source-text structural
+# checks (which necessarily read a different file, in a different language) differ.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WRAPPER="$ROOT/cli/lib/pantheon-git-readonly.sh"
+
+IMPL="${PANTHEON_EXECUTION_IMPL:-bash}"
+case "$IMPL" in
+  bash)
+    WRAPPER="$ROOT/cli/lib/pantheon-git-readonly.sh"
+    WRAPPER_CMD=("$WRAPPER")
+    SRC_FILE="$WRAPPER"
+    ;;
+  python)
+    WRAPPER_CMD=(python3 -m pantheon.execution wrapper)
+    SRC_FILE="$ROOT/pantheon/execution.py"
+    export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+    ;;
+  *)
+    echo "unknown PANTHEON_EXECUTION_IMPL '$IMPL' (expected bash or python)" >&2
+    exit 2
+    ;;
+esac
 
 PASS=0
 FAIL=0
@@ -22,21 +48,41 @@ fail() { echo "FAIL $1"; FAIL=$((FAIL + 1)); }
 
 section() { echo; echo "== $1 =="; }
 
-section "Wrapper file itself"
+section "Wrapper implementation itself ($IMPL)"
 
-if [[ -f "$WRAPPER" ]]; then
-  pass "cli/lib/pantheon-git-readonly.sh exists"
-else
-  fail "cli/lib/pantheon-git-readonly.sh MISSING — cannot run any further checks"
-  echo
-  echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
-  exit 1
-fi
+if [[ "$IMPL" == "bash" ]]; then
+  if [[ -f "$WRAPPER" ]]; then
+    pass "cli/lib/pantheon-git-readonly.sh exists"
+  else
+    fail "cli/lib/pantheon-git-readonly.sh MISSING — cannot run any further checks"
+    echo
+    echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
+    exit 1
+  fi
 
-if [[ -x "$WRAPPER" ]]; then
-  pass "cli/lib/pantheon-git-readonly.sh is executable"
+  if [[ -x "$WRAPPER" ]]; then
+    pass "cli/lib/pantheon-git-readonly.sh is executable"
+  else
+    fail "cli/lib/pantheon-git-readonly.sh is NOT executable"
+  fi
 else
-  fail "cli/lib/pantheon-git-readonly.sh is NOT executable"
+  if [[ -f "$SRC_FILE" ]]; then
+    pass "pantheon/execution.py exists"
+  else
+    fail "pantheon/execution.py MISSING — cannot run any further checks"
+    echo
+    echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
+    exit 1
+  fi
+
+  if python3 -c "import pantheon.execution" >/dev/null 2>&1; then
+    pass "pantheon.execution is importable (python -m pantheon.execution wrapper ... is a valid CLI target)"
+  else
+    fail "pantheon.execution is NOT importable — cannot run any further checks"
+    echo
+    echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -50,7 +96,7 @@ fi
 refuse() {
   local name="$1"; shift
   local out status
-  out="$(cd "$ROOT" && "$WRAPPER" "$@" 2>&1)"
+  out="$(cd "$ROOT" && "${WRAPPER_CMD[@]}" "$@" 2>&1)"
   status=$?
   if [[ $status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$out"; then
     pass "$name: refused ($out)"
@@ -66,7 +112,7 @@ refuse() {
 accept() {
   local name="$1"; shift
   local out status
-  out="$(cd "$ROOT" && "$WRAPPER" "$@" 2>&1)"
+  out="$(cd "$ROOT" && "${WRAPPER_CMD[@]}" "$@" 2>&1)"
   status=$?
   if [[ $status -eq 0 ]] && ! grep -q '^pantheon-git-readonly:' <<<"$out"; then
     pass "$name: accepted (exit 0, real git ran)"
@@ -83,7 +129,7 @@ accept() {
 accept_in() {
   local dir="$1" name="$2"; shift 2
   local out status
-  out="$(cd "$dir" && "$WRAPPER" "$@" 2>&1)"
+  out="$(cd "$dir" && "${WRAPPER_CMD[@]}" "$@" 2>&1)"
   status=$?
   if [[ $status -eq 0 ]] && ! grep -q '^pantheon-git-readonly:' <<<"$out"; then
     pass "$name: accepted (exit 0, real git ran)"
@@ -115,7 +161,7 @@ refuse "disallowed subcommand: checkout" checkout -f
 refuse "disallowed subcommand: config" config --global core.pager curl
 refuse "empty-string subcommand" ""
 
-zero_out="$(cd "$ROOT" && "$WRAPPER" 2>&1)"
+zero_out="$(cd "$ROOT" && "${WRAPPER_CMD[@]}" 2>&1)"
 zero_status=$?
 if [[ $zero_status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$zero_out"; then
   pass "zero arguments at all: refused ($zero_out)"
@@ -171,7 +217,7 @@ accept_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD (bare range)" diff "HEAD~1...H
 refuse_in() {
   local dir="$1" name="$2"; shift 2
   local out status
-  out="$(cd "$dir" && "$WRAPPER" "$@" 2>&1)"
+  out="$(cd "$dir" && "${WRAPPER_CMD[@]}" "$@" 2>&1)"
   status=$?
   if [[ $status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$out"; then
     pass "$name: refused ($out)"
@@ -228,14 +274,14 @@ else
 fi
 
 rm -f "$HELPER_FIRED_MARKER"
-( cd "$DRIVER_REPO" && "$WRAPPER" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
+( cd "$DRIVER_REPO" && "${WRAPPER_CMD[@]}" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
 if [[ -f "$HELPER_FIRED_MARKER" ]]; then
   fail "configured external diff driver FIRED via a plain 'diff HEAD~1...HEAD' — --no-ext-diff/--no-textconv regression"
 else
   pass "configured external diff driver did NOT fire — --no-ext-diff/--no-textconv forced by the wrapper closes it"
 fi
 
-( cd "$DRIVER_REPO" && "$WRAPPER" show HEAD >/dev/null 2>&1 )
+( cd "$DRIVER_REPO" && "${WRAPPER_CMD[@]}" show HEAD >/dev/null 2>&1 )
 if [[ -f "$HELPER_FIRED_MARKER" ]]; then
   fail "configured external diff driver FIRED via a plain 'show HEAD' — --no-ext-diff/--no-textconv regression"
 else
@@ -274,7 +320,7 @@ stat_mtime() {
 
 before="$(stat_mtime "$LOCKS_REPO/.git/index")"
 sleep 1.2
-( cd "$LOCKS_REPO" && "$WRAPPER" status >/dev/null 2>&1 )
+( cd "$LOCKS_REPO" && "${WRAPPER_CMD[@]}" status >/dev/null 2>&1 )
 after="$(stat_mtime "$LOCKS_REPO/.git/index")"
 
 if [[ "$before" == "$after" ]]; then
@@ -328,7 +374,7 @@ else
 fi
 
 rm -f "$FSMON_MARKER"
-( cd "$FSMON_REPO" && "$WRAPPER" status >/dev/null 2>&1 )
+( cd "$FSMON_REPO" && "${WRAPPER_CMD[@]}" status >/dev/null 2>&1 )
 if [[ -f "$FSMON_MARKER" ]]; then
   fail "configured fsmonitor hook FIRED via a plain 'status' — core.fsmonitor=false override regression"
 else
@@ -336,7 +382,7 @@ else
 fi
 
 rm -f "$FSMON_MARKER"
-( cd "$FSMON_REPO" && "$WRAPPER" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
+( cd "$FSMON_REPO" && "${WRAPPER_CMD[@]}" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
 if [[ -f "$FSMON_MARKER" ]]; then
   fail "configured fsmonitor hook FIRED via 'diff HEAD~1...HEAD' — core.fsmonitor=false override regression"
 else
@@ -395,7 +441,7 @@ fi
 # diff without a range" section above) — this just re-confirms the filter never runs as a
 # consequence, using the same live repo/filter as the negative control above.
 rm -f "$FILTER_MARKER"
-( cd "$FILTER_REPO" && "$WRAPPER" diff >/dev/null 2>&1 ) || true
+( cd "$FILTER_REPO" && "${WRAPPER_CMD[@]}" diff >/dev/null 2>&1 ) || true
 if [[ -f "$FILTER_MARKER" ]]; then
   fail "configured clean filter FIRED via the wrapper's bare 'diff' — should have been refused before git ever ran"
 else
@@ -405,7 +451,7 @@ fi
 # The range form the wrapper DOES allow must not trigger the filter either — it's a blob-to-blob
 # comparison, never touching the (dirty) working-tree file the filter would otherwise convert.
 rm -f "$FILTER_MARKER"
-( cd "$FILTER_REPO" && "$WRAPPER" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
+( cd "$FILTER_REPO" && "${WRAPPER_CMD[@]}" diff "HEAD~1...HEAD" >/dev/null 2>&1 )
 if [[ -f "$FILTER_MARKER" ]]; then
   fail "configured clean filter FIRED via the wrapper's range-form 'diff HEAD~1...HEAD' — blob-to-blob diff should never touch the filter"
 else
@@ -436,7 +482,7 @@ git -C "$TRACE_REPO" commit -q -m "first"
 
 TRACE_TARGET="$TRACE_REPO/tracked-file"
 before_size="$(wc -c < "$TRACE_TARGET" | tr -d ' ')"
-( cd "$TRACE_REPO" && GIT_TRACE="$TRACE_TARGET" "$WRAPPER" status >/dev/null 2>&1 )
+( cd "$TRACE_REPO" && GIT_TRACE="$TRACE_TARGET" "${WRAPPER_CMD[@]}" status >/dev/null 2>&1 )
 after_size="$(wc -c < "$TRACE_TARGET" | tr -d ' ')"
 
 if [[ "$before_size" == "$after_size" ]]; then
@@ -468,7 +514,7 @@ else
 fi
 
 TRACE2_MARKER_DIR_WRAPPED="$(mktemp -d)"
-( cd "$TRACE2_REPO" && GIT_TRACE2_EVENT="$TRACE2_MARKER_DIR_WRAPPED" "$WRAPPER" status >/dev/null 2>&1 )
+( cd "$TRACE2_REPO" && GIT_TRACE2_EVENT="$TRACE2_MARKER_DIR_WRAPPED" "${WRAPPER_CMD[@]}" status >/dev/null 2>&1 )
 if [[ -n "$(ls -A "$TRACE2_MARKER_DIR_WRAPPED" 2>/dev/null)" ]]; then
   fail "GIT_TRACE2_EVENT populated a directory via the wrapper — trace-sink regression"
 else
@@ -529,7 +575,7 @@ fi
 # The current (fixed) wrapper must REFUSE this outright — "foo" and "bar" don't resolve to real
 # commits via 'git rev-parse --verify --quiet', so it never reaches real git at all.
 rm -f "$SPOOF_MARKER"
-refuse_out="$(cd "$SPOOF_REPO" && "$WRAPPER" diff "foo..bar" 2>&1)"
+refuse_out="$(cd "$SPOOF_REPO" && "${WRAPPER_CMD[@]}" diff "foo..bar" 2>&1)"
 refuse_status=$?
 if [[ $refuse_status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$refuse_out" && [[ ! -f "$SPOOF_MARKER" ]]; then
   pass "wrapper refuses 'diff foo..bar' (a tracked path, not a real revision range) before git ever runs — clean filter never fires ($refuse_out)"
@@ -600,7 +646,7 @@ fi
 # The current (round-2-fixed) wrapper must REFUSE 'diff -- <A..B>' outright — the caller can never
 # supply '--' at all, for any subcommand.
 rm -f "$BOUNDARY_MARKER"
-boundary_out="$(cd "$BOUNDARY_REPO" && "$WRAPPER" diff -- "$BOUNDARY_SPOOF_PATH" 2>&1)"
+boundary_out="$(cd "$BOUNDARY_REPO" && "${WRAPPER_CMD[@]}" diff -- "$BOUNDARY_SPOOF_PATH" 2>&1)"
 boundary_status=$?
 if [[ $boundary_status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$boundary_out" && [[ ! -f "$BOUNDARY_MARKER" ]]; then
   pass "wrapper refuses 'diff -- <A..B>' (caller-supplied '--') before git ever runs — clean filter never fires ($boundary_out)"
@@ -611,7 +657,7 @@ fi
 # Two-argument form (no explicit '--', just a second positional) must also be refused — diff
 # takes exactly one argument, so there is no pathspec slot even without a caller-supplied '--'.
 rm -f "$BOUNDARY_MARKER"
-boundary_out2="$(cd "$BOUNDARY_REPO" && "$WRAPPER" diff "$BOUNDARY_SPOOF_PATH" "$BOUNDARY_SPOOF_PATH" 2>&1)"
+boundary_out2="$(cd "$BOUNDARY_REPO" && "${WRAPPER_CMD[@]}" diff "$BOUNDARY_SPOOF_PATH" "$BOUNDARY_SPOOF_PATH" 2>&1)"
 boundary_status2=$?
 if [[ $boundary_status2 -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$boundary_out2" && [[ ! -f "$BOUNDARY_MARKER" ]]; then
   pass "wrapper refuses a two-argument 'diff <A..B> <A..B>' — exactly-one-argument enforcement closes this even without an explicit '--' ($boundary_out2)"
@@ -623,7 +669,7 @@ fi
 # work AND still not fire the filter — real git prefers the revision interpretation when both
 # sides resolve and there's no '--' forcing pathspec position.
 rm -f "$BOUNDARY_MARKER"
-( cd "$BOUNDARY_REPO" && "$WRAPPER" diff "${BOUNDARY_SHA1}...${BOUNDARY_SHA2}" >/dev/null 2>&1 )
+( cd "$BOUNDARY_REPO" && "${WRAPPER_CMD[@]}" diff "${BOUNDARY_SHA1}...${BOUNDARY_SHA2}" >/dev/null 2>&1 )
 boundary_legit_status=$?
 if [[ $boundary_legit_status -eq 0 ]] && [[ ! -f "$BOUNDARY_MARKER" ]]; then
   pass "wrapper still accepts the legit single-argument range form (no '--') and the filter does not fire"
@@ -646,14 +692,27 @@ rm -rf "$BOUNDARY_REPO"
 # ---------------------------------------------------------------------------
 section "GIT_REDIRECT_STDOUT / GIT_REDIRECT_STDERR (Git for Windows sinks — structural + platform note)"
 
-# The unset statement spans multiple lines via trailing backslash continuations, so join them
-# into one logical line first rather than requiring both variable names on the same physical line.
-WRAPPER_JOINED="$(sed -e ':a' -e 'N' -e '$!ba' -e 's/\\\n[[:space:]]*/ /g' "$WRAPPER")"
-if grep -qE 'unset[^#]*GIT_REDIRECT_STDOUT' <<<"$WRAPPER_JOINED" && \
-   grep -qE 'unset[^#]*GIT_REDIRECT_STDERR' <<<"$WRAPPER_JOINED"; then
-  pass "wrapper source scrubs both GIT_REDIRECT_STDOUT and GIT_REDIRECT_STDERR in its unset block"
+if [[ "$IMPL" == "bash" ]]; then
+  # The unset statement spans multiple lines via trailing backslash continuations, so join them
+  # into one logical line first rather than requiring both variable names on the same physical
+  # line.
+  WRAPPER_JOINED="$(sed -e ':a' -e 'N' -e '$!ba' -e 's/\\\n[[:space:]]*/ /g' "$SRC_FILE")"
+  if grep -qE 'unset[^#]*GIT_REDIRECT_STDOUT' <<<"$WRAPPER_JOINED" && \
+     grep -qE 'unset[^#]*GIT_REDIRECT_STDERR' <<<"$WRAPPER_JOINED"; then
+    pass "wrapper source scrubs both GIT_REDIRECT_STDOUT and GIT_REDIRECT_STDERR in its unset block"
+  else
+    fail "wrapper source does NOT scrub GIT_REDIRECT_STDOUT/GIT_REDIRECT_STDERR — issue #7 item 2 unaddressed"
+  fi
 else
-  fail "wrapper source does NOT scrub GIT_REDIRECT_STDOUT/GIT_REDIRECT_STDERR — issue #7 item 2 unaddressed"
+  # Python's _forced_env() builds the subprocess environment as a fresh dict, key by key — there
+  # is no "unset" statement to grep for; the structural proof is instead that GIT_REDIRECT_STDOUT/
+  # GIT_REDIRECT_STDERR are never among the keys it explicitly sets (neutralization by omission —
+  # see pantheon/execution.py's own module docstring, EXEC/WRITE-SURFACE MATRIX).
+  if grep -qE 'env\["GIT_REDIRECT_ST(DOUT|DERR)"\]' "$SRC_FILE"; then
+    fail "pantheon/execution.py explicitly sets a GIT_REDIRECT_STDOUT/STDERR env key — issue #7 item 2 regression (these must stay absent by construction, never forwarded)"
+  else
+    pass "pantheon/execution.py never sets GIT_REDIRECT_STDOUT/GIT_REDIRECT_STDERR (neutralized by omission — _forced_env() builds a fresh dict, not a copy of os.environ)"
+  fi
 fi
 
 REDIRECT_REPO="$(mktemp -d)"
@@ -718,7 +777,7 @@ rm -rf "$LAZY_CLONE_WRAP"
 git clone -q --bare --filter=blob:none "file://$LAZY_ORIGIN" "$LAZY_CLONE_WRAP" 2>/dev/null
 
 before_wrap="$(count_objects "$LAZY_CLONE_WRAP/objects")"
-( cd "$LAZY_CLONE_WRAP" && "$WRAPPER" show "HEAD:big.txt" >/dev/null 2>&1 )
+( cd "$LAZY_CLONE_WRAP" && "${WRAPPER_CMD[@]}" show "HEAD:big.txt" >/dev/null 2>&1 )
 after_wrap="$(count_objects "$LAZY_CLONE_WRAP/objects")"
 if [[ "$after_wrap" == "$before_wrap" ]]; then
   pass "wrapper-run 'show HEAD:big.txt' against a partial clone with the blob missing left .git/objects unchanged ($before_wrap objects) — GIT_NO_LAZY_FETCH=1 forced by the wrapper closes the lazy-fetch write (the read itself fails closed, which is correct: no object, no fetch)"
@@ -726,13 +785,86 @@ else
   fail "wrapper-run 'show HEAD:big.txt' against a partial clone GREW .git/objects ($before_wrap -> $after_wrap) — GIT_NO_LAZY_FETCH regression"
 fi
 
-if grep -q '^export GIT_NO_LAZY_FETCH=1$' "$WRAPPER"; then
-  pass "wrapper source forces 'export GIT_NO_LAZY_FETCH=1' in its environment block"
+if [[ "$IMPL" == "bash" ]]; then
+  if grep -q '^export GIT_NO_LAZY_FETCH=1$' "$SRC_FILE"; then
+    pass "wrapper source forces 'export GIT_NO_LAZY_FETCH=1' in its environment block"
+  else
+    fail "wrapper source does NOT force GIT_NO_LAZY_FETCH=1 anywhere — issue #7 item 1 unaddressed"
+  fi
 else
-  fail "wrapper source does NOT force GIT_NO_LAZY_FETCH=1 anywhere — issue #7 item 1 unaddressed"
+  if grep -qF 'env["GIT_NO_LAZY_FETCH"] = "1"' "$SRC_FILE"; then
+    pass "pantheon/execution.py's _forced_env() forces GIT_NO_LAZY_FETCH=1 unconditionally"
+  else
+    fail "pantheon/execution.py does NOT force GIT_NO_LAZY_FETCH=1 anywhere — issue #7 item 1 unaddressed"
+  fi
 fi
 
 rm -rf "$LAZY_ORIGIN" "$LAZY_CLONE_RAW" "$LAZY_CLONE_WRAP"
+
+# ---------------------------------------------------------------------------
+# Untrusted-checkout PATH-injection (Codex P1, python-mode only — the vector is specific to how
+# pantheon/execution.py resolves the `git` binary; the bash wrapper's `exec git ...` has no
+# equivalent TRUSTED_GIT_DIRS mechanism to test). Round 1 of this finding: a bare
+# `shutil.which("git")` resolves a RELATIVE PATH entry (e.g. `.`), letting a PR-committed `./git`
+# impostor run in place of the real binary. Round 2 (fresh evidence after round 1's fix): even an
+# ABSOLUTE PATH entry is not automatically trustworthy — `PATH=$PWD/bin:/usr/bin` with a
+# PR-committed `bin/git` executable names an absolute directory that is still INSIDE the
+# untrusted checkout. Fixed by never consulting PATH (ambient, relative, or absolute) for this
+# lookup at all — `_git_executable()` resolves ONLY from TRUSTED_GIT_DIRS, a fixed list of system
+# directories a PR's own tracked content can never write to.
+# ---------------------------------------------------------------------------
+if [[ "$IMPL" == "python" ]]; then
+  section "Untrusted-checkout PATH-injection (Codex P1 round 2 — an absolute-but-untrusted PATH entry)"
+
+  PATHINJ_REPO="$(mktemp -d)"
+  mkdir -p "$PATHINJ_REPO/bin"
+  git -C "$PATHINJ_REPO" init -q
+  git -C "$PATHINJ_REPO" config user.email "test@example.com"
+  git -C "$PATHINJ_REPO" config user.name "test"
+  echo "a" > "$PATHINJ_REPO/f.txt"
+  git -C "$PATHINJ_REPO" add -A
+  git -C "$PATHINJ_REPO" commit -q -m "first"
+
+  PATHINJ_MARKER="$(mktemp -u)"
+  rm -f "$PATHINJ_MARKER"
+  cat > "$PATHINJ_REPO/bin/git" <<EOF
+#!/bin/sh
+touch "$PATHINJ_MARKER"
+exit 99
+EOF
+  chmod +x "$PATHINJ_REPO/bin/git"
+
+  # Negative control: RAW PATH resolution (the exact mechanism a bare shutil.which("git") or a
+  # shell's own command lookup uses) DOES find the PR-committed impostor when its absolute
+  # directory is prepended to PATH — proving the fixture is live, and reproducing exactly what
+  # round 1's "reject relative, accept any absolute" fix remained vulnerable to.
+  rm -f "$PATHINJ_MARKER"
+  raw_which_out="$(cd "$PATHINJ_REPO" && PATH="$PATHINJ_REPO/bin:$PATH" command -v git)"
+  if [[ "$raw_which_out" == "$PATHINJ_REPO/bin/git" ]]; then
+    pass "negative control: raw PATH resolution (command -v git) DOES select the PR-committed impostor when its absolute dir is prepended to PATH — fixture is live"
+  else
+    fail "negative control FAILED: raw PATH resolution did not select the impostor (got '$raw_which_out') — this fixture is not exercising anything"
+  fi
+
+  # The wrapper itself must NOT execute the impostor (marker absent) and must still successfully
+  # run the real git (exit 0, real output) — TRUSTED_GIT_DIRS is consulted instead of PATH.
+  rm -f "$PATHINJ_MARKER"
+  pathinj_out="$(cd "$PATHINJ_REPO" && PATH="$PATHINJ_REPO/bin:$PATH" "${WRAPPER_CMD[@]}" status 2>&1)"
+  pathinj_status=$?
+  if [[ ! -f "$PATHINJ_MARKER" ]]; then
+    pass "wrapper did NOT execute the PATH-injected impostor (marker absent) even with its absolute dir prepended to PATH"
+  else
+    fail "wrapper EXECUTED the PATH-injected impostor (marker present) — TRUSTED_GIT_DIRS regression, the read-only boundary is bypassed"
+  fi
+  if [[ $pathinj_status -eq 0 ]] && ! grep -q '^pantheon-git-readonly:' <<<"$pathinj_out"; then
+    pass "wrapper still ran the REAL git successfully (exit 0) despite the PATH-injection attempt"
+  else
+    fail "wrapper did not run the real git successfully under PATH injection (status=$pathinj_status, output: $pathinj_out)"
+  fi
+
+  rm -f "$PATHINJ_MARKER"
+  rm -rf "$PATHINJ_REPO"
+fi
 
 echo
 echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"

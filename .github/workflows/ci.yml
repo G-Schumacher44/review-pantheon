@@ -85,6 +85,9 @@ jobs:
       - name: Run base-pinned-read fixture tests (symlink-safe resolution)
         run: bash tests/test-base-pinned-read.sh
 
+      - name: Run base-pinned-read Python-port migration-exam fixture tests (pantheon.basepin)
+        run: bash tests/test-base-pinned-read-python.sh
+
       - name: Run combined-comment renderer fixture tests
         run: bash tests/test-render-comment.sh
 
@@ -100,8 +103,16 @@ jobs:
       - name: Run git-readonly-wrapper fixture tests
         run: bash tests/test-git-readonly-wrapper.sh
 
+      - name: Run git-readonly-wrapper fixture tests against the Python port (pantheon.execution)
+        env:
+          PANTHEON_EXECUTION_IMPL: python
+        run: bash tests/test-git-readonly-wrapper.sh
+
       - name: Run execution-tier fixture tests
         run: bash tests/test-execution-tier.sh
+
+      - name: Run execution-tier Python-port migration-exam fixture tests (pantheon.execution)
+        run: bash tests/test-execution-tier-python.sh
 
       - name: Run bootstrap release/checksum fixture tests
         run: bash tests/test-bootstrap-release.sh
