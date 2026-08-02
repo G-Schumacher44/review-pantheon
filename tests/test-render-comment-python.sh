@@ -405,6 +405,17 @@ ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
 assert_byte_identical "infinity-in-summary-prints-jq-max-double"
 
+# Divergence 5 (docs/PYTHON-PORT.md's "JSON boundary" section, pantheon/jqjson.py): a numeric
+# literal that overflows Python's IEEE double during parsing (e.g. 1e400) must print jq's own
+# canonicalized, still-exact number text (1E+400) in the machine tail, not silently lose
+# precision to a bare "Infinity" token the way an un-fixed float('inf') round-trip would (which
+# also isn't valid JSON — RFC 8259 has no such literal).
+reset_agent_env
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="x"
+ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"note","file":"a","line":1,"issue":"x","scenario":"y"}],"summary":"s","extra":1e400}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+assert_byte_identical "1e400-overflow-preserves-jq-canonical-number-in-machine-tail"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

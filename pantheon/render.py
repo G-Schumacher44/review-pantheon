@@ -27,6 +27,14 @@ comment. The one deliberate exception is the machine tail (the nested "Raw verdi
 near the end of :func:`render_comment`) — it prints the untouched JSON on purpose, because that's
 the whole point of keeping a machine-readable copy.
 
+Every JSON parse and every JSON serialize in this module goes through ``pantheon.jqjson``
+(docs/PYTHON-PORT.md's "JSON boundary" section), not Python's own json module's parse/serialize
+entry points directly — see that module's own docstring for why: this port found three straight
+rounds of the same class of divergence (a non-standard JSON-extension token, a lone surrogate, a
+pathologically long integer, an overflowing numeric literal) by patching one Python-specific
+failure mode at a time, which never converges. ``pantheon.verdict`` routes through the same
+boundary, so the two modules share exactly one place this judgment call lives.
+
 Fixture suite: tests/test-render-comment.sh (bash-internal in its original form — sources
 cli/lib/render_comment.sh directly). Its black-box Python equivalent, per docs/PYTHON-PORT.md
 section 4, is tests/test-render-comment-python.sh, which drives this module the same way the
@@ -34,90 +42,17 @@ original suite drives the sourced bash functions: via ``python3 -m pantheon.rend
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from pantheon import jqjson
+
 _SEVERITY_RANK = {"blocker": 0, "should_fix": 1, "note": 2}
 _LINE_RE = re.compile(r"^[0-9]+$")
 _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
-
-# jq's max/min IEEE-754 double — what jq's parser coerces the non-standard Infinity/-Infinity
-# JSON-extension tokens to (see _jq_compat_constant below).
-_JQ_MAX_DOUBLE = 1.7976931348623157e308
-
-
-class _JqNaN:
-    """Sentinel for jq's own NaN handling — deliberately NOT Python's ``None``. jq's parser
-    accepts the non-standard ``NaN`` JSON-extension token (same as Python's json module) but
-    represents it internally as a number that always PRINTS as the text ``null`` wherever jq
-    finally serializes it (``-r`` raw mode, a pretty/compact dump) — a jq-implementation quirk,
-    since NaN has no representable value in JSON's own number grammar. Critically, verified live,
-    it is NOT treated as an actual JSON null for jq's own truthiness/`` // `` (alternative
-    operator) purposes: ``echo '{"summary":NaN}' | jq -r '.summary // empty'`` prints the text
-    ``null`` — proof the ``//`` operator did NOT fire (a real null there would make ``// empty``
-    produce nothing at all, since null is one of the two falsy values ``//`` checks). Mapping
-    jq's NaN to Python's actual ``None`` would get this backwards: this module's own
-    ``_or_default`` (this file's ``// default`` equivalent) already, correctly, treats a real
-    ``None`` as "substitute the default" — exactly the behavior a genuine JSON null gets in jq,
-    and exactly the behavior jq's own NaN handling does NOT get. This sentinel's ``__str__``/
-    ``__repr__`` return ``"null"`` (matching jq's print form everywhere this module stringifies a
-    value — see :func:`_jq_raw` and ``pantheon.verdict``'s ``top_finding_of``, which relies on
-    this via ordinary f-string interpolation), while remaining a distinct, non-``None``,
-    non-``False`` object everywhere else, so :func:`_or_default` and every other identity/type
-    check in this module keeps it exactly as truthy as jq does."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "null"
-
-    def __str__(self) -> str:
-        return "null"
-
-
-_JQ_NAN = _JqNaN()
-
-
-def _jq_json_default(value: Any) -> Any:
-    """``json.dumps``'s ``default`` hook for :data:`_JQ_NAN`, wherever it might be nested inside
-    a value this module serializes (the machine tail's pretty dump). The returned ``None`` is
-    re-encoded normally by the encoder as JSON ``null`` — matching jq's own serialization of NaN
-    — it is not spliced in raw."""
-    if value is _JQ_NAN:
-        return None
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")  # pragma: no cover
-
-
-def _jq_compat_constant(name: str) -> Any:
-    """``json.loads``'s ``parse_constant`` hook, at every parse site in this module that feeds a
-    value into display or the machine tail. Python's json module extends the JSON grammar with
-    three non-standard tokens (``NaN``, ``Infinity``, ``-Infinity``) and, by default, keeps them
-    as literal ``float('nan')``/``float('inf')``/``float('-inf')`` objects. jq's parser accepts
-    the same extension tokens but does NOT keep them as-is — verified live against real jq (1.7.1
-    local, 1.7 in the exact Ubuntu 24.04/Dockerfile.smoke CI environment): ``Infinity``/
-    ``-Infinity`` coerce to the max/min IEEE-754 double (an ordinary, truthy JSON number in jq's
-    own type system — a plain Python float is the correct, direct equivalent, no sentinel
-    needed). ``NaN`` is the special case :class:`_JqNaN` exists for — see that class's docstring.
-    Left unfixed, a raw Python ``float('nan')``/``float('inf')`` surviving to display diverges
-    from bash's actual output text, AND — worse — a raw ``float('nan')`` reaching ``json.dumps``
-    later re-emits the bare, non-standard ``NaN`` token in the machine-readable "Raw verdict
-    JSON" block, which is not valid JSON per RFC 8259, unlike jq's own (already-coerced,
-    always-valid) equivalent output. Coercing at PARSE time — not by adding ``allow_nan=False``
-    at every ``json.dumps`` call, which would only turn this into a crash for any parse site this
-    specific fix missed — means no raw NaN/Infinity float value exists in this module's data
-    model past this point, so nothing downstream needs to know about the non-standard tokens at
-    all. (Caught live — the repo's own self-hosted gate on this PR flagged this.)"""
-    if name == "NaN":
-        return _JQ_NAN
-    if name == "Infinity":
-        return _JQ_MAX_DOUBLE
-    if name == "-Infinity":
-        return -_JQ_MAX_DOUBLE
-    raise ValueError(f"unexpected JSON constant: {name}")  # pragma: no cover — json's own grammar
 
 
 @dataclass
@@ -152,7 +87,7 @@ class AgentRenderData:
         # (what the env-var bridge always provides, and what a test deliberately exercising the
         # raw-text-fallback path can still pass) overrides this.
         if self.findings_raw is None:
-            self.findings_raw = json.dumps(self.findings_json, ensure_ascii=False, default=_jq_json_default)
+            self.findings_raw = jqjson.dumps(self.findings_json, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -173,27 +108,28 @@ def _jq_raw(value: Any) -> str:
     bash's ``unrecognized-severity(true)`` for exactly this case.)
 
     A non-scalar value (a JSON array/object smuggled into a field this module treats as display
-    text) falls through to ``json.dumps(value, indent=2, ensure_ascii=False)`` — verified live
-    against real ``jq -r``: for a non-string value, ``-r`` mode falls back to jq's own DEFAULT
-    (non-``-c``) pretty-printer, which is 2-space-indented and prints non-ASCII raw (unescaped),
-    not jq's compact form and not Python's own ``json.dumps`` default (which is compact AND
-    ASCII-escapes non-ASCII by default) — both defaults diverge from jq's here, in different
-    ways, so both must be pinned explicitly to match. (Caught live — the repo's own self-hosted
-    gate flagged this on the same PR, immediately after the boolean fix above landed.) The
-    resulting multi-line text is safe to hand to :func:`sanitize_inline` unchanged: its newline
-    -> space collapse already normalizes it the same way bash's ``$(...)`` command substitution
-    plus that function's bash equivalent does for a multi-line jq value.
+    text) falls through to jqjson's own pretty-printer — verified live against real ``jq -r``:
+    for a non-string value, ``-r`` mode falls back to jq's own DEFAULT (non-``-c``) pretty-
+    printer, which is 2-space-indented and prints non-ASCII raw (unescaped), not jq's compact
+    form and not Python's own json module's default (which is compact AND ASCII-escapes non-
+    ASCII by default) — both defaults diverge from jq's here, in different ways, so both must be
+    pinned explicitly to match. (Caught live — the repo's own self-hosted gate flagged this on
+    the same PR, immediately after the boolean fix above landed.) The resulting multi-line text
+    is safe to hand to :func:`sanitize_inline` unchanged: its newline -> space collapse already
+    normalizes it the same way bash's ``$(...)`` command substitution plus that function's bash
+    equivalent does for a multi-line jq value.
 
-    A :data:`_JQ_NAN` sentinel (a display field whose source JSON contained the non-standard
-    ``NaN`` extension token) stringifies via its own ``__str__`` below, which already returns
-    ``"null"`` — matching jq's own print form for the same value (see that class's docstring)."""
+    A :data:`pantheon.jqjson.NAN` sentinel (a display field whose source JSON contained the
+    non-standard ``NaN`` extension token) stringifies via its own ``__str__``, which already
+    returns ``"null"`` — matching jq's own print form for the same value (see
+    ``pantheon.jqjson.JqNaN``'s docstring)."""
     if isinstance(value, str):
         return value
     if isinstance(value, bool):
         return "true" if value else "false"
-    if value is _JQ_NAN:
+    if value is jqjson.NAN:
         return str(value)
-    return json.dumps(value, indent=2, ensure_ascii=False, default=_jq_json_default)
+    return jqjson.dumps(value, indent=2, ensure_ascii=False)
 
 
 def sanitize_inline(s: Any) -> str:
@@ -225,11 +161,11 @@ def sanitize_inline(s: Any) -> str:
         arbitrary user/team via a real GitHub notification.
 
     The machine tail (the nested "Raw verdict JSON" block, see this module's docstring) needs no
-    equivalent NUL handling: ``json.dumps`` always escapes control characters — including NUL —
-    as ``\\u0000``-style sequences regardless of ``ensure_ascii``, per the JSON spec, exactly like
-    jq's own non-``-r`` pretty-printer does for the bash machine tail. A raw NUL byte only ever
-    reaches bash's output via the ``-r`` (raw-string) mode this human-readable path uses; the
-    machine tail was never at risk.
+    equivalent NUL handling: a JSON serializer always escapes control characters — including NUL
+    — as backslash-u-XXXX sequences regardless of ASCII-escaping mode, per the JSON spec, exactly
+    like jq's own non-``-r`` pretty-printer does for the bash machine tail. A raw NUL byte only
+    ever reaches bash's output via the ``-r`` (raw-string) mode this human-readable path uses;
+    the machine tail was never at risk.
     """
     s = _jq_raw(s)
     s = s.replace("\x00", "")
@@ -393,39 +329,38 @@ def _machine_tail_text(raw_text: str) -> str:
     """The machine tail's per-agent code-fence content — mirrors
     ``cli/lib/render_comment.sh``'s ``jq '.' <<<"$findings_json" 2>/dev/null ||
     printf '%s\\n' "$findings_json"`` exactly: pretty-print the PARSED value (2-space indent, raw
-    UTF-8, jq-compatible NaN/Infinity coercion via :func:`_jq_compat_constant`) if ``raw_text``
-    parses as JSON — of WHATEVER type it parses to, not narrowed to an object, since jq's ``.``
-    filter happily pretty-prints a bare array/scalar too — otherwise fall back to ``raw_text``
-    completely untouched. This is deliberately a DIFFERENT rule than the structured render
-    helpers use (``_safe_findings`` et al., which narrow anything non-object/non-array to an
-    empty/absent result): the machine tail's whole purpose is showing what's actually there,
-    parseable or not, exactly like bash's own fallback does."""
+    UTF-8, jq-compatible constant/overflow-number handling via ``pantheon.jqjson``) if
+    ``raw_text`` parses — of WHATEVER JSON type it parses to, not narrowed to an object, since
+    jq's ``.`` filter happily pretty-prints a bare array/scalar too — otherwise fall back to
+    ``raw_text`` completely untouched (a ``pantheon.jqjson.JqParseError`` covers every reason a
+    parse can fail: a genuine syntax error, an input real jq itself would refuse, bash's own
+    ``\\{}`` default-value quirk for a totally unset env var). This is deliberately a DIFFERENT
+    rule than the structured render helpers use (``_safe_findings`` et al., which narrow anything
+    non-object/non-array to an empty/absent result): the machine tail's whole purpose is showing
+    what's actually there, parseable or not, exactly like bash's own fallback does."""
     try:
-        parsed = json.loads(raw_text, parse_constant=_jq_compat_constant)
-    except json.JSONDecodeError:
+        parsed = jqjson.loads(raw_text)
+    except jqjson.JqParseError:
         return raw_text
-    return json.dumps(parsed, indent=2, ensure_ascii=False, default=_jq_json_default)
+    return jqjson.dumps(parsed, indent=2, ensure_ascii=False)
 
 
 def _escape_lone_surrogates(s: str) -> str:
     """A Python ``str`` can hold a lone (unpaired) surrogate code point (U+D800-U+DFFF) —
-    reachable here via a JSON ``\\ud800``-style escape in an agent's raw output, which
-    ``json.loads`` accepts without complaint even though it isn't a valid standalone Unicode
-    scalar value. There is no UTF-8 byte sequence for an unpaired surrogate, so the moment ANY
-    caller encodes this module's output to UTF-8 (stdout, an HTTP body, a file), a lone
-    surrogate raises ``UnicodeEncodeError`` and aborts rendering entirely — human-readable
-    section included, not just the machine tail's raw JSON dump (where ``ensure_ascii=False``
-    first lets one through unescaped). Re-escaping it back to its literal ``\\uXXXX`` text form
-    keeps it visible (never silently dropped) and always safely encodable, without touching any
-    other code point: ordinary non-ASCII content — what ``ensure_ascii=False`` exists to keep
-    raw, for byte-parity with jq's own unescaped UTF-8 output — is left untouched, since Python
-    3's ``str`` never represents a legitimate astral character as a UTF-16-style surrogate pair
-    the way this bug's input does; any code point in this range is, by construction, already
-    unpaired. Applied once, to this function's whole rendered output, rather than only the
-    machine tail — a hostile/malformed field anywhere (severity, file, issue, scenario, an
-    unvalidated extra key that only reaches the raw JSON dump) can carry one. (Caught live — the
-    repo's own self-hosted gate on this PR flagged this as a P2: an escaped lone surrogate in an
-    otherwise-unused JSON field crashed the CLI while writing the comment.)"""
+    reachable here via a JSON ``\\ud800``-style escape in an agent's raw output. ``pantheon.jqjson``
+    already refuses to PARSE a lone surrogate at all (real jq rejects it too — see that module's
+    ``_verify_utf8``), so this function's job today is narrower than it once was: a defense-in-
+    depth backstop for any code point in this range that reaches a rendered string through a path
+    that doesn't go through ``pantheon.jqjson.loads`` (e.g. a caller building an
+    :class:`AgentRenderData` by hand with a raw Python string, not JSON text) — there is no UTF-8
+    byte sequence for an unpaired surrogate, so the moment ANY caller encodes this module's
+    output to UTF-8, an unhandled one would raise ``UnicodeEncodeError`` and abort rendering
+    entirely. Re-escaping it back to its literal ``\\uXXXX`` text form keeps it visible (never
+    silently dropped) and always safely encodable, without touching any other code point.
+    Applied once, to this function's whole rendered output. (Originally caught live as a P2: an
+    escaped lone surrogate in an otherwise-unused JSON field crashed the CLI while writing the
+    comment — closed at its root by ``pantheon.jqjson``'s parse-time rejection; this function
+    remains as the belt to that boundary's suspenders.)"""
     return _LONE_SURROGATE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", s)
 
 
@@ -583,8 +518,8 @@ def _agent_data_from_env(agent: str) -> AgentRenderData:
     # tail byte-identical to bash's for an agent whose FINDINGS var was never populated.
     findings_raw = os.environ.get(f"{upper}_FINDINGS") or "\\{}"
     try:
-        findings_json = json.loads(findings_raw, parse_constant=_jq_compat_constant)
-    except json.JSONDecodeError:
+        findings_json = jqjson.loads(findings_raw)
+    except jqjson.JqParseError:
         findings_json = {}
     if not isinstance(findings_json, dict):
         findings_json = {}

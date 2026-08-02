@@ -97,6 +97,9 @@ jobs:
       - name: Run combined-comment renderer fixture tests (Python port, docs/PYTHON-PORT.md)
         run: bash tests/test-render-comment-python.sh
 
+      - name: Run JSON-boundary fixture tests (pantheon.jqjson, docs/PYTHON-PORT.md)
+        run: bash tests/test-json-boundary.sh
+
       - name: Run install.sh fixture tests
         run: bash tests/test-install.sh
 

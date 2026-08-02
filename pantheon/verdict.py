@@ -27,6 +27,15 @@ document the same decision order; this module keeps it identical:
      isn't already red, force color=red and invariant_fired=True — even when the stated
      ``verdict`` word itself was invalid. An object that failed step 3 never reaches this step.
 
+Every candidate this module parses goes through ``pantheon.jqjson`` (docs/PYTHON-PORT.md's "JSON
+boundary" section) — not a direct call anywhere in this file to Python's own json module's
+parse/serialize entry points. See that module's own module docstring for why: this port found
+three straight rounds of the same class of divergence (a non-standard JSON-extension token, a
+lone surrogate, a pathologically long integer) by patching one Python-specific failure mode at a
+time, which never converges — ``pantheon.jqjson`` is the single, catch-all-postured place this
+port's own parsing now lives, so this file and ``pantheon.render`` don't each carry their own
+copy of that judgment call.
+
 Fixture suite: tests/test-verdict-decision.sh (bash-internal in its original form — sources
 cli/lib/verdict.sh and execs action/decide_verdict.py directly). Its black-box Python equivalent,
 per docs/PYTHON-PORT.md section 4, is tests/test-verdict-decision-python.sh, which drives this
@@ -35,8 +44,9 @@ module the same way the original suite drives action/decide_verdict.py: as a sub
 """
 from __future__ import annotations
 
-import json
 import sys
+
+from pantheon import jqjson
 
 # Per-agent verdict vocabulary -> gate color. Mirrors cli/lib/verdict.sh's agent_color() case
 # statement AND action/decide_verdict.py's VOCAB dict exactly — same agents, same words, same
@@ -59,83 +69,6 @@ TYPE_STRICT_REASON = (
     "must be a string in {blocker,should_fix,note})"
 )
 
-# jq's max IEEE-754 double — what jq's parser coerces the non-standard Infinity/-Infinity
-# JSON-extension tokens to (see _jq_compat_constant below). Mirrors pantheon.render's constant
-# of the same name/value exactly — kept in sync by contract, same as everywhere else in this
-# repo two implementations of one rule coexist (DESIGN.md's "Two runtimes, one rule").
-_JQ_MAX_DOUBLE = 1.7976931348623157e308
-
-
-class _JqNaN:
-    """Sentinel for jq's own NaN handling — deliberately NOT Python's ``None``. Mirrors
-    ``pantheon.render``'s class of the same name exactly (kept in sync by contract): jq's parser
-    accepts the non-standard ``NaN`` JSON-extension token but represents it internally as a value
-    that always PRINTS as the text ``null`` wherever jq finally serializes/interpolates it, while
-    remaining NOT an actual JSON null for jq's own truthiness/``//`` purposes — verified live,
-    ``echo '{"summary":NaN}' | jq -r '.summary // empty'`` prints ``null`` (proof ``//`` did NOT
-    fire; a real null there would print nothing). This module's own decision logic never branches
-    on a display field's truthiness the way ``pantheon.render``'s ``_or_default`` does, but
-    :func:`top_finding_of` DOES interpolate raw finding fields (file/issue/line) directly into an
-    f-string — and Python's default ``str(None)`` is the literal text ``"None"``, not jq's
-    ``"null"``. This sentinel's ``__str__``/``__repr__`` return ``"null"`` so that ordinary
-    f-string interpolation already matches jq's print form with no special-casing needed at the
-    call site."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "null"
-
-    def __str__(self) -> str:
-        return "null"
-
-
-_JQ_NAN = _JqNaN()
-
-
-def _jq_json_default(value: object) -> object:
-    """``json.dumps``'s ``default`` hook for :data:`_JQ_NAN`, wherever it might be nested inside
-    ``decision["verdict_json"]`` (``main()``'s own ``json.dumps(decision)`` call). The returned
-    ``None`` is re-encoded normally by the encoder as JSON ``null`` — matching jq's own
-    serialization of NaN — it is not spliced in raw."""
-    if value is _JQ_NAN:
-        return None
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")  # pragma: no cover
-
-
-def _jq_compat_constant(name: str) -> object:
-    """``json.loads``'s ``parse_constant`` hook, at every parse site in this module. Python's
-    json module extends the JSON grammar with three non-standard tokens (``NaN``, ``Infinity``,
-    ``-Infinity``) and, by default, keeps them as literal ``float('nan')``/``float('inf')``/
-    ``float('-inf')`` objects. jq's parser accepts the same extension tokens but does NOT keep
-    them as-is — verified live against real jq (1.7.1 local, 1.7 in the exact Ubuntu 24.04/
-    Dockerfile.smoke CI environment): ``Infinity``/``-Infinity`` coerce to the max/min IEEE-754
-    double (an ordinary, ``//``-truthy JSON number — a plain Python float is the correct, direct
-    equivalent, no sentinel needed). ``NaN`` is the special case :class:`_JqNaN` exists for — see
-    that class's docstring.
-
-    This module's own DECISION (color/verdict/invariant_fired) is unaffected either way — NaN/
-    Infinity can only ever reach an unvalidated DISPLAY field (summary, a finding's file/issue/
-    scenario/line), never the type-strict-validated invariant-read surface (verdict/has_blocker/
-    findings/severity), which already rejects a non-string/non-boolean value regardless of this
-    hook. This exists for what THIS module hands back as ``verdict_json`` (the full parsed
-    object, display fields included) and ``top_finding``: a raw ``float('nan')`` surviving there
-    would let ``main()``'s own ``json.dumps(decision)`` re-emit the bare, non-standard ``NaN``
-    token — invalid per RFC 8259, unlike jq's own (already-coerced, always-valid) output for the
-    same input — and would diverge from ``pantheon.render``'s display text (and this module's own
-    ``top_finding_of`` interpolation) for the same value. Coercing at PARSE time means no raw
-    NaN/Infinity float value exists in this module's data model past this point. (Caught live —
-    the repo's own self-hosted gate on this PR flagged this, against ``pantheon.render``'s side
-    of the same class of gap; verdict.py mirrors the same fix for consistency and because its own
-    ``verdict_json``/``top_finding`` output has the identical exposure.)"""
-    if name == "NaN":
-        return _JQ_NAN
-    if name == "Infinity":
-        return _JQ_MAX_DOUBLE
-    if name == "-Infinity":
-        return -_JQ_MAX_DOUBLE
-    raise ValueError(f"unexpected JSON constant: {name}")  # pragma: no cover — json's own grammar
-
 
 def extract_last_json(raw: str) -> str:
     """Parse-anchored suffix scan — identical algorithm to cli/lib/verdict.sh's
@@ -145,11 +78,16 @@ def extract_last_json(raw: str) -> str:
     Scan every ``{`` character in ``raw`` from the END backward; the first (rightmost) one whose
     suffix — that character straight through EOF — parses as a single, complete JSON document
     with nothing after it is the verdict candidate. "Single, complete JSON document with nothing
-    after it" is exactly what ``json.loads`` already enforces on its own (it raises
-    ``json.JSONDecodeError`` — "Extra data" — on any non-whitespace content after the first
-    complete value), so no extra work is needed here beyond a bare ``json.loads`` per candidate;
-    this is the same guarantee cli/lib/verdict.sh's ``_pantheon_single_json`` helper has to
-    reconstruct by hand on top of jq's more permissive stream parser.
+    after it" is exactly what ``pantheon.jqjson.loads`` (itself a ``json.loads`` wrapper) already
+    enforces on its own (it raises on any non-whitespace content after the first complete value
+    — "Extra data" is one of the many failure shapes ``pantheon.jqjson.JqParseError`` covers), so
+    no extra work is needed here beyond a bare parse attempt per candidate; this is the same
+    guarantee cli/lib/verdict.sh's ``_pantheon_single_json`` helper has to reconstruct by hand on
+    top of jq's more permissive stream parser. This probe also inherits ``pantheon.jqjson``'s
+    UTF-8-validity and jq-compatible-constant handling for free — a candidate real jq would
+    reject (a lone surrogate, say) is correctly never treated as parseable here either, so the
+    scan properly falls through to an earlier or later ``{`` instead of ending on a
+    jq-that-real-bash-would-refuse candidate.
 
     Immune by construction to: an unmatched ``{`` anywhere earlier in the text (that candidate is
     simply never tried, because a later ``{`` — the real object's own — is tried first and
@@ -166,8 +104,8 @@ def extract_last_json(raw: str) -> str:
             continue
         candidate = raw[i:]
         try:
-            json.loads(candidate, parse_constant=_jq_compat_constant)
-        except json.JSONDecodeError:
+            jqjson.loads(candidate)
+        except jqjson.JqParseError:
             continue
         return candidate
     return ""
@@ -177,7 +115,10 @@ def top_finding_of(verdict_obj: dict) -> str:
     """Same fallback chain as cli/lib/verdict.sh's top_finding computation and
     action/decide_verdict.py's top_finding_of: first finding's "severity: issue (file:line)", or
     "no findings" if there are none or the shape is malformed enough that the fields can't be
-    read."""
+    read. A field holding ``pantheon.jqjson.NAN`` (a parsed NaN token) interpolates as the text
+    "null" here via that sentinel's own ``__str__`` — matching jq's own print form for the same
+    value, not Python's default ``str(None) == "None"`` (see ``pantheon.jqjson.JqNaN``'s
+    docstring)."""
     findings = verdict_obj.get("findings") or []
     if not findings:
         return "no findings"
@@ -232,7 +173,10 @@ def decide(expected_agent: str, raw: str) -> dict:
     decide_verdict() and action/decide_verdict.py's decide() — see this module's docstring for
     the full rule. Always returns a decision dict; never raises on malformed input (malformed
     input is exactly what this function exists to classify, not something that should abort the
-    caller)."""
+    caller). The JSON-boundary rule: any ``pantheon.jqjson.JqParseError`` — a syntax error, an
+    input real jq itself would refuse (a lone surrogate), a pathologically long integer, or
+    anything else that boundary's catch-all posture converts to that one exception type — is
+    treated identically to "candidate did not parse," landing on UNVERIFIED. Never a crash."""
     candidate = extract_last_json(raw)
     if not candidate:
         reason = "no trailing JSON object found in agent output"
@@ -247,8 +191,8 @@ def decide(expected_agent: str, raw: str) -> dict:
         }
 
     try:
-        verdict_obj = json.loads(candidate, parse_constant=_jq_compat_constant)
-    except json.JSONDecodeError as e:
+        verdict_obj = jqjson.loads(candidate)
+    except jqjson.JqParseError as e:
         reason = f"trailing JSON did not parse: {e}"
         return {
             "agent": expected_agent,
@@ -349,7 +293,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         decision = decide(expected_agent, raw)
 
-    print(json.dumps(decision, default=_jq_json_default))
+    # ensure_ascii=True (jqjson's non-default) preserves action/decide_verdict.py's own existing
+    # stdout behavior byte-for-byte — that file's bare, unadorned dump-and-print call never
+    # overrode ensure_ascii either, and this line's whole job is staying byte-identical to it.
+    print(jqjson.dumps(decision, ensure_ascii=True))
 
     if decision["color"] in ("red", "unverified"):
         print(

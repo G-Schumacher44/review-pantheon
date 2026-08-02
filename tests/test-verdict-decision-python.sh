@@ -238,6 +238,35 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# JSON-boundary regression coverage (docs/PYTHON-PORT.md's "JSON boundary" section,
+# pantheon/jqjson.py) — three more real gate findings, each independently verified live
+# (against real bash / real jq / real Python) as failing pre-fix before pantheon.jqjson landed.
+# ---------------------------------------------------------------------------
+
+check "lone-surrogate-in-display-field-is-unverified-not-green" "artemis" \
+  '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"\ud800"}' \
+  "unverified" "false"
+# Verified live against the real bash decider (cli/lib/verdict.sh, sourced directly): its own
+# extract_last_json/_pantheon_single_json returns an EMPTY candidate for this exact input — jq's
+# parser rejects a lone surrogate outright — so bash's decide_verdict lands on the identical
+# "no parseable JSON object found" -> unverified outcome the check() call above asserts for
+# Python. Pre-fix, pantheon.verdict (before routing through pantheon.jqjson) decided GREEN for
+# this input instead — json.loads accepted the lone surrogate without complaint, a genuine
+# decision-color divergence from bash's real, already-correct behavior, not just a display-text
+# one.
+
+check "5000-digit-integer-in-display-field-is-unverified-not-a-crash" "artemis" \
+  "{\"agent\":\"artemis\",\"verdict\":\"SHIP\",\"has_blocker\":false,\"findings\":[],\"summary\":$(printf '9%.0s' $(seq 1 5000))}" \
+  "unverified" "false"
+# Python 3.11+'s int-string-conversion digit limit (sys.set_int_max_str_digits, default 4300)
+# makes a bare json.loads() raise ValueError -- NOT json.JSONDecodeError -- for an integer this
+# long anywhere in the source text, even in a wholly unvalidated display field. Pre-fix, neither
+# extract_last_json's per-candidate probe nor decide()'s own parse call caught this exception
+# type, so this fixture crashed the whole process (an uncaught traceback) instead of landing on
+# the fail-closed "unverified" this check() call now asserts -- pantheon.jqjson's deliberate
+# catch-ALL posture (not an enumerated list of exception types) is what closes this.
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo
