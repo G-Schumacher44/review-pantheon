@@ -67,13 +67,20 @@ fixtures referenced throughout.
     default` (whose own docs describe it as prompting on first use, not denying).
   - **Honest consequence of that built-in bypass:** a bare `git diff`/`show`/`log`/`status`
     with no flags can run without ever reaching `pantheon-git-readonly.sh` at all, on any
-    tier, because Claude Code itself always allows those — this is expected and fine (they're
-    genuinely read-only), but it means the wrapper's actual job is everything *beyond* that
-    built-in-safe set (any flag, any other subcommand), not "every git invocation routes
-    through it." The wrapper remains the enforcement point for that broader surface regardless
-    of what Claude Code's own undocumented internal classifier does or doesn't catch on its
-    own — an explicit, versioned, this-repo-owned guarantee instead of a dependency on
-    upstream behavior this repo can't audit.
+    tier, because Claude Code itself always allows those — this is expected and fine, but it
+    means the wrapper's actual job is everything *beyond* that built-in-safe set (any flag, any
+    other subcommand), not "every git invocation routes through it." **Correction (this record
+    originally called the bypassed calls "genuinely read-only" — they aren't, in the side-effect
+    sense): bypassing the wrapper also bypasses its `GIT_OPTIONAL_LOCKS=0` (Round 3 above) and
+    `GIT_NO_LAZY_FETCH=1` (Round 7 below), so a bare `git status` can still perform its default
+    optional index refresh, and a bare object read in a partial clone can still lazy-fetch — see
+    SECURITY.md's ["Bypassing the wrapper is not the same as having no side
+    effects"](../SECURITY.md#bypassing-the-wrapper-is-not-the-same-as-having-no-side-effects)
+    for the current, accurate framing.** The wrapper remains the enforcement point for the
+    arbitrary-command-execution surface regardless of what Claude Code's own undocumented
+    internal classifier does or doesn't catch on its own — an explicit, versioned,
+    this-repo-owned guarantee instead of a dependency on upstream behavior this repo can't
+    audit.
   - The very first PR that runs `install.sh` in a repo and adds `action/review.yml` + the
     wrapper together has the wrapper at its own head but not yet at base — base-pinning
     correctly refuses to read it from the working tree even for that PR (falling back "just

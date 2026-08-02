@@ -60,7 +60,8 @@ any tier. Don't read "expected, allowed by Claude Code" as "genuinely read-only"
 forces `GIT_OPTIONAL_LOCKS=0` and `GIT_NO_LAZY_FETCH=1` specifically because plain git doesn't
 default to either, so a bare `git status` outside the wrapper can still write `.git/index`, and a
 bare object read in a partial clone can still lazy-fetch — real, reproduced side effects (see
-DESIGN.md's "Security posture," Round 3 and Round 4) this policy doesn't treat as gate-defeating.
+[docs/HARDENING-HISTORY.md](docs/HARDENING-HISTORY.md): Round 3 for the index-write reproduction,
+Round 7 for the partial-clone lazy-fetch reproduction) this policy doesn't treat as gate-defeating.
 
 ### What `readonly` closes, and its honest limit
 
