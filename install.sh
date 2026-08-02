@@ -111,6 +111,14 @@ DECIDE_SRC="$SCRIPT_DIR/action/decide_verdict.py"
 ACTION_SRC="$SCRIPT_DIR/action/review.yml"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
 GIT_WRAPPER_SRC="$SCRIPT_DIR/cli/lib/pantheon-git-readonly.sh"
+# The verdict decider's real implementation (port slice 5's absorption, DESIGN.md's "Two
+# runtimes, one rule") — action/review.yml's "Resolve gate scripts (base-pinned)" step reads
+# these three files (the ONLY ones `pantheon.verdict` actually imports: itself, the package's
+# own __init__.py, and pantheon.jqjson for JSON parsing) at the PR's base commit, so they need
+# to exist HERE, vendored into the target repo, for base-pinning to ever find them. DECIDE_SRC
+# above (a deprecated, one-release compat shim as of this slice — see action/decide_verdict.py's
+# own header) is still vendored too, unchanged, for anything scripting against it directly.
+PANTHEON_PKG_SRC="$SCRIPT_DIR/pantheon"
 
 SKIPPED=()
 
@@ -142,12 +150,20 @@ if [[ "$DO_USER" != "true" ]]; then
   [[ -f "$ACTION_SRC" ]] || die "missing $ACTION_SRC"
   [[ -f "$RULES_SRC" ]] || die "missing $RULES_SRC"
   [[ -f "$GIT_WRAPPER_SRC" ]] || die "missing $GIT_WRAPPER_SRC"
+  [[ -f "$PANTHEON_PKG_SRC/__init__.py" ]] || die "missing $PANTHEON_PKG_SRC/__init__.py"
+  [[ -f "$PANTHEON_PKG_SRC/jqjson.py" ]] || die "missing $PANTHEON_PKG_SRC/jqjson.py"
+  [[ -f "$PANTHEON_PKG_SRC/verdict.py" ]] || die "missing $PANTHEON_PKG_SRC/verdict.py"
 
   AGENTS_DEST="$TARGET/.github/review-agents"
   DECIDE_DEST="$TARGET/.github/review-agents/decide_verdict.py"
   WORKFLOW_DEST="$TARGET/.github/workflows/review.yml"
   RULES_DEST="$TARGET/REVIEW_RULES.md"
   GITIGNORE_DEST="$TARGET/.gitignore"
+  # Base-pinned by action/review.yml's "Resolve gate scripts (base-pinned)" step (see
+  # PANTHEON_PKG_SRC's own comment above) — same "installed here is required, but the literal
+  # path used at run time is the base-pinned $RUNNER_TEMP copy, not this one" caveat as
+  # GIT_WRAPPER_DEST below.
+  PANTHEON_PKG_DEST="$TARGET/.github/review-agents/pantheon"
   # action/review.yml reads this file's CONTENT from the PR's base commit (`git show
   # $BASE_SHA:.github/review-agents/pantheon-git-readonly.sh`, its "Resolve read-only git
   # wrapper (base-pinned)" step) into $RUNNER_TEMP, and points claude_args' readonly-tier Bash
@@ -169,6 +185,11 @@ if [[ "$DO_USER" != "true" ]]; then
   install_file "$RULES_SRC" "$RULES_DEST"
   install_file "$GIT_WRAPPER_SRC" "$GIT_WRAPPER_DEST"
   chmod +x "$GIT_WRAPPER_DEST"
+
+  mkdir -p "$PANTHEON_PKG_DEST"
+  for pyfile in __init__.py jqjson.py verdict.py; do
+    install_file "$PANTHEON_PKG_SRC/$pyfile" "$PANTHEON_PKG_DEST/$pyfile"
+  done
 
   # .gitignore: append the state-file entry if not already present.
   if [[ -f "$GITIGNORE_DEST" ]]; then

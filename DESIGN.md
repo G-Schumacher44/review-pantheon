@@ -248,19 +248,36 @@ counsel personas individually and reason across their verdicts yourself.
 
 ## Two runtimes, one rule
 
-The CLI runner and the GitHub Action are separate processes on separate runtimes — bash+jq for
-the CLI (`cli/lib/verdict.sh`), Python for the Action (`action/decide_verdict.py`, installed
-into the target repo and run from there, not embedded in the workflow YAML). That split is
-accepted deliberately: the Action can't cleanly `source` a bash file across its step
-boundaries, and the CLI shouldn't require a Python interpreter just to run `review-gate`. Two
-implementations of the same rule is normally the kind of drift rule 4 warns against for
-personas — the mitigation here is the same shape as that rule's, applied to code instead of
-prose: both files carry a comment pointing at the other, and
-`tests/test-verdict-decision.sh` runs the same fixture set through both and fails if they
-disagree with each other or with the expected result. They must implement identically:
-- the same per-agent verdict vocabulary → color map,
-- the same fail-closed rule (missing/unparseable/out-of-vocabulary verdict → unverified),
-- the same blocker invariant (see the verdict contract above).
+**Status: the verdict-decision rule is now single-sourced (port slice 5, docs/PYTHON-PORT.md
+section 3's "one runtime endgame") — `pantheon/verdict.py` is the ONE implementation, called by
+both lanes: the CLI (`pantheon gate`, via `pantheon.cli`) and the Action (`action.yml`'s five
+"Decide verdict (<agent>)" steps and the vendored `action/review.yml`'s own "Decide verdict"
+step, both invoking `pantheon/verdict.py` by its own absolute path (deliberately NOT `python3 -m
+pantheon.verdict` — a Codex finding on this port's own PR: `-m` prepends the caller's cwd, the
+PR's own checkout on both Action lanes, to `sys.path[0]` BEFORE any `PYTHONPATH` entry, so a
+fork PR committing its own top-level `pantheon/verdict.py` would shadow the trusted one; running
+the trusted file by its own path makes ITS directory `sys.path[0]` instead — the same principle
+`pantheon.execution.resolve_console_script`'s own console-script resolution already relies on)
+— the Action lanes resolve it from `github.action_path`/a base-pinned copy of the package rather
+than a `pip install`, since it's a plain stdlib-only module needing no build step to run from a
+checkout). The historical two-runtime split this section used to describe — bash+jq's
+`cli/lib/verdict.sh` for the CLI,
+Python's standalone `action/decide_verdict.py` for the Action, kept in sync by
+`tests/test-verdict-decision.sh` cross-checking both against the same fixtures — is retired as
+of this slice: `cli/lib/verdict.sh` no longer has a live caller (`cli/review-gate`, the
+deprecated bash CLI, still exists for its one-release compat window, but the Python `pantheon`
+CLI is what's documented as current — see README.md/docs/CLI.md), and
+`action/decide_verdict.py` is now a thin shim delegating straight into `pantheon.verdict`, not a
+second implementation (see that file's own header). `tests/test-verdict-decision.sh` still
+passes (it now exercises the SAME code twice, once via `cli/lib/verdict.sh` — unchanged, still a
+real independent implementation while bash lives — and once via the shim) alongside
+`tests/test-verdict-decision-python.sh`'s direct `pantheon.verdict` coverage.
+
+**Not yet unified:** the combined-comment RENDERER (`cli/lib/render_comment.sh` /
+`action/lib/combine_verdicts.sh` / `action/review.yml`'s own inline comment-build step — see
+"Combined PR comment" below) is a separate absorption this slice did not attempt; it remains
+three call sites sharing bash logic, the same shape described there today. Folding it into
+`pantheon.render` (already ported, Slice 2) is tracked as a follow-up, not done here.
 
 ## Combined PR comment
 
@@ -501,11 +518,15 @@ identical tools. Differences are intentional, not oversights:
 `action.yml` at the repo root is a **third** surface on top of the CLI and the vendored
 `action/review.yml`: a composite GitHub Action a target repo consumes with a `uses:
 G-Schumacher44/review-pantheon@v1` reference and nothing else — zero files land in that repo
-(contrast with `install.sh`'s Way A, which vendors personas + `action/review.yml` +
-`decide_verdict.py` into the target repo precisely so its own runner can see them; the
-published action instead reads all of that from its own checkout at `github.action_path`, the
-copy GitHub Actions pulls for the `uses:` reference). `examples/review-gate.yml` is the whole
-consumer-side install — copy it to `.github/workflows/review-gate.yml` and wire one secret.
+(contrast with `install.sh`'s Way A, which vendors personas + `action/review.yml` + a deprecated
+`decide_verdict.py` compat shim + the `pantheon` package's verdict-decision module
+(`pantheon/__init__.py`, `pantheon/jqjson.py`, `pantheon/verdict.py` — the base-pinned trio
+`action/review.yml`'s own decide step now runs by invoking `pantheon/verdict.py`'s own absolute
+path, never `python3 -m pantheon.verdict` — see "Two runtimes, one rule" above for why) into the
+target repo precisely so its own runner can see them; the published action instead reads all of
+that from its own checkout at `github.action_path`, the copy GitHub Actions pulls for the
+`uses:` reference). `examples/review-gate.yml` is the whole consumer-side install — copy it to
+`.github/workflows/review-gate.yml` and wire one secret.
 
 - **Bundled personas, overridable.** `agents/*.md` in this repo is read by default
   (`github.action_path/agents`); a target repo can point `personas_path` at its own directory
@@ -555,14 +576,23 @@ pass `bash -n` and shellcheck (already true via the repo-wide shellcheck job for
 ## Layout
 
 ```
+pantheon/                  the current CLI (docs/PYTHON-PORT.md) — `pantheon gate`/`pantheon
+                           counsel`, stdlib-only, pipx/pip-installable (pyproject.toml). Also the
+                           sole implementation of the verdict-decision rule as of port slice 5
+                           (see "Two runtimes, one rule" above): `pantheon/verdict.py`, called by
+                           both the CLI and the Action lanes. `pantheon.reviewgate_shim`
+                           (`review-gate` console script) is a one-release deprecated compat
+                           shim, not a second implementation.
 agents/                    five canonical personas (the single source of truth)
 skills/                    four canonical Claude Code skills (gate, counsel, spec-driven,
                            design-contract) — the single hand-maintained source, same shape as
                            agents/ under rule 4; install.sh --claude copies them verbatim into
                            .claude/skills/<name>/SKILL.md, never regenerated
-cli/review-gate            the runner: builds prompts, calls a provider lane, validates
-                           verdicts, posts ONE combined PR comment (see "Combined PR comment"
-                           below)
+cli/review-gate            DEPRECATED (port slice 5, one-release compat window) — the bash
+                           runner: builds prompts, calls a provider lane, validates verdicts,
+                           posts ONE combined PR comment. `pantheon gate` (above) is the current
+                           CLI; this stays present, unchanged, only for the transition — see its
+                           own header comment and docs/PYTHON-PORT.md section 7
 cli/lib/verdict.sh         extraction + verdict-decision (blocker invariant included) —
                            sourced by cli/review-gate AND tests/test-verdict-decision.sh
 cli/lib/render_comment.sh  the combined-comment renderer — sourced by cli/review-gate AND
@@ -589,10 +619,15 @@ cli/lib/pantheon-base-pin.sh  symlink-safe base-pinned reads (issue #6's class, 
 cli/providers/             provider lanes (claude, codex, gemini, cursor)
 action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
                            artifact-based result passing, fail-closed decision step
-action/decide_verdict.py   the Action's verdict-decision rule (Python twin of
-                           cli/lib/verdict.sh — see "Two runtimes, one rule"); installed into
-                           the target repo, not embedded in the workflow YAML — also read
-                           in-place by action.yml (see below), never installed for that surface
+action/decide_verdict.py   DEPRECATED (port slice 5, one-release compat window) — a thin shim
+                           delegating to `pantheon.verdict`, the now-sole implementation of the
+                           verdict-decision rule (see "Two runtimes, one rule" above). Neither
+                           `action.yml` nor `action/review.yml` calls this file anymore (both
+                           invoke `pantheon/verdict.py` by its own absolute path directly,
+                           never `python3 -m pantheon.verdict` — see "Two runtimes, one rule"
+                           above); still vendored by
+                           install.sh, unchanged, only so nothing scripting against it directly
+                           breaks mid-transition
 action/lib/                shared shell helpers for action.yml (build_prompt.sh,
                            combine_verdicts.sh) — combine_verdicts.sh sources
                            cli/lib/render_comment.sh (relative path, safe because the

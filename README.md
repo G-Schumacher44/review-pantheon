@@ -38,15 +38,17 @@ Zero footprint — drop this into a workflow file (plus a PR trigger and `pull-r
 ```
 
 Nothing else lands in your repo. Want to try it first with zero tokens spent? From a local
-checkout:
+checkout, in a venv (`pip install -e .`):
 
 ```bash
-cli/review-gate --pr <number> --dry-run
+pantheon gate --pr <number> --dry-run
 ```
 
 runs the real thing — real diff, real prompts — right up to calling a provider, then prints
-exactly what it *would* post. Prefer a vendored install, or the CLI only? Full walkthrough for
-every path: [docs/SETUP.md](docs/SETUP.md).
+exactly what it *would* post. `pantheon` is the current CLI (docs/CLI.md) — the bash
+`cli/review-gate`/`review-gate` compat shim still work during the port's deprecation window
+(docs/PYTHON-PORT.md) but are on notice for removal. Prefer a vendored install, or the CLI only?
+Full walkthrough for every path: [docs/SETUP.md](docs/SETUP.md).
 
 ## The panel
 

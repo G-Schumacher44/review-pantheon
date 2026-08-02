@@ -33,12 +33,22 @@
 #
 # Idempotent: re-running with the same --prefix only touches files that changed. Same cmp-and-
 # skip contract as install.sh's install_file — a destination file that differs from the
-# shipped source (looks hand-edited) is left alone and reported skipped, never clobbered.
+# shipped source (looks hand-edited) is left alone and reported skipped, never clobbered. The
+# `pantheon` package install below (see "Install the pantheon package" section) is idempotent by
+# a DIFFERENT mechanism — `python3 -m venv`/`pip install` are themselves no-ops (or fast,
+# in-place upgrades) on an unchanged source tree, so this script doesn't need to hand-roll its
+# own cmp-and-skip logic for that step the way install_file() does for the vendored bash files.
 #
 # No new dependencies beyond curl/tar (remote-fetch path only, unchanged) and sha256sum OR
 # shasum for checksum verification — every mainstream platform ships at least one of those two
 # (GNU coreutils sha256sum on Linux, shasum on stock macOS/BSD); both are handled, neither is a
-# new install requirement.
+# new install requirement. **New as of port slice 5:** `python3` (>=3.9, stdlib `venv` module) is
+# now required too — the `pantheon` package (docs/PYTHON-PORT.md) has no runtime dependency
+# beyond the standard library, but installing it at all needs an interpreter and `pip`, same as
+# any Python package. This script still installs the bash CLI (`cli/review-gate`, `cli/lib/`,
+# `cli/providers/`) alongside it, unchanged, for the deprecation window docs/PYTHON-PORT.md
+# section 7 describes — see the "Install the pantheon package" section below for why a venv
+# UNDER --prefix, not `pip install --user`, is the shape this script picked.
 set -euo pipefail
 
 die() { echo "bootstrap.sh: $*" >&2; exit 1; }
@@ -384,6 +394,8 @@ main() {
   [[ -f "$SRC_ROOT/cli/lib/pantheon-base-pin.sh" ]] || die "missing $SRC_ROOT/cli/lib/pantheon-base-pin.sh"
   [[ -d "$SRC_ROOT/cli/providers" ]] || die "missing $SRC_ROOT/cli/providers"
   [[ -d "$SRC_ROOT/agents" ]] || die "missing $SRC_ROOT/agents"
+  [[ -f "$SRC_ROOT/pyproject.toml" ]] || die "missing $SRC_ROOT/pyproject.toml"
+  [[ -d "$SRC_ROOT/pantheon" ]] || die "missing $SRC_ROOT/pantheon"
 
   # -------------------------------------------------------------------------
   # Install — mirrors the source layout under $PREFIX (cli/review-gate, cli/lib/verdict.sh,
@@ -430,24 +442,67 @@ main() {
     done
   fi
 
+  # -------------------------------------------------------------------------
+  # Install the pantheon package (port slice 5, docs/PYTHON-PORT.md) — a venv UNDER $PREFIX,
+  # not `pip install --user`. Three reasons this shape, not that one:
+  #   1. Respects --prefix. bootstrap.sh's whole contract is "everything lands under one
+  #      directory YOU chose, nothing scattered elsewhere on your machine, point PATH at it" —
+  #      `pip install --user` writes into a fixed, PREFIX-independent location (~/.local or
+  #      platform equivalent), which breaks that contract outright (two different --prefix
+  #      installs, or an uninstall via `rm -rf $PREFIX`, would silently interact/collide).
+  #   2. Stays zero-interactive and single-file bash. `python3 -m venv` + that venv's own `pip
+  #      install` are both plain, non-interactive subprocess calls — no new language runtime or
+  #      helper file this script needs to ship or source; bootstrap.sh is still one file.
+  #   3. Isolation. A venv's own site-packages can't collide with, or be shadowed by, whatever
+  #      else is already on this machine's --user site (a DIFFERENT review-pantheon version
+  #      installed globally, an unrelated package also named oddly) — the same "fixed, isolated
+  #      location" property TRUSTED_GIT_DIRS/pantheon.execution's own console-script resolution
+  #      already lean on elsewhere in this port.
+  #
+  # `pantheon-git-readonly`'s own console-script resolution (pantheon.execution.
+  # resolve_console_script) finds this venv's console scripts correctly out of the box — they
+  # land in $PREFIX/venv/bin, adjacent to that venv's own `python3`, the FIRST (and most common)
+  # of the two fixed locations that function checks (see its own docstring, issue #21 P1).
+  #
+  # Idempotent by construction, not by this script's own cmp-and-skip logic: `python3 -m venv`
+  # on an existing venv directory reuses/repairs it rather than erroring, and `pip install`
+  # against an unchanged source tree is a fast no-op (a changed one just upgrades in place) —
+  # unlike install_file()'s hand-rolled compare above, neither needs bootstrap.sh to track
+  # "did this change" itself.
+  command -v python3 >/dev/null 2>&1 || die "python3 (>=3.9) is required to install the pantheon package — see this script's header comment"
+
+  PANTHEON_VENV="$PREFIX/venv"
+  note "creating/updating the pantheon package venv at $PANTHEON_VENV"
+  python3 -m venv "$PANTHEON_VENV" || die "python3 -m venv $PANTHEON_VENV failed"
+  if "$PANTHEON_VENV/bin/pip" install --quiet --upgrade-strategy only-if-needed "$SRC_ROOT"; then
+    note "installed the pantheon package into $PANTHEON_VENV (pip install $SRC_ROOT)"
+  else
+    die "pip install of the pantheon package into $PANTHEON_VENV failed (see pip's own output above)"
+  fi
+
   cat <<EOF
 
-review-pantheon CLI installed to $PREFIX
+review-pantheon installed to $PREFIX
+  - bash CLI (deprecated, kept for the transition — docs/PYTHON-PORT.md section 7): $PREFIX/cli
+  - pantheon package (the current CLI, port slice 5): $PREFIX/venv/bin
 
-Add it to your PATH (this script does not edit your shell rc for you):
+Add both to your PATH (this script does not edit your shell rc for you):
 
-  export PATH="$PREFIX/cli:\$PATH"
+  export PATH="$PREFIX/venv/bin:$PREFIX/cli:\$PATH"
 
 Then, from inside any repo with a gh-authenticated remote:
 
-  review-gate --pr <number> --dry-run
+  pantheon gate --pr <number> --dry-run
+
+(the deprecated \`review-gate\` compat shim — same flags, same behavior, a one-line deprecation
+note on stderr — still works too, from \$PREFIX/cli, for anything not yet moved to \`pantheon\`.)
 
 That runs entirely offline of any provider — it fetches real PR metadata, builds the real
 prompts, and prints the would-be provider command and comment without calling a model or
 posting anything. See docs/SETUP.md in review-pantheon for the full walkthrough.
 
-Note: gate.conf and REVIEW_RULES.md are read from the TARGET repo you run review-gate in, not
-from $PREFIX — copy gate.conf.example there yourself if you want non-default settings.
+Note: gate.conf and REVIEW_RULES.md are read from the TARGET repo you run pantheon/review-gate
+in, not from $PREFIX — copy gate.conf.example there yourself if you want non-default settings.
 EOF
 }
 

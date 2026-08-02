@@ -1,25 +1,34 @@
-# CLI guide — `review-gate`
+# CLI guide — `pantheon`
 
 The CLI-surface reference: every flag, every `gate.conf` key, the execution tiers, the
 follow-up-mode state model, exit codes, and worked examples. For install steps and the
 zero-token first run, see [SETUP.md](SETUP.md). For the binding contract (verdict schema,
 security posture, the full read-provenance matrix), see [DESIGN.md](../DESIGN.md). Everything
-below is grounded in `cli/review-gate`'s own `--help` output and `cli/lib/*.sh` — if this doc and
-the code ever disagree, that's DESIGN.md rule 5's bug, not a judgment call.
+below is grounded in `pantheon`'s own `--help` output and the `pantheon` package
+(docs/PYTHON-PORT.md) — if this doc and the code ever disagree, that's DESIGN.md rule 5's bug,
+not a judgment call.
 
-**v2 preview:** a Python CLI (`pantheon gate` / `pantheon counsel`, plus a `review-gate` compat
-shim) now exists alongside this bash `review-gate` — see
-[docs/PYTHON-PORT.md](PYTHON-PORT.md) for the port spec. Everything below still describes the
-**canonical** implementation; `pantheon` is byte-compatible with it (same flags, same `gate.conf`
-keys, same exit codes) but bash remains the source of truth until the port's Slice 5 switchover
-retires it.
+**`pantheon` is the current CLI (port slice 5, [docs/PYTHON-PORT.md](PYTHON-PORT.md)).**
+`pantheon gate` / `pantheon counsel` replace the bash `cli/review-gate` documented here in
+earlier versions of this file. `review-gate` still works as a **deprecated, one-release compat
+shim** — same flags, same `gate.conf` keys, same exit codes, byte-compatible with everything
+below, plus a one-line deprecation note on stderr — but it forwards straight into `pantheon gate`
+and is removed in the release after this one; switch now, don't wait for the forced removal. The
+bash implementation (`cli/review-gate`, `cli/lib/*.sh`, `cli/providers/*.sh`) is likewise
+deprecated and present only for this same transition window — see that script's own header
+comment and [docs/PYTHON-PORT.md](PYTHON-PORT.md)'s Slice-5 status section for the removal plan.
+Install: `pipx install <built pantheon artifact>` (or `pip install` into a venv) — see
+[SETUP.md](SETUP.md).
 
 ## Command reference
 
 ```
-review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"]
-            [--execution readonly|trusted] [--dry-run]
+pantheon gate --pr <number> [--provider <lane>] [--agents "artemis apollo"]
+              [--execution readonly|trusted] [--dry-run]
 ```
+
+(`review-gate --pr <number> ...` — the deprecated compat shim — accepts the identical flags and
+forwards to the above.)
 
 | Flag | Required | Default | What it does |
 |---|---|---|---|
@@ -57,7 +66,7 @@ you — copy [`gate.conf.example`](../gate.conf.example) yourself.
 Every key above except `execution` is read straight from the target repo's checked-out working
 tree. `execution=` is read from the PR's **base commit** (`git show $BASE_SHA:gate.conf`)
 instead — never the working tree — because a maintainer who runs `gh pr checkout <n>` before
-invoking `review-gate` (a common local-review habit) would otherwise have a hostile PR's own
+invoking `pantheon gate` (a common local-review habit) would otherwise have a hostile PR's own
 `execution=trusted` silently restore full Bash before the gate inspects anything. This is the
 CLI-surface instance of the same base-pinned-provenance rule DESIGN.md's security posture applies to
 personas, the verdict decider, and the read-only wrapper itself — see DESIGN.md's ["Security
@@ -65,7 +74,7 @@ posture"](../DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design
 read-provenance matrix.
 
 **`model`/`base_branch`/`rules_file`/`spec_file`/`agents` genuinely don't need the same
-treatment — `provider` is a different story.** `review-gate` validates `provider` only by
+treatment — `provider` is a different story.** `pantheon gate` validates `provider` only by
 checking that `$PROVIDERS_DIR/$PROVIDER.sh` exists, then unconditionally `source`s it — no
 character-class or enumeration check the way `--agents` gets one. A working-tree-sourced
 `provider=` value under the same `gh pr checkout` scenario `execution=` is base-pinned against
@@ -139,7 +148,7 @@ content being reviewed; not a substitute for `readonly` anywhere else.
 run. Shape: `{"<pr-number>": {"reviewed_sha": "<sha>"}}`.
 
 **"Git-ignored" is a Way-A (`install.sh`) claim, not a universal one.** Only `install.sh` appends
-`.review-gate-state.json` to the target repo's `.gitignore` for you. Running `review-gate`
+`.review-gate-state.json` to the target repo's `.gitignore` for you. Running `pantheon gate`
 straight from a review-pantheon checkout, or via a `bootstrap.sh` (Way B) install, adds no
 `.gitignore` entry to the target repo at all — including on the very first run, which can be a
 `--dry-run`. If you're on the CLI-only path (no `install.sh`), add
@@ -151,7 +160,7 @@ the file will sit untracked-but-visible and can get accidentally `git add -A`'d 
 - **A different, newer head SHA recorded** → follow-up mode: the diff range narrows to
   `<reviewed_sha>..<head_sha>` instead of the full PR, and the prompt tells the agent to read its
   own prior comment first rather than re-auditing everything.
-- **Force-push / rebase / history rewrite since the recorded SHA** → `review-gate` checks
+- **Force-push / rebase / history rewrite since the recorded SHA** → `pantheon gate` checks
   ancestry (`git merge-base --is-ancestor`), not just that the old SHA still exists as a fetchable
   object (it can be fetchable and no longer an ancestor). When ancestry fails, it falls back to
   reviewing the **full PR diff again**, with a note in the prompt explaining why — expected
@@ -169,10 +178,10 @@ the file will sit untracked-but-visible and can get accidentally `git add -A`'d 
   red/unverified. `--dry-run` and a draft-PR skip never reach this write at all — no comment is
   posted, so no `reviewed_sha` changes either way. **One caveat: `--dry-run` still bootstraps the
   file itself.**
-  `review-gate` creates `.review-gate-state.json` as `{}` on first run if it doesn't already
-  exist — unconditionally, before the dry-run/draft branches are even reached (`cli/review-gate`'s
+  `pantheon gate` creates `.review-gate-state.json` as `{}` on first run if it doesn't already
+  exist — unconditionally, before the dry-run/draft branches are even reached (`pantheon.cli`'s
   `[[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"`) — so a `--dry-run` against a target repo
-  that has never run `review-gate` before will leave a fresh, empty `.review-gate-state.json` in
+  that has never run `pantheon gate` before will leave a fresh, empty `.review-gate-state.json` in
   the working tree even though it records nothing about the PR. Not a mutation most workflows
   will notice (an empty JSON object) — but a real one, and NOT git-ignored unless you're on the
   Way-A (`install.sh`) path (see the caveat above this list). "No state written" for `--dry-run`
@@ -202,7 +211,7 @@ in [SETUP.md](SETUP.md#first-live-run).
 <summary>Zero-token dry-run demo</summary>
 
 ```bash
-review-gate --pr 42 --dry-run
+pantheon gate --pr 42 --dry-run
 ```
 
 Real `gh pr view`, real fetched refs, real diff range and docs-only/follow-up detection, real
@@ -219,7 +228,7 @@ model](#the-state--follow-up-model)'s caveat. Full walkthrough:
 <summary>First live gate</summary>
 
 ```bash
-review-gate --pr 42
+pantheon gate --pr 42
 ```
 
 Drops `--dry-run`. Each configured agent's provider lane actually runs; one combined comment
@@ -231,7 +240,7 @@ posts to the PR; exit code reflects the overall signal (see above).
 <summary>Re-gate after new commits (follow-up mode)</summary>
 
 ```bash
-review-gate --pr 42
+pantheon gate --pr 42
 ```
 
 Same command — follow-up mode is automatic, keyed off `.review-gate-state.json`. If PR #42's
@@ -246,19 +255,19 @@ model](#the-state--follow-up-model)).
 <summary>Counsel run (philosophers via --agents)</summary>
 
 ```bash
-review-gate --pr 42 --agents "socrates diogenes plato"
+pantheon gate --pr 42 --agents "socrates diogenes plato"
 ```
 
 The counsel agents' natural home is the planning conversation, before anything is merge-gated —
-running them through `review-gate` against a PR is the documented exception, not the default
+running them through `pantheon gate` against a PR is the documented exception, not the default
 workflow (see README's ["The panel"](../README.md#the-panel)).
 
 **Mechanically, through this CLI, they gate exactly like Artemis/Apollo do — the "counsel, not
-gate" distinction is a usage convention, not a code path.** `cli/lib/verdict.sh`'s `agent_color()`
+gate" distinction is a usage convention, not a code path.** `pantheon.verdict`'s `VOCAB` table
 maps each agent's own red-tier word (`socrates:NO_GO`, `diogenes:GUT`, `plato:FRACTURED`,
 alongside `artemis:STOP`/`apollo:RETURN`) to `color=red` identically, and
-`pantheon_overall_color()` takes the worst color across whatever agent list actually ran — it has
-no notion of "gate agent" vs "counsel agent" at all. Run the command above and a `NO_GO` from
+`pantheon.render.overall_color()` takes the worst color across whatever agent list actually ran —
+it has no notion of "gate agent" vs "counsel agent" at all. Run the command above and a `NO_GO` from
 Socrates alone produces the same 🔴 Blocked comment and nonzero exit as a `STOP` from Artemis
 would. If you wire a counsel-only `--agents` list into a CI step the way you would Artemis/Apollo,
 it blocks the same way — there is no code-level safeguard keeping counsel advisory once it's run
@@ -271,7 +280,7 @@ automatically in CI) and your own `gate.conf`/CI wiring, not something this CLI 
 <summary>Provider switch</summary>
 
 ```bash
-review-gate --pr 42 --provider codex
+pantheon gate --pr 42 --provider codex
 ```
 
 Or set `provider=codex` in `gate.conf` to make it the default for that repo. Only `claude` is
