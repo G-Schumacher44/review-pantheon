@@ -13,15 +13,18 @@ names, defaults, precedence order, exit codes, and the state/follow-up model are
 from the bash v1 CLI; this is a language port of the same contract, not a redesign of it. Where
 this file and docs/CLI.md disagree, that is a bug in this port, not a doc to update to match.
 
-**Package-layout caveat (Slice 4, revisited at Slice 5 packaging — docs/PYTHON-PORT.md section
-7):** ``agents/*.md`` (the five personas) live at this repo's root, not inside the ``pantheon/``
-package directory ``pyproject.toml``'s ``[tool.setuptools.packages.find]`` ships — a real `pip`/
-`pipx` install of this package today would NOT carry them along. This module resolves
-``agents/`` relative to its OWN file's location on disk (``Path(__file__).resolve().parent.parent
-/ "agents"``), which is correct for THIS repo's dev checkout (where ``pantheon/`` and ``agents/``
-are siblings) and for Slice 2-4's exit bar (the migration exam runs from a checkout, never a
-`pip`-installed copy) — packaging personas into the distributable artifact is explicitly a
-Slice-5 concern (bootstrap.sh/pyproject.toml packaging), not attempted here.
+**Package-layout resolution (Slice 5 packaging, docs/PYTHON-PORT.md section 7):**
+``agents/*.md`` (the five personas) live at this repo's root, the single canonical source
+(DESIGN.md rule 4) the bash CLI/install.sh/bootstrap.sh/action.yml all still read directly — NOT
+physically inside the ``pantheon/`` package directory. A real, non-editable `pip`/`pipx` install
+of this package did NOT carry them along at all before this fix (a Codex review finding on this
+port's own PR): resolving ``agents/`` purely as a sibling of this module's own installed
+location on disk is only true for a dev checkout, never for a real site-packages install, where
+this file's own ``__file__`` lives inside ``site-packages/pantheon/``, nowhere near the original
+source tree. Fixed via ``pyproject.toml``'s package-dir remap (``"pantheon.agents" = "agents"``)
+packaging ``agents/*.md`` AS ``pantheon/agents/*.md`` in the wheel, resolved here via
+``importlib.resources`` (see :func:`_agents_dir`), with the dev-checkout sibling-directory
+lookup kept as a fallback for a raw checkout run via ``PYTHONPATH`` (no install at all).
 
 Every JSON parse/serialize in this module goes through ``pantheon.jqjson`` (docs/PYTHON-PORT.md's
 "JSON boundary" section), never Python's own ``json`` module directly.
@@ -37,6 +40,7 @@ black-box shape).
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import math
 import os
 import re
@@ -142,6 +146,37 @@ def _die(msg: str) -> NoReturn:
 
 
 def _agents_dir() -> Path:
+    """Resolves the directory holding the five persona ``.md`` files. Two locations, checked in
+    order — see this module's own "Package-layout resolution" docstring section for the full
+    rationale (a Codex review finding on this port's own PR: a real, non-editable install
+    carried no personas at all before this fix):
+
+      1. Installed package data — ``pyproject.toml`` packages ``agents/*.md`` as
+         ``pantheon/agents/*.md`` in the wheel (``[tool.setuptools.package-dir]``'s
+         ``"pantheon.agents" = "agents"`` remap). Resolved via ``importlib.resources.files``,
+         which works correctly for a real (non-editable) install, where this module's own
+         ``__file__`` lives inside ``site-packages/pantheon/`` — nowhere near the original
+         source tree location 2 below assumes.
+      2. The dev-checkout / ``PYTHONPATH`` sibling layout — this module's OWN file location,
+         ``parent.parent / "agents"``. Used only when (1) doesn't resolve: a raw checkout run
+         via ``PYTHONPATH`` (no install at all — the shape this port's own migration-exam
+         suites use), or an install that predates this fix.
+
+    ``importlib.resources.files("pantheon.agents")`` raises ``ModuleNotFoundError`` when
+    ``pantheon.agents`` isn't a real, importable (sub)package — exactly the fallback-to-(2)
+    signal, not an error to propagate. For a normal, non-zipped install (this package ships no
+    compiled extensions and is never distributed as a zipapp), the returned ``Traversable`` is
+    backed by a real on-disk directory; ``Path(str(...))`` is a safe, direct conversion in that
+    case — verified live against a real ``pip install`` of the built wheel (not just ``pip
+    install -e .``) before landing this fix."""
+    try:
+        resource = importlib.resources.files("pantheon.agents")
+    except (ModuleNotFoundError, ImportError):
+        resource = None
+    if resource is not None:
+        candidate = Path(str(resource))
+        if candidate.is_dir():
+            return candidate
     return Path(__file__).resolve().parent.parent / "agents"
 
 

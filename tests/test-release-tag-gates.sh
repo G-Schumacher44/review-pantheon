@@ -134,6 +134,60 @@ check_ancestry "commit that IS main's tip after promotion" "$MAIN_TIP_SHA" "true
 check_ancestry "dev-only commit, never promoted (the exact stray-tag scenario)" "$DEV_SHA" "true"
 check_ancestry "dev-only commit created AFTER the last promotion (still unpromoted)" "$UNPROMOTED_SHA" "false"
 
+# ---------------------------------------------------------------------------
+# Version-match gate (port slice 5, RELEASING.md's "bump version to match the tag before
+# tagging" ceremony step) — re-runs the EXACT extraction/comparison logic the "Verify tag
+# matches pyproject.toml's version" step uses, against a real scratch pyproject.toml, so this
+# exercises real grep/sed behavior, not a mock. Proven failing pre-fix: before this step existed
+# in release.yml, ANY tag would have proceeded straight to the build regardless of
+# pyproject.toml's version — there was no gate to fail. Verified locally by checking out this
+# suite against dev's pre-slice-5 release.yml (no such step present) and confirming this whole
+# section's extraction fails loud ("could not extract... update this test's extraction
+# assumption"), never silently skips; restored before committing.
+# ---------------------------------------------------------------------------
+section "Version-match gate: tag vs pyproject.toml's version"
+
+if grep -q 'Verify tag matches pyproject.toml' "$RELEASE_YML"; then
+  pass "release.yml has a 'Verify tag matches pyproject.toml's version' step"
+else
+  fail "release.yml is missing the 'Verify tag matches pyproject.toml's version' step — update this test's extraction assumption"
+fi
+
+# shellcheck disable=SC2016 # deliberate — matching the literal, unexpanded shell syntax as it
+# appears in release.yml's source.
+if grep -qF 'grep -m1 -E '"'"'^version = '"'"' pyproject.toml' "$RELEASE_YML"; then
+  pass "release.yml extracts pyproject.toml's version via 'grep -m1 -E ^version ='"
+else
+  fail "release.yml's version-extraction command shape changed — update this test's extraction assumption"
+fi
+
+extract_pyproject_version() {
+  # Verbatim re-implementation of release.yml's own extraction line — kept in sync by hand,
+  # same convention as check_semver/check_ancestry above (this file re-runs the commands, it
+  # doesn't source the workflow's embedded shell).
+  grep -m1 -E '^version = ' "$1" | sed -E 's/^version = "([^"]*)"/\1/'
+}
+
+check_version_match() {
+  local label="$1" tag="$2" pyproject_version="$3" expect_match="$4"
+  local scratch_pyproject="$WORKDIR/pyproject-$RANDOM.toml"
+  printf 'version = "%s"\n' "$pyproject_version" > "$scratch_pyproject"
+  local extracted expected_tag matched="false"
+  extracted="$(extract_pyproject_version "$scratch_pyproject")"
+  expected_tag="v${extracted}"
+  [[ "$tag" == "$expected_tag" ]] && matched="true"
+  if [[ "$matched" == "$expect_match" ]]; then
+    pass "$label: tag='$tag' vs pyproject version='$pyproject_version' -> match=$matched (expected $expect_match)"
+  else
+    fail "$label: tag='$tag' vs pyproject version='$pyproject_version' -> match=$matched, expected $expect_match"
+  fi
+}
+
+check_version_match "matching version" "v1.2.3" "1.2.3" "true"
+check_version_match "mismatched patch" "v1.2.3" "1.2.4" "false"
+check_version_match "forgotten bump (still pre-release)" "v1.2.3" "0.0.0.dev0" "false"
+check_version_match "mismatched major" "v2.0.0" "1.2.3" "false"
+
 echo
 echo "release-tag-gates fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

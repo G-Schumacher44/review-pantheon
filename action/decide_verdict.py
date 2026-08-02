@@ -1,263 +1,88 @@
 #!/usr/bin/env python3
-"""decide_verdict.py — the Python half of review-pantheon's two-runtime verdict decision.
+"""decide_verdict.py — DEPRECATED, one-release compat shim (port slice 5 absorption,
+docs/PYTHON-PORT.md section 3's "one runtime endgame").
 
-This is the canonical source for the Action's decide step. review.yml runs THIS file (its
-installed copy in the target repo, at .github/review-agents/decide_verdict.py — install.sh
-installs it alongside the personas) rather than an inline copy of the same logic, so there is
-exactly one place this rule lives for the Action lane. The CLI lane implements the identical
-rule in bash+jq at cli/lib/verdict.sh (two runtimes, one repo — the CLI shouldn't require
-Python and the Action can't cleanly source bash — see DESIGN.md's verdict-contract section for
-why that split is accepted). If you change the rule in one file, change it in the other and
-re-run tests/test-verdict-decision.sh, which runs both against the same fixtures.
+This file is no longer the canonical implementation of review-pantheon's verdict-decision rule —
+that logic now lives in `pantheon/verdict.py`, ONE Python implementation shared by both lanes
+that used to each carry their own copy (the CLI's `cli/lib/verdict.sh`, retired this slice, and
+this file). `action.yml` and the vendored `action/review.yml` both now invoke
+`python3 -m pantheon.verdict` directly instead of this file — see action.yml's "Decide verdict
+(<agent>)" steps and action/review.yml's own "Decide verdict" step, both of which now resolve a
+base-pinned copy of the `pantheon` package (its `__init__.py`/`jqjson.py`/`verdict.py` — the only
+three files `pantheon.verdict` actually imports) rather than a base-pinned copy of this file.
 
-Usage:
-    decide_verdict.py <expected-agent> <raw-output-file>
+**Why this file still exists at all, and for how long:** `install.sh` still vendors it into a
+target repo at `.github/review-agents/decide_verdict.py` for ONE MORE RELEASE, purely so nothing
+that scripts against `decide_verdict.py`'s own argv contract directly (rather than through
+`action/review.yml`, which no longer calls it) breaks the moment this PR merges. It is removed
+outright in the release AFTER this one, alongside `review-gate`'s own compat shim
+(`pantheon.reviewgate_shim`) — both on the identical one-release compat window, both documented
+in docs/PYTHON-PORT.md's Slice-5 status section. Nothing new should depend on this file; use
+`python3 -m pantheon.verdict <expected-agent> <raw-output-file>` (or `import pantheon.verdict`)
+instead.
 
-Reads the agent's raw stdout from <raw-output-file>, extracts the trailing JSON verdict object,
-validates it, and applies the blocker invariant. Always prints one JSON decision object to
-stdout on a single line:
-
-    {"agent": "...", "color": "green|yellow|red|unverified", "verdict": "...",
-     "reason": "...", "invariant_fired": bool, "top_finding": "...", "verdict_json": {...}}
-
-Exit code: 0 if color is "green" or "yellow", 1 if "red" or "unverified" — this mirrors the
-CLI's fail-closed posture (the workflow step is marked failed on anything worse than a review
-note, but every subsequent step in review.yml runs under `if: always()` so a failed decide step
-still produces and uploads its verdict artifact).
-
-When the GITHUB_OUTPUT env var is set, this script ALSO appends the legacy step-output keys
-(color, verdict, summary, top_finding, findings_json) that review.yml's later steps read via
-`steps.decide.outputs.*` — that's workflow plumbing, not part of the decision rule itself.
+This shim is a THIN forward, not a reimplementation — it locates the real `pantheon` package
+(checking, in order, its own directory and its own directory's parent — see
+`_locate_pantheon_package()` below, which covers both this file's OWN repo-root-relative location
+and the vendored-into-a-target-repo location `install.sh` installs it at) and delegates straight
+into `pantheon.verdict.main()`, so there is exactly one implementation of the decision rule to
+keep correct, not two that can drift the way this file and `cli/lib/verdict.sh` already did
+before this slice retired that comparison entirely.
 """
-import json
+
+from __future__ import annotations
+
 import os
-import secrets
 import sys
 
-# Per-agent verdict vocabulary -> gate color. Mirrors the case statement in
-# cli/lib/verdict.sh's agent_color() exactly — same agents, same words, same colors.
-VOCAB = {
-    "artemis": {"SHIP": "green", "FIX_FIRST": "yellow", "STOP": "red"},
-    "apollo": {"ACCEPT": "green", "ACCEPT_WITH_NOTES": "yellow", "RETURN": "red"},
-    "diogenes": {"LEAN": "green", "TRIM": "yellow", "GUT": "red"},
-    "plato": {"COHERENT": "green", "DRIFTING": "yellow", "FRACTURED": "red"},
-    "socrates": {"GO": "green", "GO_WITH_GUARDRAILS": "yellow", "NO_GO": "red"},
-}
 
-REQUIRED_KEYS = {"agent", "verdict", "has_blocker", "findings", "summary"}
+def _locate_pantheon_package() -> str | None:
+    """Returns the directory that should be prepended to sys.path so `import pantheon` resolves
+    the real package, or None if neither of the two locations this shim knows about has one.
+    Checked, in order:
 
-
-def extract_last_json(raw: str) -> str:
-    """Parse-anchored suffix scan (REPLACES an earlier brace-depth-tracking version — see git
-    history for why: it regressed on an unmatched `{` anywhere earlier in the output. A brace
-    left open by prose or a quoted code snippet before the real verdict — plausible in this
-    tool's own domain, code review of brace-heavy files — pinned `depth` above 0 for the rest
-    of the document, so the real trailing JSON's own `{` was never treated as a fresh
-    candidate, and a legitimate verdict came back UNVERIFIED. Artemis caught this live on
-    PR #4; the balanced-braces fixture that existed at the time was green-by-construction for
-    exactly the failure it was meant to catch, because its stray brace happened to be balanced.
-
-    Correctness now comes from an ACTUAL PARSE ATTEMPT, not from tracking anything about
-    braces: scan every `{` character from the END of raw backward; the first (rightmost) one
-    whose suffix — that character straight through EOF — parses as a single, complete JSON
-    value is the verdict. Immune BY CONSTRUCTION to an unmatched `{` anywhere earlier in the
-    text (that candidate is simply never tried, because a later `{` succeeds first), an
-    unmatched `{` anywhere AFTER the real object (its own candidate fails to parse, and the
-    scan falls through to the real object's `{`, whose candidate then correctly fails too if
-    there's genuine trailing garbage after it — same 'nothing after the JSON' contract as the
-    existing 'trailing prose after JSON' case), leading whitespace, and a nested unindented `{`
-    inside an otherwise-valid pretty-printed object (that inner candidate is an invalid JSON
-    fragment on its own, so the scan falls through to the real, outer `{`). 'Two JSON objects,
-    last wins' still holds: the rightmost `{` starts whichever object comes last, and if it's
-    complete on its own, nothing about an earlier object is ever consulted. Mirrors
-    cli/lib/verdict.sh's extract_last_json exactly — keep both in sync."""
-    for i in range(len(raw) - 1, -1, -1):
-        if raw[i] != "{":
-            continue
-        candidate = raw[i:]
-        try:
-            json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        return candidate
-    return ""
+      1. This file's OWN directory — the shape `install.sh` vendors into a target repo at
+         `.github/review-agents/`: `decide_verdict.py` and a `pantheon/` package directory land
+         as SIBLINGS there (mirrors the vendored personas/wrapper's own flat layout).
+      2. This file's directory's PARENT — this repo's own layout: `action/decide_verdict.py`
+         sits one level below the repo root, where the real `pantheon/` package lives (a sibling
+         of `action/`, not of this file itself).
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for candidate in (here, os.path.dirname(here)):
+        if os.path.isfile(os.path.join(candidate, "pantheon", "__init__.py")):
+            return candidate
+    return None
 
 
-def top_finding_of(verdict_obj) -> str:
-    findings = verdict_obj.get("findings") or []
-    if not findings:
-        return "no findings"
-    f = findings[0]
-    try:
-        return f"{f['severity']}: {f['issue']} ({f['file']}:{f['line']})"
-    except (KeyError, TypeError):
-        return "no findings"
+_pkg_dir = _locate_pantheon_package()
+if _pkg_dir is not None and _pkg_dir not in sys.path:
+    sys.path.insert(0, _pkg_dir)
 
-
-def blocker_present(verdict_obj) -> bool:
-    if verdict_obj.get("has_blocker") is True:
-        return True
-    for f in verdict_obj.get("findings") or []:
-        if isinstance(f, dict) and f.get("severity") == "blocker":
-            return True
-    return False
-
-
-TYPE_STRICT_REASON = (
-    "verdict JSON failed type-strict validation on the invariant-read surface (verdict must be "
-    "a string, has_blocker must be boolean, findings must be an array, every findings[].severity "
-    "must be a string in {blocker,should_fix,note})"
-)
-
-
-def type_strict_ok(verdict_obj: dict) -> bool:
-    """Type-strict check of the invariant-read surface only — mirrors cli/lib/verdict.sh's
-    equivalent jq check exactly (same fields, same order of evaluation). Fixes a real gap:
-    presence-only validation let a malformed `"has_blocker": "true"` (a string, not a bool)
-    through, and `is True` / `== True` comparisons below never fire for it — a malformed
-    verdict could silently read as a clean green. Display fields (file/line/issue/scenario/
-    summary) are deliberately NOT checked here — see DESIGN.md's "Validation surface"."""
-    if not isinstance(verdict_obj.get("verdict"), str):
-        return False
-    if not isinstance(verdict_obj.get("has_blocker"), bool):
-        return False
-    findings = verdict_obj.get("findings")
-    if not isinstance(findings, list):
-        return False
-    for f in findings:
-        if not isinstance(f, dict):
-            return False
-        if not isinstance(f.get("severity"), str) or f.get("severity") not in (
-            "blocker",
-            "should_fix",
-            "note",
-        ):
-            return False
-    return True
-
-
-def decide(expected_agent: str, raw: str) -> dict:
-    """Same decision order as cli/lib/verdict.sh's decide_verdict: parse -> required keys ->
-    type-strict validation of the invariant-read surface -> vocabulary lookup -> blocker
-    invariant (checked last, can only make the result worse). An object that fails the
-    type-strict check never reaches the blocker invariant — there's no reliable blocker signal
-    to trust in an object that isn't even type-shaped correctly, so that case stays unverified,
-    never red."""
-    candidate = extract_last_json(raw)
-    if not candidate:
-        return {
-            "agent": expected_agent, "color": "unverified", "verdict": "UNVERIFIED",
-            "reason": "no trailing JSON object found in agent output",
-            "invariant_fired": False,
-            "top_finding": "no trailing JSON object found in agent output",
-            "verdict_json": {},
-        }
-
-    try:
-        verdict_obj = json.loads(candidate)
-    except json.JSONDecodeError as e:
-        return {
-            "agent": expected_agent, "color": "unverified", "verdict": "UNVERIFIED",
-            "reason": f"trailing JSON did not parse: {e}",
-            "invariant_fired": False,
-            "top_finding": f"trailing JSON did not parse: {e}",
-            "verdict_json": {},
-        }
-
-    if not isinstance(verdict_obj, dict) or not REQUIRED_KEYS.issubset(verdict_obj.keys()):
-        return {
-            "agent": expected_agent, "color": "unverified", "verdict": "UNVERIFIED",
-            "reason": "verdict JSON missing required keys",
-            "invariant_fired": False,
-            "top_finding": "verdict JSON missing required keys",
-            "verdict_json": verdict_obj if isinstance(verdict_obj, dict) else {},
-        }
-
-    if not type_strict_ok(verdict_obj):
-        return {
-            "agent": expected_agent, "color": "unverified", "verdict": "UNVERIFIED",
-            "reason": TYPE_STRICT_REASON,
-            "invariant_fired": False,
-            "top_finding": TYPE_STRICT_REASON,
-            "verdict_json": verdict_obj,
-        }
-
-    agent_field = verdict_obj.get("agent")
-    verdict = verdict_obj.get("verdict")
-    top = top_finding_of(verdict_obj)
-
-    reason = ""
-    if agent_field != expected_agent:
-        color = "unverified"
-        reason = f"agent field '{agent_field}' does not match expected '{expected_agent}'"
-    else:
-        color = VOCAB.get(agent_field, {}).get(verdict, "unverified")
-        if color == "unverified":
-            reason = f"verdict '{verdict}' from agent field '{agent_field}' is outside the allowed vocabulary"
-
-    invariant_fired = False
-    if blocker_present(verdict_obj) and color != "red":
-        invariant_fired = True
-        reason = (
-            "blocker finding present (severity=blocker or has_blocker=true) — "
-            f"forcing red regardless of stated verdict '{verdict}'"
-        )
-        color = "red"
-
-    return {
-        "agent": expected_agent, "color": color, "verdict": verdict if verdict is not None else "UNVERIFIED",
-        "reason": reason, "invariant_fired": invariant_fired, "top_finding": top,
-        "verdict_json": verdict_obj,
-    }
-
-
-def emit_github_output(decision: dict) -> None:
-    gh_out = os.environ.get("GITHUB_OUTPUT")
-    if not gh_out:
-        return
-    delim = "pantheon_" + secrets.token_hex(16)
-    with open(gh_out, "a") as out:
-        out.write(f"color={decision['color']}\n")
-        out.write(f"verdict={decision['verdict']}\n")
-        summary = decision["verdict_json"].get("summary", "") if isinstance(decision["verdict_json"], dict) else ""
-        out.write(f"summary<<{delim}\n{summary}\n{delim}\n")
-        out.write(f"top_finding<<{delim}\n{decision['top_finding']}\n{delim}\n")
-        out.write(f"findings_json<<{delim}\n{json.dumps(decision['verdict_json'])}\n{delim}\n")
-        # invariant_fired / reason: needed by the combined-comment renderer (cli/lib/
-        # render_comment.sh, via action.yml's combine step) to show the "stated verdict was
-        # overridden" notice when the blocker invariant fired. Not previously exposed here —
-        # only color/verdict/summary/top_finding/findings_json were read by review.yml's
-        # older, JSON-dump comment step.
-        out.write(f"invariant_fired={'true' if decision['invariant_fired'] else 'false'}\n")
-        reason = decision.get("reason") or ""
-        out.write(f"reason<<{delim}\n{reason}\n{delim}\n")
+try:
+    from pantheon.verdict import main as _pantheon_verdict_main
+except ImportError as _import_error:  # pragma: no cover — only reachable if vendoring broke
+    _pantheon_verdict_main = None
+    _pantheon_import_error = _import_error
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: decide_verdict.py <expected-agent> <raw-output-file>", file=sys.stderr)
+    if _pantheon_verdict_main is None:
+        print(
+            "decide_verdict.py: DEPRECATED compat shim — could not locate the 'pantheon' "
+            f"package (checked alongside and one directory above this file): {_pantheon_import_error}. "
+            "This shim delegates to `pantheon.verdict`; if you vendored decide_verdict.py without "
+            "also vendoring the pantheon/ package next to it, re-run install.sh.",
+            file=sys.stderr,
+        )
         return 2
-
-    expected_agent, raw_file = sys.argv[1], sys.argv[2]
-    try:
-        with open(raw_file, "r", errors="replace") as fh:
-            raw = fh.read()
-    except OSError as e:
-        decision = {
-            "agent": expected_agent, "color": "unverified", "verdict": "UNVERIFIED",
-            "reason": f"could not read agent output: {e}", "invariant_fired": False,
-            "top_finding": f"could not read agent output: {e}", "verdict_json": {},
-        }
-    else:
-        decision = decide(expected_agent, raw)
-
-    print(json.dumps(decision))
-    emit_github_output(decision)
-
-    if decision["color"] in ("red", "unverified"):
-        print(f"::error::{expected_agent} verdict is {decision['color']} ({decision['verdict']}) — {decision['reason']}", file=sys.stderr)
-        return 1
-    return 0
+    print(
+        "decide_verdict.py: DEPRECATED — this is a one-release compat shim forwarding to "
+        "`python3 -m pantheon.verdict`. Nothing in this repo's own workflows calls this file "
+        "directly anymore (docs/PYTHON-PORT.md section 3); it is removed in the next release.",
+        file=sys.stderr,
+    )
+    return _pantheon_verdict_main(sys.argv[1:])
 
 
 if __name__ == "__main__":

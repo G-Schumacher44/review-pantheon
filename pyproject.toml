@@ -66,9 +66,32 @@ review-gate = "pantheon.reviewgate_shim:main"
 # user-site-packages, breaking a `pip install --user` deployment).
 pantheon-git-readonly = "pantheon.execution:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["pantheon*"]
+# Explicit (not `packages.find`) — port slice 5 needed a second, non-`pantheon*`-named package
+# folded in (see the package-dir remap below), and a hand-listed two-entry list is simpler and
+# less surprising than teaching the dynamic finder a second include pattern for a source
+# directory that isn't even physically inside `pantheon/` on disk.
+[tool.setuptools]
+packages = ["pantheon", "pantheon.agents"]
+
+# Personas as installed package data — a Codex review finding on this port's own PR: a real,
+# non-editable `pip`/`pipx` install of this package carried NO persona files at all before this
+# fix (pyproject.toml packaged only `pantheon*`, but `pantheon.cli._agents_dir()` looked for
+# `agents/` as a SIBLING of pantheon/'s own installed location — true for a dev checkout, never
+# for a real site-packages install). `agents/` stays the single canonical source at the repo
+# root (DESIGN.md rule 4 — the bash CLI, install.sh, bootstrap.sh, and action.yml/
+# action/review.yml all still read it there directly, unaffected by this mapping); this entry
+# additionally packages it AS `pantheon/agents/*.md` in the wheel, via a package-dir remap
+# (`"pantheon.agents" = "agents"`) rather than physically relocating the source directory.
+# `agents/__init__.py` (an empty marker, invisible to every non-Python consumer's `*.md` globs)
+# is what makes setuptools treat it as a real package for this mapping to apply to.
+# `pantheon.cli._agents_dir()` resolves it via `importlib.resources`, falling back to the
+# dev-checkout sibling-directory layout when this package data isn't present (a raw checkout run
+# via `PYTHONPATH`, or an install that predates this fix).
+[tool.setuptools.package-dir]
+"pantheon.agents" = "agents"
+
+[tool.setuptools.package-data]
+"pantheon.agents" = ["*.md"]
 
 # --- Python quality gates (port slice 4, docs/PYTHON-PORT.md) -----------------------------
 # Build-time-only tooling (ruff/mypy/pytest) — installed by CI, never a [project.dependencies]

@@ -108,12 +108,14 @@ docker run --rm review-pantheon-smoke
 ## Scope
 
 See the [issues list](https://github.com/G-Schumacher44/review-pantheon/issues) for open work and
-known gaps. The CLI is bash by design for v1 — the read-only-git wrapper, the deciders, the
-provider lanes all lean on that being a hard constraint, not an oversight. A Python CLI port is a
-planned v2 track, specced in [docs/PYTHON-PORT.md](docs/PYTHON-PORT.md) — read that before opening
-a PR toward it. Discussion and contributions are welcome, but until that spec's slice plan clears
-its exit bar and retires the bash surface, it's a separate surface from the current bash
-implementation, not a rewrite-in-place.
+known gaps. **`pantheon` (the Python package, stdlib-only) is the current CLI as of port slice 5**
+— specced in [docs/PYTHON-PORT.md](docs/PYTHON-PORT.md), that doc's Slice-5 status section is the
+canonical "what's done" record. The bash implementation (`cli/review-gate`, `cli/lib/*.sh`,
+`cli/providers/*.sh`) and the `review-gate`/`decide_verdict.py` Python compat shims are all
+DEPRECATED, kept for one release purely so nothing scripting against them breaks mid-transition —
+see [docs/PYTHON-PORT.md](docs/PYTHON-PORT.md)'s Slice-5 status section for the exact removal
+plan. New work targets `pantheon/`, not the bash surface; read docs/PYTHON-PORT.md before opening
+a PR toward either.
 
 ## License
 

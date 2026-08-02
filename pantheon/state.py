@@ -37,7 +37,9 @@ drives the extracted bash function: via ``python -m pantheon.state update ...``.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
+import stat
 import sys
 import tempfile
 
@@ -78,11 +80,62 @@ def bootstrap_state_file(state_file: str) -> None:
     ``[[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"`` line, which runs before the
     dry-run/draft-skip branches are even reached (docs/CLI.md's own documented caveat: a
     ``--dry-run`` against a target repo that has never run the gate before still leaves a fresh,
-    empty state file in the working tree). A no-op if the file already exists, regardless of its
-    current content — this never overwrites an existing (possibly non-empty) state file."""
-    if not os.path.exists(state_file):
-        with open(state_file, "w", encoding="utf-8") as fh:
-            fh.write("{}\n")
+    empty state file in the working tree). A no-op if the file already exists as a REGULAR file
+    (or any non-symlink), regardless of its current content — this never overwrites an existing
+    (possibly non-empty) state file.
+
+    **Refuses a symlink at ``state_file`` outright, dangling or not — issue #21 P2, a Codex
+    review finding on this port's own PR.** ``state_file`` lives in the TARGET repo's own working
+    tree (this module's own docstring), which for a fork PR's CI run IS that PR's own checkout —
+    100% attacker-controlled content, same threat model :mod:`pantheon.execution`'s whole module
+    docstring opens with. A hostile PR that commits ``.review-gate-state.json`` as a DANGLING
+    symlink (pointing at a path that doesn't exist, e.g. ``../../../etc/cron.d/evil``) defeats the
+    pre-fix version of this check: ``os.path.exists()`` follows symlinks and returns False for a
+    dangling one (the *target* doesn't exist), so the pre-fix ``if not os.path.exists(...): open(
+    state_file, "w")`` line ran anyway — and a plain ``open(path, "w")`` on a dangling symlink is
+    a WRITE-THROUGH-SYMLINK primitive: it creates the symlink's TARGET, not the symlink itself.
+    Since :func:`bootstrap_state_file` runs unconditionally on every invocation (before the
+    dry-run/draft-skip branches, per this docstring's own first paragraph), even a bare
+    ``pantheon gate --dry-run`` against a hostile checkout would silently create an
+    attacker-chosen file, seeded with the literal bytes ``"{}\\n"``.
+
+    Fixed with an ``os.lstat()`` check (never follows a symlink) BEFORE any write attempt, PLUS
+    ``os.O_NOFOLLOW`` on the actual creation call below — the two together close both halves of
+    the TOCTOU window: ``lstat()`` catches a symlink already present at call time; ``O_NOFOLLOW``
+    catches one planted by a racing process in the (tiny) window between that check and this
+    function's own ``os.open()`` call, which would otherwise still resolve the race in the
+    attacker's favor. Raises a plain ``OSError`` on refusal — deliberately not a new exception
+    type: every existing caller (:func:`load_state`, :func:`load_state_or_raise`,
+    :func:`update_state`) already catches ``OSError`` from this exact function uniformly (a
+    write-protected directory, today) and reacts with its own already-correct fail-closed
+    posture (empty state / :class:`StateFileMalformed` / a loud stderr warning, respectively) —
+    the symlink-refusal case needs no different handling than any other "couldn't bootstrap the
+    state file" failure already gets."""
+    try:
+        st = os.lstat(state_file)
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(st.st_mode):
+            raise OSError(
+                errno.ELOOP,
+                f"refusing to create/read {state_file}: it is a symlink (dangling or not) — "
+                "a hostile checkout could otherwise have this bootstrap step write through it "
+                "to an arbitrary target; symlinks at this path are never followed",
+                state_file,
+            )
+        return  # exists, and is not a symlink -- no-op, same contract as before this fix
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        # TOCTOU close: refuses a symlink planted at this path AFTER the lstat() check above but
+        # BEFORE this open() call — never present on this port's own dev/CI platforms lacking
+        # O_NOFOLLOW (none do), but guarded rather than assumed, matching this port's own
+        # "hasattr before using a platform-conditional os constant" posture elsewhere.
+        flags |= os.O_NOFOLLOW
+    fd = os.open(state_file, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("{}\n")
 
 
 def load_state(state_file: str) -> dict:

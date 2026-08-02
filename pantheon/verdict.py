@@ -45,6 +45,8 @@ module the same way the original suite drives action/decide_verdict.py: as a sub
 
 from __future__ import annotations
 
+import os
+import secrets
 import sys
 
 from pantheon import jqjson
@@ -301,6 +303,42 @@ def decide(expected_agent: str, raw: str) -> dict:
     }
 
 
+def emit_github_output(decision: dict) -> None:
+    """Appends the legacy step-output keys (``color``, ``verdict``, ``summary``, ``top_finding``,
+    ``findings_json``, ``invariant_fired``, ``reason``) to ``$GITHUB_OUTPUT`` when that env var is
+    set — a no-op everywhere else (this module's own migration-exam fixture,
+    tests/test-verdict-decision-python.sh, never sets it, and neither does a plain CLI-lane
+    invocation). This is workflow plumbing, not part of the decision rule itself (see this
+    module's own docstring) — added at port slice 5, absorption, to make ``python3 -m
+    pantheon.verdict`` a drop-in replacement for ``action/decide_verdict.py``'s own
+    ``emit_github_output`` at the Action's two call sites (``action.yml``'s composite steps,
+    ``action/review.yml``'s vendored decide step — both read ``steps.<id>.outputs.*``
+    downstream). Byte-for-byte the same shape ``action/decide_verdict.py``'s own function
+    produces: same key names, same multi-line-safe ``<<delim`` heredoc marker convention (a
+    random per-call delimiter via :mod:`secrets`, so a finding's own text can never accidentally
+    terminate the heredoc early), same fields sourced from the same places on ``decision``.
+    Every JSON serialize here goes through :mod:`pantheon.jqjson`, never a bare
+    ``json.dumps`` call — this module's own "JSON boundary" rule (see the module docstring)."""
+    gh_out = os.environ.get("GITHUB_OUTPUT")
+    if not gh_out:
+        return
+    delim = "pantheon_" + secrets.token_hex(16)
+    verdict_json = decision["verdict_json"]
+    summary = verdict_json.get("summary", "") if isinstance(verdict_json, dict) else ""
+    with open(gh_out, "a", encoding="utf-8") as out:
+        out.write(f"color={decision['color']}\n")
+        out.write(f"verdict={decision['verdict']}\n")
+        out.write(f"summary<<{delim}\n{summary}\n{delim}\n")
+        out.write(f"top_finding<<{delim}\n{decision['top_finding']}\n{delim}\n")
+        out.write(f"findings_json<<{delim}\n{jqjson.dumps(verdict_json, ensure_ascii=True)}\n{delim}\n")
+        # invariant_fired / reason: needed by the combined-comment renderer (pantheon.render, via
+        # action.yml's combine step / action/review.yml's own comment-build step) to show the
+        # "stated verdict was overridden" notice when the blocker invariant fired.
+        out.write(f"invariant_fired={'true' if decision['invariant_fired'] else 'false'}\n")
+        reason = decision.get("reason") or ""
+        out.write(f"reason<<{delim}\n{reason}\n{delim}\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     """``python3 -m pantheon.verdict <expected-agent> <raw-output-file>`` — the black-box CLI
     shim docs/PYTHON-PORT.md section 4 calls for so the migration-exam harness can drive this
@@ -336,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     # stdout behavior byte-for-byte — that file's bare, unadorned dump-and-print call never
     # overrode ensure_ascii either, and this line's whole job is staying byte-identical to it.
     print(jqjson.dumps(decision, ensure_ascii=True))
+    emit_github_output(decision)
 
     if decision["color"] in ("red", "unverified"):
         print(
