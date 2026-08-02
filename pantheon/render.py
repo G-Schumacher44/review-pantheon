@@ -97,28 +97,125 @@ class AgentRenderData:
 # ---------------------------------------------------------------------------
 
 
+def _case_insensitive_path_platform() -> bool:
+    """Whether the CURRENT platform's default filesystem treats path comparison
+    case-insensitively — macOS (APFS/HFS+ default) and Windows both do; Linux does not. Used to
+    decide whether :func:`redact_repo_root`'s match pattern needs ``re.IGNORECASE``: on a
+    case-insensitive filesystem, a provider CLI (or the model text it produces) can legitimately
+    echo a differently-cased spelling of the SAME path — ``/Users/Alice/repo`` for a real
+    ``/Users/alice/repo`` — and it still resolves to, and identifies, the same directory."""
+    return sys.platform == "darwin" or sys.platform.startswith("win")
+
+
+def _path_redaction_variants(path: str) -> set[str]:
+    """Every normalized spelling of ``path`` worth treating as an equivalent redaction target:
+    the value as given, and its ``os.path.realpath`` (symlink-resolved) form — each with any
+    trailing separator STRIPPED. A model doesn't necessarily echo back the EXACT string this
+    process was handed — ``/private/tmp/x`` vs. the ``/tmp/x`` symlink macOS itself resolves it
+    through, or ``ctx.repo_root`` itself happening to carry a trailing ``/`` some `os.path.join`
+    call left on it — and each of those spellings identifies the same real path just as much as
+    the literal one this process holds. Deliberately does NOT also add a WITH-trailing-separator
+    variant: the stripped form alone already matches both directions via ordinary substring/regex
+    prefix matching (``"root"`` matches inside both ``"root/file"`` and a bare ``"root/"``,
+    leaving whichever separator was actually present in the TEXT untouched) — adding a second,
+    longer ``"root" + sep`` alternative would instead WIN that substring under this function's own
+    longest-first ordering and get consumed as part of the match, silently eating the separator
+    the caller's own path text needed to keep (``"<repo>src/gate.sh"`` instead of the correct
+    ``"<repo>/src/gate.sh"``) — caught live authoring this function's own fixture. Returned as a
+    set (order doesn't matter here); the caller sorts the UNION across every base path
+    longest-first before building the actual match pattern."""
+    variants: set[str] = set()
+    for base in (path, os.path.realpath(path)):
+        stripped = base.rstrip(os.sep)
+        if stripped:
+            variants.add(stripped)
+    return variants
+
+
+def _home_directory_redaction_targets(repo_root: str) -> set[str]:
+    """The home-directory-identifying prefixes for THIS run, but ONLY when the home directory is
+    actually an ancestor of ``repo_root`` (realpath-compared) — a ``repo_root`` living outside the
+    invoking user's own home (a CI runner's ``/home/runner/work`` checkout, a shared ``/srv``
+    path) should not have some unrelated directory that merely happens to match
+    ``os.path.expanduser("~")`` on this box blanket-redacted; the point is redacting what
+    identifies THIS run's user, not any coincidental prefix. Checks two resolutions of "home" —
+    ``os.path.expanduser("~")`` (the interpreter's own passwd-db/``$HOME`` lookup) and the
+    ``$HOME`` env var directly, when it disagrees (e.g. a test harness, or a `sudo`-adjacent
+    setup, that overrides one without the other) — since either could be the spelling a provider
+    CLI's own output actually echoes. This is the FLOOR the widened redaction closes: even when a
+    model's finding text leaks only the bare home-directory prefix (``/Users/alice``), never the
+    full ``repo_root`` suffix, that prefix alone already identifies the user and must be redacted
+    just the same."""
+    repo_real = os.path.realpath(repo_root)
+    targets: set[str] = set()
+    for home in {os.path.expanduser("~"), os.environ.get("HOME") or ""}:
+        if not home:
+            continue
+        home_real = os.path.realpath(home)
+        if repo_real == home_real or repo_real.startswith(home_real + os.sep):
+            targets |= _path_redaction_variants(home)
+    return targets
+
+
 def redact_repo_root(text: str, repo_root: str | None) -> str:
-    """Replaces every occurrence of ``repo_root`` (an absolute filesystem path) in ``text`` with
-    the stable placeholder ``<repo>`` — a fix for a real information-disclosure regression
-    CRITICAL-1's own fix (adversarial review) introduced: that fix exposes the repo's absolute
-    path to the reviewing agent (``pantheon.cli._build_prompt``'s "Repo root (absolute path...)"
-    Run-context line — necessary so ``Read``/``Grep``/``Glob`` still work once the provider no
-    longer launches with the repo checkout as its own cwd) so the model can now ECHO that
-    absolute path back verbatim in a finding's ``file``/``issue``/``scenario``/``summary`` text —
-    and that text gets POSTED to a PR comment. On CI runners that's a harmless ephemeral path, but
-    a CLI-lane run from a maintainer's own machine has their REAL home directory path (often
-    containing their username) published into what may be a public PR comment — a real regression
-    an otherwise-correct security fix would have introduced. Closed mechanically here, not by
-    asking the persona nicely (the persona/context ALSO now say findings must cite repo-relative
-    paths — belt-and-suspenders, never the primary control): every model-controlled display field
-    in :func:`render_comment` routes through this before it ever reaches a rendered PR comment,
-    the exact chokepoint DESIGN.md's own "Validation surface" section already describes for
-    every other render-time sanitization this module does. A no-op when ``repo_root`` is falsy
-    (the common case for every caller that hasn't opted into this — the two-runtime env-var
-    bridge below, older callers)."""
+    """Replaces every occurrence of ``repo_root`` (an absolute filesystem path) — AND every other
+    spelling that identifies the same user/location — in ``text`` with the stable placeholder
+    ``<repo>``. Originally a fix for a real information-disclosure regression CRITICAL-1's own fix
+    (adversarial review) introduced: that fix exposes the repo's absolute path to the reviewing
+    agent (``pantheon.cli._build_prompt``'s "Repo root (absolute path...)" Run-context line —
+    necessary so ``Read``/``Grep``/``Glob`` still work once the provider no longer launches with
+    the repo checkout as its own cwd) so the model can now ECHO that absolute path back verbatim
+    in a finding's ``file``/``issue``/``scenario``/``summary`` text — and that text gets POSTED to
+    a PR comment. On CI runners that's a harmless ephemeral path, but a CLI-lane run from a
+    maintainer's own machine has their REAL home directory path (often containing their username)
+    published into what may be a public PR comment — a real regression an otherwise-correct
+    security fix would have introduced.
+
+    **Widened (adversarial review, round 2) — the original fix matched only the EXACT
+    ``repo_root`` string via ``str.replace``, which a live finding showed missed real variants a
+    model can legitimately produce without any adversarial intent at all:**
+
+      - A **parent-path leak** — the model cites the bare home-directory prefix
+        (``/Users/alice``) rather than the full repo path, e.g. summarizing "this run's checkout
+        under /Users/alice". Closed by :func:`_home_directory_redaction_targets`.
+      - A **trailing-slash form** — ``repo_root + "/"`` — that an exact-string match against the
+        no-trailing-slash ``repo_root`` never catches as a match at the SHORTER boundary (the
+        longer string still contains the shorter one as a substring for a simple prefix-leak, but
+        a value that is JUST the trailing-slash form standing alone needs its own target).
+      - A **symlink-resolved form** — ``os.path.realpath(repo_root)`` — a provider CLI (or the OS
+        path-resolution it goes through) can hand back the resolved form of a path this process
+        holds as a symlink (macOS's own ``/tmp`` → ``/private/tmp`` is a standing example), which
+        is a textually DIFFERENT string from ``repo_root`` even though it names the identical
+        directory.
+      - A **case variant** — on a case-insensitive filesystem (macOS/Windows — see
+        :func:`_case_insensitive_path_platform`), ``/Users/Alice/repo`` and ``/users/alice/repo``
+        name the same directory; the match pattern uses ``re.IGNORECASE`` on those platforms only
+        (Linux paths ARE case-sensitive — redacting a same-spelled-but-different-case path there
+        would be a false-positive over-redaction, not a fix).
+
+    Every variant is escaped (:func:`re.escape`) and combined into ONE regex, alternatives ordered
+    LONGEST-first (regex alternation takes the first alternative that matches at a given position,
+    left to right — ordering longest-first is what makes "prefer the longer, more specific match"
+    deterministic rather than a ``re`` module implementation detail; e.g. text containing the full
+    ``repo_root`` must redact the WHOLE thing to ``<repo>``, not just its home-directory prefix,
+    leaving the rest of the path dangling unredacted next to a stray ``<repo>``).
+
+    Closed mechanically here, not by asking the persona nicely (the persona/context ALSO now say
+    findings must cite repo-relative paths — belt-and-suspenders, never the primary control):
+    every model-controlled display field in :func:`render_comment` routes through this before it
+    ever reaches a rendered PR comment, the exact chokepoint DESIGN.md's own "Validation surface"
+    section already describes for every other render-time sanitization this module does. A no-op
+    when ``repo_root`` is falsy (the common case for every caller that hasn't opted into this —
+    the two-runtime env-var bridge below, older callers)."""
     if not repo_root:
         return text
-    return text.replace(repo_root, "<repo>")
+    targets = _path_redaction_variants(repo_root) | _home_directory_redaction_targets(repo_root)
+    if not targets:
+        return text
+    ordered = sorted(targets, key=len, reverse=True)
+    flags = re.IGNORECASE if _case_insensitive_path_platform() else 0
+    pattern = re.compile("|".join(re.escape(t) for t in ordered), flags)
+    return pattern.sub("<repo>", text)
 
 
 def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
