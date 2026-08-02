@@ -82,13 +82,20 @@ like `trusted`.
 
 ## Blast radius
 
-If a reviewer agent were fully compromised by injected content, here's the hard ceiling on what
-it could reach, independent of every layer above:
+If a reviewer agent were fully compromised by injected content, here's what it could reach on the
+surfaces this repo directly controls, independent of every layer above:
 
-- **GitHub permissions are the outer bound.** The GitHub Action's permissions are `contents:
-  read` and `pull-requests: write` — no write access to code, branches, releases, or repo
-  settings, only posting one PR comment. GitHub enforces this regardless of what the gate's own
-  logic does; a compromised run cannot merge, push, or self-escalate.
+- **GitHub permissions are the outer bound — as shipped, not as enforced by `action.yml` itself.**
+  `examples/review-gate.yml` (the published action's documented consumer stub) and
+  `action/review.yml` (the vendored workflow) both set `contents: read` and `pull-requests:
+  write` — no write access to code, branches, releases, or repo settings, only posting one PR
+  comment. **This is not a hard ceiling the published action enforces on every consumer,
+  though:** a composite action can't declare its own `permissions:` block (`action.yml`'s own
+  header comment states this) — it inherits whatever the CALLING workflow grants. A consumer who
+  wires `uses: G-Schumacher44/review-pantheon@v1` into a job with broader permissions (e.g.
+  `contents: write`) hands a compromised run that broader reach; GitHub enforces the *consumer's*
+  chosen scope, not this repo's documented minimum. Use the documented `contents: read` /
+  `pull-requests: write` block from `examples/review-gate.yml` — widening it defeats this layer.
 - **The reviewer itself is pinned, not a moving target.** Both the published action and the
   vendored workflow pin `anthropics/claude-code-action` to a full commit SHA
   (`be7b93b1907a4abad570368f3c74b6fe3807510b`, v1.0.183 — read directly from that release's own

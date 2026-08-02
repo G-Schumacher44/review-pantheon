@@ -161,6 +161,23 @@ jobs:
       - name: Run release.yml tag-validation gate fixture tests
         run: bash tests/test-release-tag-gates.sh
 
+      - name: Assert CONTRIBUTING.md's canonical test table matches tests/*.sh exactly
+        # Mirrors ci.yml's lint-and-test job's identically-named step — this workflow claims to
+        # re-run "the same suite ci.yml's lint-and-test job runs" (RELEASING.md), so a tagged
+        # commit that omits a test from the canonical table must fail here too, not just on dev.
+        run: |
+          set -euo pipefail
+          status=0
+          table="$(grep -oE '^\| `tests/test-[a-z0-9-]+\.sh`' CONTRIBUTING.md | sed -E 's/^\| `(tests\/[a-z0-9-]+\.sh)`/\1/')"
+          for f in tests/*.sh; do
+            grep -qxF "$f" <<<"$table" || { echo "::error::$f is missing from CONTRIBUTING.md's test table (a prose mention elsewhere doesn't count)"; status=1; }
+          done
+          while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            [[ -f "$entry" ]] || { echo "::error::CONTRIBUTING.md's table lists $entry, which no longer exists"; status=1; }
+          done <<<"$table"
+          exit "$status"
+
   build-and-publish:
     needs: test
     runs-on: ubuntu-latest

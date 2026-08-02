@@ -181,12 +181,15 @@ hardening history).
   compromised or misbehaving agent from mutating the tree; `trusted` exists for
   own-repo/trusted-author use only, never for reviewing a fork PR you don't control. If a check
   needs a tree change to answer, the agent stops and reports the gap instead.
-- **Injection-aware, honestly scoped.** PR metadata and file contents are attacker-controlled on
-  forks and are always treated as data, never instructions — validated against strict
-  character-class regexes before reaching a shell command or prompt, with house-rules/spec files
-  and gate-*behavior* files (personas, the verdict decider) read from base-pinned or
-  trusted-checkout provenance rather than a fork's own edits (one documented exception: the
-  vendored workflow's rules/spec reads — see [Surface differences](#surface-differences)). The
+- **Injection-aware, honestly scoped.** The identifiers that reach a shell command — PR number,
+  branch names, head/base SHA — are validated against strict character-class regexes first; the
+  PR title and every file's contents are NOT regex-validated (they reach the prompt as typed) but
+  are always treated as data, never instructions, per every persona's explicit framing — a
+  directive found inside them is itself a reportable finding, not something to follow.
+  House-rules/spec files and gate-*behavior* files (personas, the verdict decider) are read from
+  base-pinned or trusted-checkout provenance rather than a fork's own edits (one documented
+  exception: the vendored workflow's rules/spec reads — see [Surface
+  differences](#surface-differences)). The
   default `readonly` tier further restricts Bash on the three Claude-invoking surfaces to an
   argv-validating read-only git wrapper under a deny-by-default permission mode, so reviewing
   hostile content doesn't hand an agent arbitrary command execution — a scoped guarantee, not a
