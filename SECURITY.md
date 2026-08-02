@@ -11,10 +11,12 @@ why) and, within that same section, "Tiered tool execution" for the wrapper's ex
 matrix — what `pantheon-git-readonly.sh` validates in a Bash call and what it deliberately
 rejects.
 
-Supported: the CLI (`cli/review-gate`), the published action (`action.yml`), and the vendored
-workflow (`action/review.yml`) as shipped from `dev`/`main` on this repo. A fork with local
-modifications, or an older pinned SHA of the published action, is outside this policy's scope —
-report against the current `dev` first.
+Supported: the CLI — `pantheon gate`/`pantheon counsel` (the `pantheon` Python package,
+`pantheon/*.py`, is the current implementation as of port slice 5) plus the deprecated
+`cli/review-gate`/`review-gate` compat shim, which still works this release — the published
+action (`action.yml`), and the vendored workflow (`action/review.yml`) as shipped from
+`dev`/`main` on this repo. A fork with local modifications, or an older pinned SHA of the
+published action, is outside this policy's scope — report against the current `dev` first.
 
 ## Reporting a vulnerability
 

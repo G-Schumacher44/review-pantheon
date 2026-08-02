@@ -37,6 +37,10 @@ Zero footprint — drop this into a workflow file (plus a PR trigger and `pull-r
   with: { claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} }
 ```
 
+*(The `@v1` tag lands with this repo's first release — see [RELEASING.md](RELEASING.md). Until
+then, pin a commit SHA or point `uses:` at a local checkout instead; a bare `@v1` 404s on a
+brand-new checkout, not a typo.)*
+
 Nothing else lands in your repo. Want to try it first with zero tokens spent? From a local
 checkout, in a venv (`pip install -e .`):
 

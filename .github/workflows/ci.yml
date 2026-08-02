@@ -73,7 +73,7 @@ jobs:
           pip install --quiet pyyaml
           python3 -c "
           import yaml
-          for f in ('action/review.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
+          for f in ('action.yml', 'action/review.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
               with open(f) as fh:
                   yaml.safe_load(fh)
               print(f + ': OK')
@@ -159,18 +159,50 @@ jobs:
       - name: pytest (jqjson matrix + pure-function seams, docs/PYTHON-PORT.md)
         run: pytest -q
 
-      - name: Assert CONTRIBUTING.md's canonical test table matches tests/*.sh exactly
+      - name: Assert CONTRIBUTING.md's canonical test tables + prose counts match tests/* exactly
         run: |
           set -euo pipefail
           status=0
-          table="$(grep -oE '^\| `tests/test-[a-z0-9-]+\.sh`' CONTRIBUTING.md | sed -E 's/^\| `(tests\/[a-z0-9-]+\.sh)`/\1/')"
+
+          # -- bash fixture-suite table vs tests/*.sh --
+          sh_table="$(grep -oE '^\| `tests/test-[a-z0-9-]+\.sh`' CONTRIBUTING.md | sed -E 's/^\| `(tests\/[a-z0-9-]+\.sh)`/\1/')"
           for f in tests/*.sh; do
-            grep -qxF "$f" <<<"$table" || { echo "::error::$f is missing from CONTRIBUTING.md's test table (a prose mention elsewhere doesn't count)"; status=1; }
+            grep -qxF "$f" <<<"$sh_table" || { echo "::error::$f is missing from CONTRIBUTING.md's bash test table (a prose mention elsewhere doesn't count)"; status=1; }
           done
           while IFS= read -r entry; do
             [[ -z "$entry" ]] && continue
-            [[ -f "$entry" ]] || { echo "::error::CONTRIBUTING.md's table lists $entry, which no longer exists"; status=1; }
-          done <<<"$table"
+            [[ -f "$entry" ]] || { echo "::error::CONTRIBUTING.md's bash test table lists $entry, which no longer exists"; status=1; }
+          done <<<"$sh_table"
+
+          # -- pytest unit-layer table vs tests/*.py (same shape, so it can't drift silently the
+          # same way the bash table's row-vs-tree check used to be the only thing enforced) --
+          py_table="$(grep -oE '^\| `tests/test_[a-z0-9_]+\.py`' CONTRIBUTING.md | sed -E 's/^\| `(tests\/test_[a-z0-9_]+\.py)`/\1/')"
+          for f in tests/test_*.py; do
+            grep -qxF "$f" <<<"$py_table" || { echo "::error::$f is missing from CONTRIBUTING.md's pytest test table (a prose mention elsewhere doesn't count)"; status=1; }
+          done
+          while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            [[ -f "$entry" ]] || { echo "::error::CONTRIBUTING.md's pytest test table lists $entry, which no longer exists"; status=1; }
+          done <<<"$py_table"
+
+          # -- prose counts vs the real tree — a table can be complete while the SENTENCE next to
+          # it still cites a stale number (exactly how the bash count drifted to 18 silently
+          # across three slices before this check existed); assert the digit, not just the rows.
+          sh_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '\.sh$')
+          py_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '\.py$')
+          # sort -u: the count sentence is deliberately allowed to appear more than once (the
+          # table intro and its own subsection heading both cite it) — dedupe identical repeats,
+          # but a genuine mismatch between two citations still surfaces as more than one line,
+          # which the single-value check below correctly rejects.
+          sh_count_prose="$(grep -oE '\([0-9]+ files; verified against `git ls-tree -r tests/\*\.sh`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
+          py_count_prose="$(grep -oE '\([0-9]+ files, `tests/test_\*\.py`; verified against `git ls-tree -r tests/\*\.py`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
+          [[ -n "$sh_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's bash-suite prose count sentence — did its wording change? update this check's regex to match"; status=1; }
+          [[ -n "$py_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's pytest prose count sentence — did its wording change? update this check's regex to match"; status=1; }
+          [[ "$(wc -l <<<"$sh_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct bash-suite count across its mentions: $sh_count_prose"; status=1; }
+          [[ "$(wc -l <<<"$py_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct pytest count across its mentions: $py_count_prose"; status=1; }
+          [[ "$sh_count_prose" == "$sh_count_tree" ]] || { echo "::error::CONTRIBUTING.md's bash-suite prose count ($sh_count_prose) != actual tests/*.sh count ($sh_count_tree)"; status=1; }
+          [[ "$py_count_prose" == "$py_count_tree" ]] || { echo "::error::CONTRIBUTING.md's pytest prose count ($py_count_prose) != actual tests/*.py count ($py_count_tree)"; status=1; }
+
           exit "$status"
 
   setup-smoke:

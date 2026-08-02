@@ -142,6 +142,23 @@ parameterization alone (`test-install.sh`, `test-action-refs.sh`\*, `test-releas
 about it is stable now. The remaining 9 need a black-box equivalent, an adaptation, or both, as
 detailed per-row above; none get silently skipped.
 
+### Pytest unit layer — scope policy
+
+Slice 4 also introduces `tests/test_*.py` — an in-process pytest layer, collected via
+`pyproject.toml`'s `[tool.pytest.ini_options]` (`tests/test_*.py` only, never the black-box
+`tests/test-*.sh` suites above). Scope, binding: `pantheon/jqjson.py`'s own edge-case matrix
+(non-standard constants, overflow/underflow numbers, excess-precision decimals, trailing-zero-
+formatted decimals, lone surrogates, the `_RawBigNumber` placeholder-collision-avoidance
+guarantee — see §5's "JSON boundary" bullet) plus pure-function seams no black-box suite drives
+directly (argv/PATH/environment construction, temp-file placement, `gate.conf` parsing,
+console-script resolution, and similar). **No 1:1 duplication of the black-box exams** — a
+pytest file that would just re-run scenarios a `tests/test-*-python.sh` suite already covers as
+a black box doesn't get written; each `tests/test_*.py` file's own docstring states exactly what
+black-box coverage it complements, not repeats. This is the section every `tests/test_*.py`
+file's "docs/PYTHON-PORT.md section 4" docstring citation resolves to; the canonical, up-to-date
+file list and per-file scope live in [CONTRIBUTING.md](../CONTRIBUTING.md)'s "Pytest unit layer"
+table, not duplicated here (DESIGN.md rule 5 — the two stay in sync via CI's sync-check).
+
 ## 5. Security core carries over by contract
 
 Every mechanical protection [DESIGN.md](../DESIGN.md)'s "Security posture" section describes
@@ -272,9 +289,12 @@ pantheon/providers.py     One function per provider lane — `provider_run(model
                           str`, same contract as today (prints/returns the agent's raw output,
                           raises/returns nonzero on failure) — for claude, codex, gemini, cursor.
                           Replaces: cli/providers/claude.sh, codex.sh, gemini.sh, cursor.sh.
-                          Fixture suites: none today — no test-providers.sh exists in the bash
-                          suite either (see §9's open item; this is a pre-existing coverage gap,
-                          not one the port introduces or is obligated to close).
+                          Fixture suites: no black-box test-providers.sh exists in the bash suite
+                          either (§9's disclosed pre-existing gap), but tests/test_providers.py
+                          (the pytest unit layer, §4) now closes it at that layer — argv
+                          construction, PATH resolution, environment construction, and
+                          timeout/process-group handling, all monkeypatched so nothing shells out
+                          to a real provider CLI.
 
 pantheon/state.py         Follow-up-mode state: `.review-gate-state.json` read/write, the
                           green/yellow-only recording rule, ancestry-based (not just existence-
@@ -408,12 +428,14 @@ run against the installed prefix, alongside the still-unchanged bash-CLI asserti
   sections). **Not yet resolved:** what `install.sh` does once the RENDERER (not just the
   decider) also moves into the package — that's still open, tracked in the same follow-up as
   the renderer absorption noted in the Slice-5 status section above.
-- **Provider lanes beyond Claude have no dedicated fixture suite today.** `codex.sh`, `gemini.sh`,
-  and `cursor.sh` are "best-effort" per [DESIGN.md](../DESIGN.md) and CLI.md, and there is no
-  `test-providers.sh` in the current 13-suite list exercising any of the four lanes' `provider_run`
-  contract directly. `pantheon/providers.py` inherits this as a pre-existing gap, not a
-  requirement newly introduced by the port — but it shouldn't quietly read as "tested" either;
-  flagged here so it isn't lost.
+- **Provider lanes beyond Claude have no dedicated black-box fixture suite today.** `codex.sh`,
+  `gemini.sh`, and `cursor.sh` are "best-effort" per [DESIGN.md](../DESIGN.md) and CLI.md, and
+  there is no `test-providers.sh` in the bash suite list exercising any of the four lanes'
+  `provider_run` contract as a real subprocess. `pantheon/providers.py` inherits this as a
+  pre-existing gap at the black-box layer, not a requirement newly introduced by the port —
+  `tests/test_providers.py` (the pytest unit layer, §4) closes coverage at the unit layer
+  (argv/PATH/env construction, timeout handling, all monkeypatched), but no lane gets a real,
+  end-to-end subprocess exercise; flagged here so that distinction isn't lost.
 - **DESIGN.md's own edits are deferred to Slice 5**, per §3 and §7 — this PR does not touch
   DESIGN.md.
 
