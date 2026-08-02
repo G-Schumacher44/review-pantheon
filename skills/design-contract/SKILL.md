@@ -1,13 +1,15 @@
 ---
 name: design-contract
-description: How to AUTHOR a binding contract doc (DESIGN.md-style) before building — hard rules, data contracts with explicit validation surfaces, honestly-scoped security posture, a deliberately-absent list, and a layout map, with what to leave OUT (incident history, forked inventories). Use when starting a new feature/system, writing a spec for an agent or team to build from, or adopting review-pantheon's spec_file check. Worked example throughout: this repo's own DESIGN.md.
+description: How to AUTHOR a binding contract doc (DESIGN.md-style) before building — hard rules, data contracts with explicit validation surfaces, honestly-scoped security posture, a deliberately-absent list, and a layout map, with what to leave OUT (incident history, forked inventories). Use when starting a new feature/system, writing a spec for an agent or team to build from, or adopting review-pantheon's spec_file check. Worked example throughout — this repo's own DESIGN.md.
 ---
 
 # Authoring a binding contract doc
 
 This is the authoring guide — for the methodology once a contract exists (sliced changes,
-fail-closed gates, findings discipline), see the `spec-driven` skill. Worked example throughout:
-this repo's own [`DESIGN.md`](../../DESIGN.md).
+fail-closed gates, findings discipline), see the `spec-driven` skill. Worked example throughout —
+this repo's own
+[`DESIGN.md`](https://github.com/G-Schumacher44/review-pantheon/blob/main/DESIGN.md) (a GitHub
+link, not relative — this file is copied into `.claude/skills/design-contract/` on install).
 
 ## When to write one
 

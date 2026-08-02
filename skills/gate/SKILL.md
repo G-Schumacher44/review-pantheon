@@ -6,10 +6,29 @@ description: Operate review-pantheon's review gate (Artemis + Apollo) from a Cla
 # Operating the gate
 
 review-pantheon's gate is `cli/review-gate` (or `review-gate` on `PATH` via a Way-B install) run
-against one PR. Full flag/`gate.conf` reference: [docs/CLI.md](../../docs/CLI.md). The verdict
-schema and combined-comment shape are the binding contract:
-[DESIGN.md](../../DESIGN.md#verdict-contract). This skill doesn't restate either — it's the
-procedure for using them from inside a session.
+against one PR. Full flag/`gate.conf` reference:
+[docs/CLI.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/CLI.md). The
+verdict schema and combined-comment shape are the binding contract:
+[DESIGN.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/DESIGN.md#verdict-contract).
+This skill doesn't restate either — it's the procedure for using them from inside a session.
+Links below point at review-pantheon's own GitHub repo, not a relative path — this file gets
+copied into `.claude/skills/gate/` by `install.sh`, so a relative link would resolve against the
+installed location instead of the source repo.
+
+## Locating `review-gate`
+
+`install.sh --claude` installs this skill and the `/gate` command — it does NOT install the CLI
+itself. `review-gate` only ends up on `PATH` via a Way-B (`bootstrap.sh`) install. Before assuming
+it's missing:
+
+1. `command -v review-gate` — a Way-B install puts it on `PATH`.
+2. Look for a sibling review-pantheon checkout (e.g. `../review-pantheon/cli/review-gate`) — a
+   Way-A install still runs the CLI from that checkout, not from the target repo.
+3. Check the default Way-B prefix directly: `~/.review-pantheon/cli/review-gate`.
+4. None of those resolve? Tell the user the CLI surface isn't installed yet and point at
+   [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/SETUP.md)'s
+   three install ways — don't try to run a command that
+   doesn't exist and report the resulting error as if the gate itself failed.
 
 ## 1. Dry-run first — zero tokens
 
@@ -64,7 +83,9 @@ full-PR review automatically, with a note explaining why — expected, not a bug
 
 ## 5. Findings discipline — fixed or tracked, never dropped
 
-Grounded in [CONTRIBUTING.md](../../CONTRIBUTING.md#ground-rules)'s ground rules; apply this to
+Grounded in
+[CONTRIBUTING.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/CONTRIBUTING.md#ground-rules)'s
+ground rules; apply this to
 every finding a live gate posts, not just the ones you agree with:
 
 - **Fix or track — no third option.** Either resolve the finding in the same PR, or open an issue

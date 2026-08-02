@@ -7,7 +7,9 @@ description: Convene review-pantheon's counsel tier (Socrates, Diogenes, Plato) 
 
 Counsel agents (Socrates, Diogenes, Plato) **inform** — a human weighs their verdict. That's
 different from the gate agents (Artemis, Apollo), which **enforce** and can block a merge. Full
-persona definitions and the verdict vocabulary table: [DESIGN.md](../../DESIGN.md#the-idea).
+persona definitions and the verdict vocabulary table:
+[DESIGN.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/DESIGN.md#the-idea) (a
+GitHub link, not relative — this file is copied into `.claude/skills/counsel/` on install).
 
 ## Which lens, when
 
