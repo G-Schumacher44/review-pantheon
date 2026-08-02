@@ -65,21 +65,33 @@ class AgentRenderData:
 
 
 def _jq_raw(value: Any) -> str:
-    """Mimics jq -r's raw-output stringification of a JSON scalar that reached a display field
+    """Mimics jq -r's raw-output stringification of a JSON value that reached a display field
     after passing :func:`_or_default` (i.e. not JSON null/false) — jq prints a string unquoted
     and a JSON boolean as its own lowercase literal spelling (``true``/``false``), NOT Python's
     Title-case ``str(bool)`` (``True``/``False``). Every display field this module reads from an
-    agent's JSON (severity, file, issue, scenario, the top-finding fallback text) routes through
-    this before :func:`sanitize_inline` normalizes it further, so a malformed agent object that
-    smuggles a JSON boolean in where a string is expected renders the same text bash's
-    ``jq -r '.field // default'`` would, not Python's own ``str()`` of that type. (Caught live —
-    the repo's own self-hosted gate on this PR flagged ``unrecognized-severity(True)`` vs bash's
-    ``unrecognized-severity(true)`` for exactly this case.)"""
+    agent's JSON (severity, file, issue, scenario, summary, the top-finding fallback text) routes
+    through this before :func:`sanitize_inline` normalizes it further, so a malformed agent
+    object that smuggles a JSON boolean in where a string is expected renders the same text
+    bash's ``jq -r '.field // default'`` would, not Python's own ``str()`` of that type. (Caught
+    live — the repo's own self-hosted gate on this PR flagged ``unrecognized-severity(True)`` vs
+    bash's ``unrecognized-severity(true)`` for exactly this case.)
+
+    A non-scalar value (a JSON array/object smuggled into a field this module treats as display
+    text) falls through to ``json.dumps(value, indent=2, ensure_ascii=False)`` — verified live
+    against real ``jq -r``: for a non-string value, ``-r`` mode falls back to jq's own DEFAULT
+    (non-``-c``) pretty-printer, which is 2-space-indented and prints non-ASCII raw (unescaped),
+    not jq's compact form and not Python's own ``json.dumps`` default (which is compact AND
+    ASCII-escapes non-ASCII by default) — both defaults diverge from jq's here, in different
+    ways, so both must be pinned explicitly to match. (Caught live — the repo's own self-hosted
+    gate flagged this on the same PR, immediately after the boolean fix above landed.) The
+    resulting multi-line text is safe to hand to :func:`sanitize_inline` unchanged: its newline
+    -> space collapse already normalizes it the same way bash's ``$(...)`` command substitution
+    plus that function's bash equivalent does for a multi-line jq value."""
     if isinstance(value, str):
         return value
     if isinstance(value, bool):
         return "true" if value else "false"
-    return json.dumps(value)
+    return json.dumps(value, indent=2, ensure_ascii=False)
 
 
 def sanitize_inline(s: Any) -> str:
@@ -350,7 +362,12 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
         lines.append(f"**{agent}** @ `{short_sha}` — {emoji} {sanitize_inline(d.verdict)}")
         lines.append("")
 
-        summary = _or_default(findings_obj.get("summary") if isinstance(findings_obj, dict) else None, "")
+        # jq_raw-ify BEFORE testing emptiness, not after: `.summary // empty` piped through
+        # `jq -r` turns a numeric `0` or an empty array/object into the non-empty DISPLAY
+        # strings "0"/"[]"/"{}" in bash — testing Python truthiness on the raw, un-stringified
+        # JSON value instead would treat all three as falsy and wrongly fall through to `d.top`
+        # (caught live — the repo's own self-hosted gate flagged this on the same PR).
+        summary = _jq_raw(_or_default(findings_obj.get("summary") if isinstance(findings_obj, dict) else None, ""))
         if not summary:
             summary = d.top
         if not summary:
@@ -369,7 +386,10 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
             f_field = sanitize_inline(_or_default(finding.get("file"), "?"))
             ln = _finding_line_or_placeholder(finding.get("line"))
             issue = _or_default(finding.get("issue"), "")
-            scenario = _or_default(finding.get("scenario"), "")
+            # Same jq_raw-before-emptiness-check fix as `summary` above, and for the same
+            # reason: `.scenario // ""` piped through jq -r makes 0/[]/{} non-empty display
+            # text; a Python truthiness test on the raw value would wrongly drop the line.
+            scenario = _jq_raw(_or_default(finding.get("scenario"), ""))
             badge = severity_badge(sev)
             lines.append(f"- {badge} `{f_field}:{ln}` — {sanitize_inline(issue)}")
             if scenario:
