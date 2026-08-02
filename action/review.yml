@@ -414,9 +414,11 @@ jobs:
           # The verdict decider — port slice 5's absorption (this file's own header comment):
           # `pantheon.verdict` plus the one module it depends on for JSON parsing
           # (`pantheon.jqjson`) plus the package's own `__init__.py`, base-pinned into a
-          # PACKAGE-SHAPED directory ($RUNNER_TEMP/pantheon-verdict/pantheon/*.py) so
-          # `PYTHONPATH=$RUNNER_TEMP/pantheon-verdict python3 -m pantheon.verdict` resolves
-          # `import pantheon` / `from pantheon import jqjson` correctly — same base-pinning
+          # PACKAGE-SHAPED directory ($RUNNER_TEMP/pantheon-verdict/pantheon/*.py) so the
+          # "Decide verdict" step below can invoke pantheon/verdict.py BY ITS OWN ABSOLUTE PATH
+          # (never `python3 -m pantheon.verdict` — see that step's own comment for the
+          # cwd-shadowing vector this avoids), with PYTHONPATH=$RUNNER_TEMP/pantheon-verdict so
+          # its own internal `from pantheon import jqjson` still resolves — same base-pinning
           # mechanism as the persona/wrapper reads above, just three files landing under one
           # package directory instead of one file at $RUNNER_TEMP's top level.
           PANTHEON_PKG_DIR="$RUNNER_TEMP/pantheon-verdict/pantheon"
@@ -593,9 +595,21 @@ jobs:
 
       # Same decision rule as every other lane, now the SAME CODE, not just the same rule
       # (port slice 5's absorption, DESIGN.md's "Two runtimes, one rule") — `pantheon.verdict`,
-      # resolved base-pinned above into a package-shaped $RUNNER_TEMP directory, invoked via
-      # `python3 -m` with PYTHONPATH pointed at that directory so there is exactly one Python
-      # implementation of the rule, not a copy embedded in this YAML that can drift from it.
+      # resolved base-pinned above into a package-shaped $RUNNER_TEMP directory.
+      #
+      # Invoked by its OWN ABSOLUTE PATH, deliberately NOT `python3 -m pantheon.verdict` (a
+      # Codex P1 finding on this port's own PR): `-m` prepends the CURRENT WORKING DIRECTORY to
+      # sys.path[0] — BEFORE any PYTHONPATH entry — and this step's cwd is $GITHUB_WORKSPACE,
+      # the PR's own checkout (never overridden here). A fork PR that commits its own top-level
+      # `pantheon/verdict.py` would get THAT file imported instead of the base-pinned trusted
+      # one, forging its own verdict — the identical shadow class
+      # `pantheon.execution.resolve_console_script`'s own three-round fix history already closes
+      # for the readonly-tier wrapper invocation (see that function's docstring). Running the
+      # trusted `verdict.py` by its own absolute path makes the SCRIPT'S OWN directory
+      # sys.path[0], never the caller's cwd — the same principle a resolved console script
+      # relies on, without needing an actual `pip install` step here. PYTHONPATH still supplies
+      # the package's own parent directory so `from pantheon import jqjson` (verdict.py's own
+      # internal import) resolves correctly.
       - name: Decide verdict
         id: decide
         if: always() && (matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true')
@@ -612,7 +626,7 @@ jobs:
             echo "::error::missing base-pinned pantheon/verdict.py — the 'Resolve gate scripts (base-pinned)' step didn't produce one; see its own error output above."
             exit 1
           fi
-          PYTHONPATH="$PANTHEON_PYTHONPATH" python3 -m pantheon.verdict "$AGENT_NAME" "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"
+          PYTHONPATH="$PANTHEON_PYTHONPATH" python3 "$PANTHEON_PYTHONPATH/pantheon/verdict.py" "$AGENT_NAME" "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"
 
       - name: Save verdict artifact
         if: always()

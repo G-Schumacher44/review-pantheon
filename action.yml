@@ -8,10 +8,24 @@
 # (whose `pantheon.verdict` module now decides every verdict — port slice 5's absorption of the
 # former standalone action/decide_verdict.py, see DESIGN.md's "Two runtimes, one rule"),
 # action/lib/*.sh, the JSON schema below — is read from `${{ github.action_path }}`, i.e.
-# review-pantheon's own checkout as GitHub Actions pulls it for the `uses:` reference (imported
-# via `PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict`, not a `pip install` —
-# no network/build step needed for a stdlib-only package run straight from its own checkout),
-# not from the calling repo. The one opt-in exception is the
+# review-pantheon's own checkout as GitHub Actions pulls it for the `uses:` reference (run via
+# `PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py"`
+# — a `pip install` is not needed, a stdlib-only package runs straight from its own checkout).
+#
+# Deliberately NOT `python3 -m pantheon.verdict` (a Codex P1 finding on this port's own PR): `-m`
+# prepends the CURRENT WORKING DIRECTORY to sys.path[0] — BEFORE any PYTHONPATH entry — and every
+# step here runs with the CONSUMING repo's checkout as cwd (the default working-directory for a
+# composite-action step, never overridden below). A fork PR that commits its own top-level
+# `pantheon/verdict.py` would get that file imported instead of the trusted one at
+# `github.action_path`, forging its own verdict — the identical shadow class
+# `pantheon.execution.resolve_console_script`'s own three-round fix history already closes for
+# the readonly-tier wrapper invocation (see that function's docstring). Invoking the trusted
+# `verdict.py` by its own absolute path instead of via `-m` closes it the same way a resolved
+# console script does: the script's OWN directory becomes sys.path[0], never the caller's cwd —
+# verified live against a reproduction (a same-named `pantheon/verdict.py` planted in a
+# hostile-checkout-shaped cwd) before landing this fix.
+#
+# Not from the calling repo. The one opt-in exception is the
 # `personas_path` input (a consuming workflow author pointing this action at a repo-local
 # persona fork instead) — that content is base-pinned from the PR's base commit via `git show`
 # (see the "Resolve gate configuration" step and the input's own description below), never read
@@ -495,7 +509,7 @@ runs:
       if: contains(inputs.agents, 'artemis')
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict artemis "$RUNNER_TEMP/artemis-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" artemis "$RUNNER_TEMP/artemis-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # apollo — the docs-only exception: skips loudly instead of running (DESIGN.md)
@@ -561,7 +575,7 @@ runs:
       if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict apollo "$RUNNER_TEMP/apollo-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" apollo "$RUNNER_TEMP/apollo-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # socrates / diogenes / plato — counsel agents. Not part of the default `agents` panel;
@@ -621,7 +635,7 @@ runs:
       if: contains(inputs.agents, 'socrates')
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict socrates "$RUNNER_TEMP/socrates-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" socrates "$RUNNER_TEMP/socrates-raw.txt"
 
     - name: Build prompt (diogenes)
       id: build-prompt-diogenes
@@ -676,7 +690,7 @@ runs:
       if: contains(inputs.agents, 'diogenes')
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict diogenes "$RUNNER_TEMP/diogenes-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" diogenes "$RUNNER_TEMP/diogenes-raw.txt"
 
     - name: Build prompt (plato)
       id: build-prompt-plato
@@ -731,7 +745,7 @@ runs:
       if: contains(inputs.agents, 'plato')
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict plato "$RUNNER_TEMP/plato-raw.txt"
+      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" plato "$RUNNER_TEMP/plato-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # Combine + enforce — runs regardless of which/whether prior steps failed, because every

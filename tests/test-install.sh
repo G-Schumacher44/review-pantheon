@@ -68,15 +68,19 @@ for pyfile in __init__.py jqjson.py verdict.py; do
   fi
 done
 
-# Live proof the vendored trio is actually IMPORTABLE and produces the same decision a direct
-# `python3 -m pantheon.verdict` call would — not just "the right bytes landed," but "this is a
-# real, self-contained package a base-pinned $PYTHONPATH can run standalone" (action/review.yml's
-# own invocation shape).
+# Live proof the vendored trio is actually IMPORTABLE and produces the same decision a real gate
+# run would — not just "the right bytes landed," but "this is a real, self-contained package a
+# base-pinned $PYTHONPATH can run standalone." Invoked by pantheon/verdict.py's own absolute
+# path, matching action/review.yml's own fixed invocation shape (never `python3 -m
+# pantheon.verdict` — a Codex P1 finding on this port's own PR: `-m` prepends the caller's cwd to
+# sys.path[0] before PYTHONPATH, which would shadow this exact vendored copy with any
+# same-named pantheon/verdict.py sitting in cwd; see action/review.yml's "Decide verdict" step
+# comment for the full rationale).
 VENDORED_RAW="$(mktemp)"
 printf '%s' '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"ok"}' > "$VENDORED_RAW"
-if vendored_decision="$(PYTHONPATH="$T1/.github/review-agents" python3 -m pantheon.verdict artemis "$VENDORED_RAW" 2>/dev/null)" \
+if vendored_decision="$(PYTHONPATH="$T1/.github/review-agents" python3 "$T1/.github/review-agents/pantheon/verdict.py" artemis "$VENDORED_RAW" 2>/dev/null)" \
   && grep -q '"color": "green"' <<<"$vendored_decision"; then
-  pass "default install: vendored pantheon/ package is importable and decides via 'python3 -m pantheon.verdict'"
+  pass "default install: vendored pantheon/ package is importable and decides via its own absolute path (cwd-shadow-safe)"
 else
   fail "default install: vendored pantheon/ package failed to import/decide (got: $vendored_decision)"
 fi

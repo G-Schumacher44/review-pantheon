@@ -333,10 +333,17 @@ green against the Python binary, per §4's table — not "code merged," not "loo
   `pip install --user`) and P2 (dangling-symlink refusal in `pantheon.state`'s bootstrap) are
   both closed, with fixtures proven failing pre-fix.
 - The verdict-decision rule is absorbed: `pantheon.verdict` is now the ONE implementation, called
-  by `pantheon gate` (the CLI), `action.yml`'s five per-agent decide steps (via
-  `PYTHONPATH="${{ github.action_path }}" python3 -m pantheon.verdict`), and the vendored
+  by `pantheon gate` (the CLI), `action.yml`'s five per-agent decide steps, and the vendored
   `action/review.yml`'s own decide step (via a base-pinned copy of `pantheon/__init__.py` +
-  `pantheon/jqjson.py` + `pantheon/verdict.py`, the module's own dependency closure).
+  `pantheon/jqjson.py` + `pantheon/verdict.py`, the module's own dependency closure). Both Action
+  lanes invoke `pantheon/verdict.py` by its own absolute path (`PYTHONPATH=... python3
+  <path-to>/pantheon/verdict.py`) — deliberately NOT `python3 -m pantheon.verdict`, a Codex P1
+  finding on this port's own PR: `-m` prepends the caller's cwd (the PR's own checkout, on both
+  lanes) to `sys.path[0]` BEFORE `PYTHONPATH`, so a fork PR shipping its own top-level
+  `pantheon/verdict.py` would shadow the trusted one. See `action.yml`'s and
+  `action/review.yml`'s own "Decide verdict" step comments for the full fix rationale (the same
+  principle `pantheon.execution.resolve_console_script`'s own console-script resolution already
+  relies on).
 
 **Disclosed deviation from this section's original plan, above:** the exit bar as originally
 written called for `cli/review-gate`, `cli/lib/*.sh`, `cli/providers/*.sh`, the `review-gate`
@@ -393,8 +400,9 @@ run against the installed prefix, alongside the still-unchanged bash-CLI asserti
 - **`install.sh`'s own fate — resolved this slice, for the verdict decider only.** Way A now
   ALSO vendors `pantheon/__init__.py`, `pantheon/jqjson.py`, and `pantheon/verdict.py` into
   `.github/review-agents/pantheon/` (the module's own dependency closure — the three files
-  `action/review.yml`'s base-pinned "Resolve gate scripts" step needs to run
-  `PYTHONPATH=... python3 -m pantheon.verdict`), alongside its still-unchanged vendoring of
+  `action/review.yml`'s base-pinned "Resolve gate scripts" step needs to invoke
+  `pantheon/verdict.py` by its own absolute path, never `python3 -m pantheon.verdict`), alongside
+  its still-unchanged vendoring of
   personas, `action/review.yml`, the deprecated `decide_verdict.py` compat shim, and
   `cli/lib/pantheon-git-readonly.sh` ([DESIGN.md](../DESIGN.md)'s "Layout"/"Published action"
   sections). **Not yet resolved:** what `install.sh` does once the RENDERER (not just the

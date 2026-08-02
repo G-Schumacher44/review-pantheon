@@ -252,10 +252,16 @@ counsel personas individually and reason across their verdicts yourself.
 section 3's "one runtime endgame") — `pantheon/verdict.py` is the ONE implementation, called by
 both lanes: the CLI (`pantheon gate`, via `pantheon.cli`) and the Action (`action.yml`'s five
 "Decide verdict (<agent>)" steps and the vendored `action/review.yml`'s own "Decide verdict"
-step, both invoking `python3 -m pantheon.verdict` — the Action lanes resolve it from
-`github.action_path`/a base-pinned copy of the package rather than a `pip install`, since it's a
-plain stdlib-only module needing no build step to run from a checkout). The historical two-
-runtime split this section used to describe — bash+jq's `cli/lib/verdict.sh` for the CLI,
+step, both invoking `pantheon/verdict.py` by its own absolute path (deliberately NOT `python3 -m
+pantheon.verdict` — a Codex finding on this port's own PR: `-m` prepends the caller's cwd, the
+PR's own checkout on both Action lanes, to `sys.path[0]` BEFORE any `PYTHONPATH` entry, so a
+fork PR committing its own top-level `pantheon/verdict.py` would shadow the trusted one; running
+the trusted file by its own path makes ITS directory `sys.path[0]` instead — the same principle
+`pantheon.execution.resolve_console_script`'s own console-script resolution already relies on)
+— the Action lanes resolve it from `github.action_path`/a base-pinned copy of the package rather
+than a `pip install`, since it's a plain stdlib-only module needing no build step to run from a
+checkout). The historical two-runtime split this section used to describe — bash+jq's
+`cli/lib/verdict.sh` for the CLI,
 Python's standalone `action/decide_verdict.py` for the Action, kept in sync by
 `tests/test-verdict-decision.sh` cross-checking both against the same fixtures — is retired as
 of this slice: `cli/lib/verdict.sh` no longer has a live caller (`cli/review-gate`, the
@@ -515,7 +521,8 @@ G-Schumacher44/review-pantheon@v1` reference and nothing else — zero files lan
 (contrast with `install.sh`'s Way A, which vendors personas + `action/review.yml` + a deprecated
 `decide_verdict.py` compat shim + the `pantheon` package's verdict-decision module
 (`pantheon/__init__.py`, `pantheon/jqjson.py`, `pantheon/verdict.py` — the base-pinned trio
-`action/review.yml`'s own decide step now runs via `python3 -m pantheon.verdict`) into the
+`action/review.yml`'s own decide step now runs by invoking `pantheon/verdict.py`'s own absolute
+path, never `python3 -m pantheon.verdict` — see "Two runtimes, one rule" above for why) into the
 target repo precisely so its own runner can see them; the published action instead reads all of
 that from its own checkout at `github.action_path`, the copy GitHub Actions pulls for the
 `uses:` reference). `examples/review-gate.yml` is the whole consumer-side install — copy it to
@@ -616,7 +623,9 @@ action/decide_verdict.py   DEPRECATED (port slice 5, one-release compat window) 
                            delegating to `pantheon.verdict`, the now-sole implementation of the
                            verdict-decision rule (see "Two runtimes, one rule" above). Neither
                            `action.yml` nor `action/review.yml` calls this file anymore (both
-                           invoke `python3 -m pantheon.verdict` directly); still vendored by
+                           invoke `pantheon/verdict.py` by its own absolute path directly,
+                           never `python3 -m pantheon.verdict` — see "Two runtimes, one rule"
+                           above); still vendored by
                            install.sh, unchanged, only so nothing scripting against it directly
                            breaks mid-transition
 action/lib/                shared shell helpers for action.yml (build_prompt.sh,
