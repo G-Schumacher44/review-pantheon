@@ -126,7 +126,8 @@ def test_claude_falls_back_to_default_allowed_tools_when_empty(monkeypatch, prom
     providers.provider_run("claude", "", prompt_file, "")
     tools = captured["argv"][captured["argv"].index("--allowedTools") + 1]
     assert tools == providers.default_allowed_tools()
-    assert "pantheon.execution wrapper" in tools
+    assert providers._WRAPPER_SCRIPT_NAME in tools
+    assert tools.endswith("wrapper *)")
 
 
 def test_codex_pipes_prompt_via_stdin(monkeypatch, prompt_file) -> None:
@@ -310,49 +311,68 @@ def test_provider_env_path_is_always_filtered_never_ambient(monkeypatch, tmp_pat
 
 
 # ---------------------------------------------------------------------------------------------
-# _FALLBACK_WRAPPER_CMD -- the module-shadowing fix (a Codex finding, third review wave: since
-# providers now run with the target repo's own checkout as their cwd, a hostile PR committing its
-# own pantheon/execution.py at the repo root could get THAT file imported instead of the real
-# installed one the moment the readonly tier's one allowed Bash prefix runs, defeating
-# run_readonly_wrapper()'s own argv validation from inside the module meant to enforce it).
+# default_allowed_tools() / the console-script wrapper resolution -- the module-shadowing fix,
+# round 3 (a Codex finding across two review waves). Round 1 (`-I` isolated mode on a
+# `python -m pantheon.execution wrapper` invocation) closed the shadow but broke `pip install
+# --user` (round 2's fresh evidence: `-I` also disables user-site-packages). Round 3 resolves
+# the INSTALLED `pantheon-git-readonly` console script's own absolute path instead -- immune to
+# the shadow by construction (its own generated launcher's sys.path[0] is its own install
+# directory, never the caller's cwd), with no `-I`-style collateral restriction.
 # ---------------------------------------------------------------------------------------------
 
 
-def test_fallback_wrapper_cmd_uses_isolated_mode() -> None:
-    assert " -I -m pantheon.execution wrapper" in providers._FALLBACK_WRAPPER_CMD
+def test_default_allowed_tools_resolves_the_installed_console_script(monkeypatch, tmp_path) -> None:
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_script = fake_bin_dir / providers._WRAPPER_SCRIPT_NAME
+    fake_script.write_text("#!/bin/sh\n")
+    fake_script.chmod(0o755)
+    monkeypatch.setattr(providers.sys, "executable", str(fake_bin_dir / "python3"))
+
+    tools = providers.default_allowed_tools()
+    assert str(fake_script) in tools
+    assert tools.endswith(f"{fake_script} wrapper *)")
+    # No `-I`/`-m`/`python` invocation shape at all when the console script resolves -- it's
+    # invoked directly as its own executable.
+    assert " -m " not in tools
+    assert " -I " not in tools
 
 
-def test_isolated_mode_blocks_a_checkout_shadowed_execution_module(tmp_path) -> None:
-    # Live (non-mocked) repro: a hostile checkout with its own pantheon/execution.py, run from
-    # that checkout's own directory (mirrors _run()'s cwd=repo_root) with the REAL package
-    # resolvable only via PYTHONPATH (the dev-checkout shape) -- without -I this imports the
-    # impostor; with -I, PYTHONPATH is ignored too, so resolution fails closed (module not found)
-    # rather than silently running the impostor.
+def test_default_allowed_tools_falls_back_loudly_when_console_script_missing(monkeypatch, tmp_path, capsys) -> None:
+    empty_bin_dir = tmp_path / "empty-bin"
+    empty_bin_dir.mkdir()
+    monkeypatch.setattr(providers.sys, "executable", str(empty_bin_dir / "python3"))
+
+    tools = providers.default_allowed_tools()
+    assert "pantheon.execution wrapper" in tools
+    captured_stderr = capsys.readouterr().err
+    assert providers._WRAPPER_SCRIPT_NAME in captured_stderr
+    assert "not installed" in captured_stderr
+
+
+def test_console_script_wrapper_is_not_shadowed_by_a_hostile_checkout(tmp_path) -> None:
+    # Live (non-mocked) repro against the REAL installed console script (whatever venv this test
+    # itself runs under): a hostile checkout with its own same-named pantheon/execution.py, run
+    # from that checkout's own directory (mirrors _run()'s cwd=repo_root), must never have that
+    # file imported -- proving the fix (a console script's own sys.path[0] is its own install
+    # directory) closes the exact vector -I once did, without needing -I's own collateral damage.
+    installed_script = Path(sys.executable).parent / providers._WRAPPER_SCRIPT_NAME
+    if not installed_script.is_file():
+        pytest.skip(f"{installed_script} is not installed in this test environment")
+
     hostile = tmp_path / "hostile-checkout"
     (hostile / "pantheon").mkdir(parents=True)
     (hostile / "pantheon" / "__init__.py").write_text("")
     (hostile / "pantheon" / "execution.py").write_text("print('IMPOSTOR-RAN')\n")
 
-    real_root = str(Path(__file__).resolve().parent.parent)
-
-    without_isolation = subprocess.run(
-        [sys.executable, "-m", "pantheon.execution", "wrapper", "status"],
+    result = subprocess.run(
+        [str(installed_script), "wrapper", "status"],
         cwd=str(hostile),
-        env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": real_root},
+        env={"PATH": os.environ.get("PATH", "")},
         capture_output=True,
         text=True,
     )
-    assert "IMPOSTOR-RAN" in without_isolation.stdout
-
-    with_isolation = subprocess.run(
-        [sys.executable, "-I", "-m", "pantheon.execution", "wrapper", "status"],
-        cwd=str(hostile),
-        env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": real_root},
-        capture_output=True,
-        text=True,
-    )
-    assert "IMPOSTOR-RAN" not in with_isolation.stdout
-    assert with_isolation.returncode != 0
+    assert "IMPOSTOR-RAN" not in result.stdout
 
 
 # ---------------------------------------------------------------------------------------------

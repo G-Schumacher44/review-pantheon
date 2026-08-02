@@ -12,7 +12,8 @@ P1 — not duplicated here.
 
 from __future__ import annotations
 
-from pantheon.cli import GateConfig, _load_working_tree_gate_conf, _parse_conf_text
+import pantheon.cli as cli_module
+from pantheon.cli import GateConfig, _load_working_tree_gate_conf, _parse_conf_text, _wrapper_invocation
 
 
 def test_parse_conf_text_basic_keys() -> None:
@@ -93,3 +94,37 @@ def test_load_working_tree_gate_conf_does_not_read_execution_key(tmp_path) -> No
     cfg = _load_working_tree_gate_conf(str(tmp_path))
     assert not hasattr(cfg, "execution")
     assert cfg.provider == "claude"
+
+
+# ---------------------------------------------------------------------------------------------
+# _wrapper_invocation() — the module-shadowing fix, round 3 (mirrors
+# tests/test_providers.py's identical coverage for pantheon.providers' own
+# default_allowed_tools()/_WRAPPER_SCRIPT_NAME — same mechanism, same rationale, both modules
+# fixed together since both compute this string independently).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_wrapper_invocation_resolves_the_installed_console_script(monkeypatch, tmp_path) -> None:
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_script = fake_bin_dir / cli_module._WRAPPER_SCRIPT_NAME
+    fake_script.write_text("#!/bin/sh\n")
+    fake_script.chmod(0o755)
+    monkeypatch.setattr(cli_module.sys, "executable", str(fake_bin_dir / "python3"))
+
+    invocation = _wrapper_invocation()
+    assert invocation == f"{fake_script} wrapper"
+    assert " -m " not in invocation
+    assert " -I " not in invocation
+
+
+def test_wrapper_invocation_falls_back_loudly_when_console_script_missing(monkeypatch, tmp_path, capsys) -> None:
+    empty_bin_dir = tmp_path / "empty-bin"
+    empty_bin_dir.mkdir()
+    monkeypatch.setattr(cli_module.sys, "executable", str(empty_bin_dir / "python3"))
+
+    invocation = _wrapper_invocation()
+    assert invocation == f"{empty_bin_dir / 'python3'} -m pantheon.execution wrapper"
+    captured_stderr = capsys.readouterr().err
+    assert cli_module._WRAPPER_SCRIPT_NAME in captured_stderr
+    assert "not installed" in captured_stderr

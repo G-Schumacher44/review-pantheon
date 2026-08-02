@@ -53,6 +53,18 @@ pantheon = "pantheon.cli:main"
 # `pantheon gate`, prints a one-line deprecation note, exits with the same code. Removed at
 # Slice 5 alongside the rest of the bash CLI surface.
 review-gate = "pantheon.reviewgate_shim:main"
+# The readonly execution tier's own Bash-tool entry point (`pantheon.cli`'s `_WRAPPER_INVOCATION`/
+# `pantheon.providers`' `_FALLBACK_WRAPPER_CMD` resolve THIS installed script's own absolute path,
+# not a bare `python -m pantheon.execution wrapper` invocation — a Codex review finding on this
+# port's own PR: `python -m <module>` prepends the CURRENT WORKING DIRECTORY to sys.path, and a
+# provider now runs with the target repo's own (potentially hostile) checkout as its cwd, so a
+# PR-committed `pantheon/execution.py` would get imported instead of the real one. A console-
+# script entry point doesn't have this problem — its own generated launcher's `sys.path[0]` is
+# the SCRIPT'S OWN directory (this package's install location), never the caller's cwd, verified
+# live against a hostile-checkout repro — so this closes the shadow vector without the collateral
+# damage an earlier `-I` (isolated mode) fix caused (a follow-up finding: `-I` also disables
+# user-site-packages, breaking a `pip install --user` deployment).
+pantheon-git-readonly = "pantheon.execution:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

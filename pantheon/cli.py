@@ -66,29 +66,55 @@ _DEFAULT_SPEC_FILE = "DESIGN.md"
 _DEFAULT_PROVIDER = "claude"
 _DEFAULT_EXECUTION = "readonly"
 
-# The Python equivalent of a wrapper *script path* the generated prompt tells an agent to invoke
-# in place of raw `git` — pantheon.execution.run_readonly_wrapper is a function, not a standalone
-# executable, so this points at that module's own CLI entry point instead, the identical shape
-# pantheon.providers' own fallback uses for the same reason.
+# The wrapper *script path* the generated prompt tells an agent to invoke in place of raw `git`
+# — pantheon.execution.run_readonly_wrapper is a function, not a standalone executable on its
+# own, so this resolves the INSTALLED `pantheon-git-readonly` console script instead (see
+# pyproject.toml's [project.scripts] entry) — the identical shape pantheon.providers' own
+# fallback uses for the same reason.
 #
-# `-I` (isolated mode) is load-bearing, not a style preference — a Codex review finding on this
-# port's own PR: this string becomes the ONE allowed Bash prefix under the `readonly` execution
-# tier (`Bash(<this> *)`), and providers now run with the target repo's OWN checkout as their
-# cwd (see this module's own `_run_agent`/`providers.provider_run` — a fix from the SAME
-# disposition round that exposed this gap). Python's `-m` machinery inserts the current working
-# directory at the front of `sys.path` — a hostile PR checkout that commits its own
-# `pantheon/execution.py` (or a whole shadow `pantheon/` package) at its repo root would get
-# THAT file imported instead of the real, installed one the instant a prompt-injected agent
-# invokes this Bash prefix, defeating `run_readonly_wrapper()`'s own argv validation entirely —
-# the "read-only" tier's actual boundary — from inside the very module meant to enforce it.
-# `-I` closes this by construction: it disables the cwd-prepend (and PYTHONPATH, and user
-# site-packages), so only a properly INSTALLED `pantheon` package is ever importable here,
-# never a same-named file the checkout happens to contain. Verified live: a hostile
-# `pantheon/execution.py` at a checkout's root DOES get imported and run without `-I`; WITH
-# `-I`, resolution correctly fails closed (module not found) against an uninstalled dev
-# checkout, and correctly finds the REAL installed package (not the checkout's impostor) against
-# a real `pip install`.
-_WRAPPER_INVOCATION = f"{sys.executable} -I -m pantheon.execution wrapper"
+# Resolving the installed CONSOLE SCRIPT, not `python -m pantheon.execution wrapper`, is
+# load-bearing, not a style preference — a two-round Codex finding on this port's own PR: this
+# string becomes the ONE allowed Bash prefix under the `readonly` execution tier
+# (`Bash(<this> *)`), and providers now run with the target repo's OWN checkout as their cwd
+# (see this module's own `_run_agent`/`providers.provider_run`). Round 1's fix was `-I` (isolated
+# mode) on a `python -m` invocation — `-m` prepends the current working directory to `sys.path`,
+# so a hostile PR checkout committing its own `pantheon/execution.py` would get imported instead
+# of the real one; `-I` disables that cwd-prepend. Round 2's fresh evidence: `-I` ALSO disables
+# user-site-packages, breaking a supported `pip install --user` deployment shape entirely (every
+# readonly-tier git inspection would fail closed with "No module named pantheon"). Fixed
+# properly in round 3 by resolving the INSTALLED CONSOLE SCRIPT's own absolute path instead —
+# verified live: a setuptools-generated console script's own `sys.path[0]` is the SCRIPT'S OWN
+# directory (the package's install location), never the caller's cwd, so it is immune to the
+# shadow vector by construction, with no `-I`/`-s`/PYTHONPATH collateral restriction needed at
+# all (an ordinary install — venv, system, or `--user` — all resolve correctly).
+_WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
+
+
+def _wrapper_invocation() -> str:
+    """Resolves :data:`_WRAPPER_SCRIPT_NAME`'s absolute path, derived from ``sys.executable``'s
+    own directory (the same ``bin/`` a venv's/install's ``python``/``pip``/``pantheon`` all live
+    in) — never an ambient ``PATH`` lookup, matching this port's own established resolution
+    discipline elsewhere (``_TRUSTED_BIN_DIRS``, ``pantheon.providers``' ``_resolve_cli``).
+    ``pantheon.execution.main()``'s own CLI contract (unchanged since Slice 3 — still what
+    ``tests/test-git-readonly-wrapper.sh``'s python mode drives directly) dispatches on a
+    literal ``wrapper`` first argument, so the returned string always ends in `` wrapper`` —
+    the console script IS that module's ``main()``, just resolved by installed-script path
+    instead of ``python -m``. Falls back to the OLDER, unprotected
+    ``python -m pantheon.execution wrapper`` form only when the console script genuinely isn't
+    installed yet (a plain dev checkout run via ``PYTHONPATH`` — docs/PYTHON-PORT.md's own
+    disclosed package-layout caveat for this slice, see this module's own module docstring) —
+    a loud stderr warning every time that fallback fires, so this narrower posture is never
+    silent."""
+    candidate = os.path.join(os.path.dirname(sys.executable), _WRAPPER_SCRIPT_NAME)
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return f"{candidate} wrapper"
+    _note(
+        f"the '{_WRAPPER_SCRIPT_NAME}' console script is not installed (looked for {candidate}) "
+        "— falling back to 'python -m pantheon.execution wrapper', which does NOT close the "
+        "checkout-directory-shadowing vector a real `pip install`/`pip install -e .` of this "
+        "package closes. Run one of those to get the hardened path."
+    )
+    return f"{sys.executable} -m pantheon.execution wrapper"
 
 
 class GateError(Exception):
@@ -418,7 +444,7 @@ def _build_prompt(ctx: GateContext, agent: str, workdir: str) -> str:
     lines.append(f"- Diff range (read-only git refs, already fetched): {ctx.diff_range}")
     lines.append(f"- Base branch: {ctx.base_ref}")
 
-    note = execution.execution_context_note(ctx.execution_tier, _WRAPPER_INVOCATION)
+    note = execution.execution_context_note(ctx.execution_tier, _wrapper_invocation())
     if note:
         lines.append(note.rstrip("\n"))
 
@@ -709,7 +735,7 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
         if not execution.validate_execution(execution_tier):
             _die(f"unknown execution tier '{execution_tier}' (must be 'readonly' or 'trusted')")
 
-    allowed_tools = execution.allowed_tools_for(execution_tier, _WRAPPER_INVOCATION)
+    allowed_tools = execution.allowed_tools_for(execution_tier, _wrapper_invocation())
 
     # Docs-only detection.
     changed = _git(["diff", "--name-only", diff_range], cwd=repo_root).stdout

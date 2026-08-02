@@ -123,26 +123,39 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini", "cursor")
 # The fallback --allowedTools value this module computes when a caller doesn't supply one — the
 # Python-shaped equivalent of cli/providers/claude.sh's own fallback (`cd .../cli/lib && pwd`
 # relative to that script's own location), which exists so this lane still fails safe (readonly,
-# not open) when invoked directly, outside pantheon.cli. There's no standalone wrapper *script*
-# path to point at in this port (pantheon.execution.run_readonly_wrapper is a Python function, not
-# a file on disk) — this fallback instead points at that module's own CLI entry point
-# (`python -m pantheon.execution wrapper`), the same shape tests/test-git-readonly-wrapper.sh's
-# python mode already uses as its WRAPPER_CMD.
+# not open) when invoked directly, outside pantheon.cli.
 #
-# `-I` (isolated mode) mirrors pantheon.cli's own `_WRAPPER_INVOCATION` — see that module's
-# docstring for the full rationale (a Codex finding: a hostile checkout's own same-named
-# `pantheon/execution.py`, importable because a provider now runs with the checkout as its cwd,
-# would otherwise shadow the real installed module for the ONE allowed Bash prefix under the
-# readonly tier, defeating the read-only wrapper's own argv validation from inside the module
-# meant to enforce it). `-I` disables the cwd-prepend/PYTHONPATH/user-site lookup that makes the
-# shadow possible.
-_FALLBACK_WRAPPER_CMD = f"{sys.executable} -I -m pantheon.execution wrapper"
+# Resolves the INSTALLED `pantheon-git-readonly` console script's own absolute path (see
+# pyproject.toml's [project.scripts] entry) — mirrors pantheon.cli's own `_wrapper_invocation()`
+# exactly; see that function's docstring for the full three-round rationale (round 1: `python -m
+# pantheon.execution wrapper` is shadowable by a hostile checkout's own same-named file, because
+# a provider now runs with the checkout as its cwd and `-m` prepends cwd to sys.path; round 2:
+# `-I` closed that but broke `pip install --user`; round 3, this fix: a console script's own
+# `sys.path[0]` is its OWN install directory, never the caller's cwd, closing the shadow with no
+# `-I`-style collateral restriction).
+_WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 
 
 def default_allowed_tools() -> str:
     """The readonly-tier fallback ``--allowedTools`` value (see this module's own docstring for
-    why this exists and what it points at)."""
-    return f"Read,Grep,Glob,Bash({_FALLBACK_WRAPPER_CMD} *)"
+    why this exists) — resolves :data:`_WRAPPER_SCRIPT_NAME`'s absolute path from
+    ``sys.executable``'s own directory (never an ambient ``PATH`` lookup), falling back to the
+    OLDER, unprotected ``python -m pantheon.execution wrapper`` form only when the console
+    script genuinely isn't installed yet (a plain dev checkout — docs/PYTHON-PORT.md's own
+    disclosed package-layout caveat for this slice), with a loud stderr warning every time that
+    fallback fires."""
+    candidate = os.path.join(os.path.dirname(sys.executable), _WRAPPER_SCRIPT_NAME)
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return f"Read,Grep,Glob,Bash({candidate} wrapper *)"
+    print(
+        f"pantheon: warning: the '{_WRAPPER_SCRIPT_NAME}' console script is not installed "
+        f"(looked for {candidate}) — falling back to 'python -m pantheon.execution wrapper', "
+        "which does NOT close the checkout-directory-shadowing vector a real `pip install`/"
+        "`pip install -e .` of this package closes. Run one of those to get the hardened path.",
+        file=sys.stderr,
+    )
+    fallback_cmd = f"{sys.executable} -m pantheon.execution wrapper"
+    return f"Read,Grep,Glob,Bash({fallback_cmd} *)"
 
 
 def _read_prompt(prompt_file: str) -> str:
