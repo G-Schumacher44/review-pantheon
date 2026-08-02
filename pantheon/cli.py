@@ -91,28 +91,30 @@ _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 
 
 def _wrapper_invocation() -> str:
-    """Resolves :data:`_WRAPPER_SCRIPT_NAME`'s absolute path, derived from ``sys.executable``'s
-    own directory (the same ``bin/`` a venv's/install's ``python``/``pip``/``pantheon`` all live
-    in) — never an ambient ``PATH`` lookup, matching this port's own established resolution
-    discipline elsewhere (``_TRUSTED_BIN_DIRS``, ``pantheon.providers``' ``_resolve_cli``).
-    ``pantheon.execution.main()``'s own CLI contract (unchanged since Slice 3 — still what
-    ``tests/test-git-readonly-wrapper.sh``'s python mode drives directly) dispatches on a
-    literal ``wrapper`` first argument, so the returned string always ends in `` wrapper`` —
+    """Resolves :data:`_WRAPPER_SCRIPT_NAME`'s absolute path via
+    ``pantheon.execution.resolve_console_script`` (checks both a venv's/system install's own
+    scripts directory AND ``pip install --user``'s separate per-user one — see that function's
+    own docstring) — never an ambient ``PATH`` lookup, matching this port's own established
+    resolution discipline elsewhere (``_TRUSTED_BIN_DIRS``, ``pantheon.providers``'
+    ``_resolve_cli``). ``pantheon.execution.main()``'s own CLI contract (unchanged since Slice 3
+    — still what ``tests/test-git-readonly-wrapper.sh``'s python mode drives directly) dispatches
+    on a literal ``wrapper`` first argument, so the returned string always ends in `` wrapper`` —
     the console script IS that module's ``main()``, just resolved by installed-script path
     instead of ``python -m``. Falls back to the OLDER, unprotected
     ``python -m pantheon.execution wrapper`` form only when the console script genuinely isn't
-    installed yet (a plain dev checkout run via ``PYTHONPATH`` — docs/PYTHON-PORT.md's own
-    disclosed package-layout caveat for this slice, see this module's own module docstring) —
-    a loud stderr warning every time that fallback fires, so this narrower posture is never
-    silent."""
-    candidate = os.path.join(os.path.dirname(sys.executable), _WRAPPER_SCRIPT_NAME)
-    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+    installed anywhere ``resolve_console_script`` checks (a plain dev checkout run via
+    ``PYTHONPATH`` — docs/PYTHON-PORT.md's own disclosed package-layout caveat for this slice,
+    see this module's own module docstring) — a loud stderr warning every time that fallback
+    fires, so this narrower posture is never silent."""
+    candidate = execution.resolve_console_script(_WRAPPER_SCRIPT_NAME)
+    if candidate is not None:
         return f"{candidate} wrapper"
     _note(
-        f"the '{_WRAPPER_SCRIPT_NAME}' console script is not installed (looked for {candidate}) "
-        "— falling back to 'python -m pantheon.execution wrapper', which does NOT close the "
-        "checkout-directory-shadowing vector a real `pip install`/`pip install -e .` of this "
-        "package closes. Run one of those to get the hardened path."
+        f"the '{_WRAPPER_SCRIPT_NAME}' console script is not installed (checked alongside "
+        "sys.executable and the per-user scripts directory) — falling back to 'python -m "
+        "pantheon.execution wrapper', which does NOT close the checkout-directory-shadowing "
+        "vector a real `pip install`/`pip install -e .` of this package closes. Run one of "
+        "those to get the hardened path."
     )
     return f"{sys.executable} -m pantheon.execution wrapper"
 
@@ -235,9 +237,23 @@ def _cli_env() -> dict[str, str]:
 
 
 def _run(argv: list[str], cwd: str | None = None, check: bool = False) -> subprocess.CompletedProcess:
+    """Runs a trusted-resolved ``git``/``gh`` invocation. Deliberately BINARY-mode (no
+    ``text=True``), decoded defensively with ``errors="replace"`` afterward — a Codex review
+    finding on this port's own PR: strict text-mode decoding raises an uncaught
+    ``UnicodeDecodeError`` on any non-UTF-8 byte in ``git``/``gh``'s own output (a non-ASCII PR
+    title under a non-UTF-8 parent locale, a stray byte from git), which ``main()``'s
+    ``GateError``-only catch doesn't handle — the gate would exit with a bare traceback instead
+    of the documented fail-closed UNVERIFIED path. Mirrors ``pantheon.providers``'s own ``_run()``
+    fix for the identical class of input. Returns a NEW ``CompletedProcess`` with decoded
+    ``str`` ``stdout``/``stderr`` (not a mutated bytes-typed one — keeps the return type honest
+    for every caller that already expects ``str``, e.g. ``.stdout.strip()``)."""
     trusted_argv = [_trusted_executable(argv[0]), *argv[1:]]
-    return subprocess.run(
-        trusted_argv, cwd=cwd, env=_cli_env(), shell=False, capture_output=True, text=True, check=check
+    result = subprocess.run(trusted_argv, cwd=cwd, env=_cli_env(), shell=False, capture_output=True, check=check)
+    return subprocess.CompletedProcess(
+        args=result.args,
+        returncode=result.returncode,
+        stdout=(result.stdout or b"").decode("utf-8", errors="replace"),
+        stderr=(result.stderr or b"").decode("utf-8", errors="replace"),
     )
 
 

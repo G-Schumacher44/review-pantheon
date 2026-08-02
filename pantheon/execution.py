@@ -112,6 +112,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import sysconfig
 from collections.abc import Sequence
 
 __all__ = [
@@ -124,6 +125,7 @@ __all__ = [
     "allowed_tools_for",
     "validate_execution",
     "execution_context_note",
+    "resolve_console_script",
     "main",
 ]
 
@@ -405,6 +407,43 @@ def execution_context_note(tier: str, wrapper_path: str) -> str:
         "Bash\n"
         "  invocation available. No other command execution is possible this run.\n"
     )
+
+
+def resolve_console_script(name: str) -> str | None:
+    """Resolves an installed console script's own absolute path — checked across every
+    directory ``pip`` could plausibly have installed it into, never an ambient ``PATH`` lookup
+    (the same resolution discipline :data:`TRUSTED_GIT_DIRS`/:func:`_git_executable` already use
+    for ``git`` itself). Shared by ``pantheon.cli``'s ``_wrapper_invocation()`` and
+    ``pantheon.providers``' ``default_allowed_tools()`` — both resolve the readonly execution
+    tier's own ``pantheon-git-readonly`` console script this way (see
+    ``pyproject.toml``'s ``[project.scripts]`` entry).
+
+    Checks two locations, in order:
+
+    1. ``os.path.dirname(sys.executable)`` — where a venv's or an ordinary system-wide
+       install's console scripts land, alongside ``python``/``pip``/``pantheon`` themselves.
+    2. The per-user scripts directory (``sysconfig.get_path("scripts", scheme=f"{os.name}
+       _user")``) — a Codex review finding on this port's own PR: ``pip install --user``
+       leaves ``sys.executable`` pointing at the SYSTEM interpreter (e.g. ``/usr/bin/python3``)
+       while installing console scripts into a completely separate per-user directory (e.g.
+       ``~/.local/bin`` on Linux, ``~/Library/Python/<ver>/bin`` on macOS) — checking only
+       location 1 silently misses every ``--user`` install.
+
+    Returns ``None`` (never raises) when not found in either, so a caller can decide its own
+    fallback rather than this function guessing one."""
+    candidate_dirs = [os.path.dirname(sys.executable)]
+    try:
+        user_scripts_dir = sysconfig.get_path("scripts", scheme=f"{os.name}_user")
+    except (KeyError, ValueError):  # pragma: no cover — this scheme always exists on CPython
+        user_scripts_dir = None
+    if user_scripts_dir and user_scripts_dir not in candidate_dirs:
+        candidate_dirs.append(user_scripts_dir)
+
+    for directory in candidate_dirs:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------------------------

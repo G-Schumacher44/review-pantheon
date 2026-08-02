@@ -85,6 +85,8 @@ import signal
 import subprocess
 import sys
 
+from pantheon import execution
+
 __all__ = [
     "ProviderError",
     "KNOWN_PROVIDERS",
@@ -138,20 +140,22 @@ _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 
 def default_allowed_tools() -> str:
     """The readonly-tier fallback ``--allowedTools`` value (see this module's own docstring for
-    why this exists) — resolves :data:`_WRAPPER_SCRIPT_NAME`'s absolute path from
-    ``sys.executable``'s own directory (never an ambient ``PATH`` lookup), falling back to the
-    OLDER, unprotected ``python -m pantheon.execution wrapper`` form only when the console
-    script genuinely isn't installed yet (a plain dev checkout — docs/PYTHON-PORT.md's own
-    disclosed package-layout caveat for this slice), with a loud stderr warning every time that
-    fallback fires."""
-    candidate = os.path.join(os.path.dirname(sys.executable), _WRAPPER_SCRIPT_NAME)
-    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+    why this exists) — resolves :data:`_WRAPPER_SCRIPT_NAME`'s absolute path via
+    ``pantheon.execution.resolve_console_script`` (checks both a venv's/system install's own
+    scripts directory AND ``pip install --user``'s separate per-user one — never an ambient
+    ``PATH`` lookup), falling back to the OLDER, unprotected ``python -m pantheon.execution
+    wrapper`` form only when the console script genuinely isn't installed anywhere that function
+    checks (a plain dev checkout — docs/PYTHON-PORT.md's own disclosed package-layout caveat for
+    this slice), with a loud stderr warning every time that fallback fires."""
+    candidate = execution.resolve_console_script(_WRAPPER_SCRIPT_NAME)
+    if candidate is not None:
         return f"Read,Grep,Glob,Bash({candidate} wrapper *)"
     print(
         f"pantheon: warning: the '{_WRAPPER_SCRIPT_NAME}' console script is not installed "
-        f"(looked for {candidate}) — falling back to 'python -m pantheon.execution wrapper', "
-        "which does NOT close the checkout-directory-shadowing vector a real `pip install`/"
-        "`pip install -e .` of this package closes. Run one of those to get the hardened path.",
+        "(checked alongside sys.executable and the per-user scripts directory) — falling back "
+        "to 'python -m pantheon.execution wrapper', which does NOT close the "
+        "checkout-directory-shadowing vector a real `pip install`/`pip install -e .` of this "
+        "package closes. Run one of those to get the hardened path.",
         file=sys.stderr,
     )
     fallback_cmd = f"{sys.executable} -m pantheon.execution wrapper"
