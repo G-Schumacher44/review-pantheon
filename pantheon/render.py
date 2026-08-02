@@ -41,10 +41,9 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-AGENT_ORDER_ENV_SUFFIXES = ("_COLOR", "_VERDICT", "_TOP", "_FINDINGS", "_INVARIANT", "_REASON")
-
 _SEVERITY_RANK = {"blocker": 0, "should_fix": 1, "note": 2}
 _LINE_RE = re.compile(r"^[0-9]+$")
+_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
 @dataclass
@@ -65,6 +64,24 @@ class AgentRenderData:
 # ---------------------------------------------------------------------------
 
 
+def _jq_raw(value: Any) -> str:
+    """Mimics jq -r's raw-output stringification of a JSON scalar that reached a display field
+    after passing :func:`_or_default` (i.e. not JSON null/false) — jq prints a string unquoted
+    and a JSON boolean as its own lowercase literal spelling (``true``/``false``), NOT Python's
+    Title-case ``str(bool)`` (``True``/``False``). Every display field this module reads from an
+    agent's JSON (severity, file, issue, scenario, the top-finding fallback text) routes through
+    this before :func:`sanitize_inline` normalizes it further, so a malformed agent object that
+    smuggles a JSON boolean in where a string is expected renders the same text bash's
+    ``jq -r '.field // default'`` would, not Python's own ``str()`` of that type. (Caught live —
+    the repo's own self-hosted gate on this PR flagged ``unrecognized-severity(True)`` vs bash's
+    ``unrecognized-severity(true)`` for exactly this case.)"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return json.dumps(value)
+
+
 def sanitize_inline(s: Any) -> str:
     """Markdown/HTML-hostile-content-safe + single-line, for ANY model-controlled string this
     renderer interpolates — table cells, prose, AND values placed inside a backtick code span.
@@ -72,6 +89,8 @@ def sanitize_inline(s: Any) -> str:
     operations (order matters — see that function's header comment for why each step is where it
     is):
 
+      - Stringified via :func:`_jq_raw` first (jq-compatible scalar formatting — see that
+        function's docstring), not a bare ``str()``.
       - Newlines collapsed to spaces (so a multi-line value can't fracture a table row/list item).
       - Pipes escaped (``\\|``), so a stray ``|`` can't fracture a markdown table row.
       - Backticks replaced with a straight quote — there is no backslash-escape for a backtick
@@ -81,7 +100,7 @@ def sanitize_inline(s: Any) -> str:
       - ``@`` replaced with the fullwidth lookalike ＠ (U+FF20), so a model's text can't page an
         arbitrary user/team via a real GitHub notification.
     """
-    s = str(s)
+    s = _jq_raw(s)
     s = s.replace("\n", " ")
     s = s.replace("|", "\\|")
     s = s.replace("`", "'")
@@ -134,20 +153,43 @@ def _safe_findings(verdict_obj: Any) -> list[dict]:
     return [f for f in findings if isinstance(f, dict)]
 
 
+def _severity_rank(severity: Any) -> int:
+    """The sort key `_sorted_findings` ranks on. Only a STRING severity can ever match
+    `_SEVERITY_RANK`'s keys, but severity is unvalidated model output at this layer (the
+    type-strict check lives upstream in ``pantheon.verdict`` and only gates the overall verdict
+    COLOR — a finding that fails it still reaches this renderer via the raw findings array, same
+    fail-open-to-display/fail-closed-to-decision split DESIGN.md's "Validation surface" section
+    describes). A non-string severity that also happens to be UNHASHABLE (a JSON array or
+    object) would crash a bare ``dict.get(severity, 3)`` with ``TypeError: unhashable type``,
+    aborting the entire render — not just this one finding's badge — before the fail-closed
+    comment could even be produced. Guard the type first so any non-string severity (hashable or
+    not) degrades to the same fallback rank 3 a genuinely out-of-vocabulary STRING severity
+    already gets, mirroring jq's own behavior: jq's ``.severity == "blocker"`` comparison is
+    type-safe across JSON value kinds (an array/object never equals a string, no jq error), so
+    the bash renderer already falls through to its `else 3` branch for the same malformed input
+    without crashing. (Caught live — the repo's own self-hosted gate on this PR flagged this as
+    a P1: a malformed ``severity`` array/object crashes the Python renderer entirely, where the
+    bash renderer degrades gracefully.)"""
+    if isinstance(severity, str):
+        return _SEVERITY_RANK.get(severity, 3)
+    return 3
+
+
 def _sorted_findings(verdict_obj: Any) -> list[dict]:
     """Findings sorted blocker -> should_fix -> note -> other (a stable sort, matching jq's
     ``sort_by``); mirrors ``_pantheon_sorted_findings``."""
-    return sorted(_safe_findings(verdict_obj), key=lambda f: _SEVERITY_RANK.get(f.get("severity"), 3))
+    return sorted(_safe_findings(verdict_obj), key=lambda f: _severity_rank(f.get("severity")))
 
 
 def _top_finding_text(verdict_obj: Any) -> str:
     """Highest-severity finding's issue text, or "" if there are none — mirrors
-    ``_pantheon_top_finding_text``."""
+    ``_pantheon_top_finding_text`` (including its ``.issue // ""`` fallback: a JSON ``null`` OR
+    ``false`` issue value degrades to "", matching jq's ``//`` operator, not just a missing
+    key)."""
     sorted_findings = _sorted_findings(verdict_obj)
     if not sorted_findings:
         return ""
-    issue = sorted_findings[0].get("issue")
-    return issue if isinstance(issue, str) else ("" if issue is None else str(issue))
+    return _jq_raw(_or_default(sorted_findings[0].get("issue"), ""))
 
 
 def _table_top_cell(verdict: str, top_text: str, verdict_obj: Any) -> str:
@@ -213,6 +255,28 @@ def _or_default(value: Any, default: str) -> Any:
     if value is None or value is False:
         return default
     return value
+
+
+def _escape_lone_surrogates(s: str) -> str:
+    """A Python ``str`` can hold a lone (unpaired) surrogate code point (U+D800-U+DFFF) —
+    reachable here via a JSON ``\\ud800``-style escape in an agent's raw output, which
+    ``json.loads`` accepts without complaint even though it isn't a valid standalone Unicode
+    scalar value. There is no UTF-8 byte sequence for an unpaired surrogate, so the moment ANY
+    caller encodes this module's output to UTF-8 (stdout, an HTTP body, a file), a lone
+    surrogate raises ``UnicodeEncodeError`` and aborts rendering entirely — human-readable
+    section included, not just the machine tail's raw JSON dump (where ``ensure_ascii=False``
+    first lets one through unescaped). Re-escaping it back to its literal ``\\uXXXX`` text form
+    keeps it visible (never silently dropped) and always safely encodable, without touching any
+    other code point: ordinary non-ASCII content — what ``ensure_ascii=False`` exists to keep
+    raw, for byte-parity with jq's own unescaped UTF-8 output — is left untouched, since Python
+    3's ``str`` never represents a legitimate astral character as a UTF-16-style surrogate pair
+    the way this bug's input does; any code point in this range is, by construction, already
+    unpaired. Applied once, to this function's whole rendered output, rather than only the
+    machine tail — a hostile/malformed field anywhere (severity, file, issue, scenario, an
+    unvalidated extra key that only reaches the raw JSON dump) can carry one. (Caught live — the
+    repo's own self-hosted gate on this PR flagged this as a P2: an escaped lone surrogate in an
+    otherwise-unused JSON field crashed the CLI while writing the comment.)"""
+    return _LONE_SURROGATE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", s)
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +397,7 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
         "never as a pass._"
     )
 
-    return "\n".join(lines) + "\n"
+    return _escape_lone_surrogates("\n".join(lines) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +486,11 @@ def main(argv: list[str] | None = None) -> int:
             print("usage: python3 -m pantheon.render truncate <text> [max_len]", file=sys.stderr)
             return 2
         text = rest[0]
-        max_len = int(rest[1]) if len(rest) == 2 else 90
+        try:
+            max_len = int(rest[1]) if len(rest) == 2 else 90
+        except ValueError:
+            print("usage: python3 -m pantheon.render truncate <text> [max_len] (max_len must be an integer)", file=sys.stderr)
+            return 2
         print(truncate(text, max_len))
         return 0
     if subcommand == "overall":
