@@ -16,7 +16,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pantheon"
+name = "review-pantheon"  # PyPI dist name ("pantheon" is taken upstream); import package + console command stay `pantheon`
 version = "0.0.0.dev0"
 description = "review-pantheon's Python CLI (v2 port, pre-release skeleton) — see docs/PYTHON-PORT.md"
 readme = "README.md"
