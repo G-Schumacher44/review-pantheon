@@ -438,6 +438,29 @@ ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
 assert_byte_identical "underflow-and-precision-loss-preserved-exactly-in-machine-tail"
 
+# Divergence 8 (pantheon.jqjson.dumps's _RawBigNumber placeholder-splice mechanism): a genuine
+# string field equal to the placeholder's own text pattern must NOT be corrupted into the
+# preserved overflow number — the earlier, deterministic placeholder ("jqjson-raw-0") was
+# guessable from this repo's own public source; a payload deliberately containing that literal
+# text as genuine model output (here: an .issue field) must survive untouched.
+reset_agent_env
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP=x
+ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"note","file":"a","line":1,"issue":"jqjson-raw-0","scenario":"y"}],"summary":"s","extra":1e400}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+assert_byte_identical "raw-number-placeholder-text-as-genuine-content-not-corrupted"
+
+# Divergence 9 (pantheon.jqjson.subst): bash's $(...) command substitution drops ALL NUL bytes
+# from the captured text -- not just trailing newlines -- and does so BEFORE bash's own variable
+# holds the value, i.e. before any comparison against it. A severity of "blocker\x00" must
+# therefore still match the "blocker" case (bash already stripped the NUL by comparison time),
+# not fall through to the unrecognized-severity fallback the way a NUL left unstripped until
+# final display would.
+reset_agent_env
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP=x
+ARTEMIS_FINDINGS="$(python3 -c 'import json; print(json.dumps({"agent":"artemis","verdict":"FIX_FIRST","has_blocker":False,"findings":[{"severity":"blocker\x00","file":"a.py","line":1,"issue":"x","scenario":"y"}],"summary":"s"}))')"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+assert_byte_identical "nul-in-severity-stripped-before-comparison-not-just-display"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

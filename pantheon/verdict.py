@@ -42,6 +42,7 @@ per docs/PYTHON-PORT.md section 4, is tests/test-verdict-decision-python.sh, whi
 module the same way the original suite drives action/decide_verdict.py: as a subprocess, via
 ``python3 -m pantheon.verdict <expected-agent> <raw-output-file>``.
 """
+
 from __future__ import annotations
 
 import sys
@@ -114,8 +115,27 @@ def extract_last_json(raw: str) -> str:
 def top_finding_of(verdict_obj: dict) -> str:
     """Same fallback chain as cli/lib/verdict.sh's top_finding computation and
     action/decide_verdict.py's top_finding_of: first finding's "severity: issue (file:line)", or
-    "no findings" if there are none or the shape is malformed enough that the fields can't be
-    read.
+    "no findings" if there are none, or if the shape is malformed enough that the first entry
+    isn't even an object (verified live against real jq: a non-object first element makes jq's
+    own ``\\($f.severity)``-style interpolation error out entirely, which bash's
+    ``top_finding="$(jq ... 2>/dev/null)"``/``[[ -n "$top_finding" ]] || top_finding="no findings"``
+    fallback then coerces to the same "no findings" text this function returns for that case).
+
+    A MISSING FIELD on an otherwise-present finding object is a different case from "no findings"
+    at all, though — issue #19's "render missing top-finding fields as jq nulls" item, closed
+    here. jq's own ``"\\($f.severity): \\($f.issue) (\\($f.file):\\($f.line))"`` string
+    interpolation renders a missing key as the literal text ``null`` (verified live:
+    ``{"findings":[{"severity":"blocker","issue":"x"}]}`` — no ``file``/``line`` keys at all —
+    decides ``"blocker: x (null:null)"`` in real bash, never "no findings"). An earlier version of
+    this function used direct dict-subscript access (``f['severity']``), which raises
+    ``KeyError`` on a missing key and — via a catch-all ``except (KeyError, TypeError)`` — folded
+    that into the SAME "no findings" fallback a genuinely empty/malformed findings list gets,
+    silently dropping the finding's own severity/issue/file/line data that WAS present. Fixed by
+    reading every field via ``.get(...)`` (defaulting to ``None`` on a missing key, exactly what
+    jq's own ``.severity``/``.issue``/``.file``/``.line`` reads on an absent key) and letting
+    ``pantheon.jqjson.jq_text`` render that ``None`` as the text "null" — jq's own missing-key
+    behavior, not a Python-specific short-circuit. Only a non-dict first finding (jq's own
+    genuine error case above) still falls back to "no findings".
 
     Every field is stringified via ``pantheon.jqjson.jq_text`` — jq -r's raw-output form (a
     boolean prints its lowercase spelling, a JSON null prints the literal text "null", the
@@ -135,13 +155,12 @@ def top_finding_of(verdict_obj: dict) -> str:
     if not findings:
         return "no findings"
     f = findings[0]
-    try:
-        composed = (
-            f"{jqjson.jq_text(f['severity'])}: {jqjson.jq_text(f['issue'])} "
-            f"({jqjson.jq_text(f['file'])}:{jqjson.jq_text(f['line'])})"
-        )
-    except (KeyError, TypeError):
+    if not isinstance(f, dict):
         return "no findings"
+    composed = (
+        f"{jqjson.jq_text(f.get('severity'))}: {jqjson.jq_text(f.get('issue'))} "
+        f"({jqjson.jq_text(f.get('file'))}:{jqjson.jq_text(f.get('line'))})"
+    )
     return jqjson.subst(composed)
 
 
@@ -151,10 +170,7 @@ def blocker_present(verdict_obj: dict) -> bool:
     cli/lib/verdict.sh's equivalent jq expression exactly."""
     if verdict_obj.get("has_blocker") is True:
         return True
-    for f in verdict_obj.get("findings") or []:
-        if isinstance(f, dict) and f.get("severity") == "blocker":
-            return True
-    return False
+    return any(isinstance(f, dict) and f.get("severity") == "blocker" for f in verdict_obj.get("findings") or [])
 
 
 def type_strict_ok(verdict_obj: dict) -> bool:
@@ -242,8 +258,18 @@ def decide(expected_agent: str, raw: str) -> dict:
             "verdict_json": verdict_obj,
         }
 
-    agent_field = verdict_obj.get("agent")
-    verdict = verdict_obj.get("verdict")
+    # Both routed through jq_text (jq -r's raw-output stringification — `.agent` isn't
+    # type-strict-validated above, so it could be any JSON type) then subst (bash's $(...)
+    # trailing-newline-and-NUL strip) BEFORE the comparisons below — mirroring bash's own
+    # `agent_field="$(jq -r '.agent' <<<"$verdict_json")"` / `verdict="$(jq -r '.verdict'
+    # <<<"$verdict_json")"` variable assignments exactly: bash's case/equality checks run AFTER
+    # that $(...) capture already happened, not on the raw field text. Caught live on this PR: a
+    # verdict object with `"agent":"artemis\n"` decided GREEN in bash (the trailing newline
+    # already stripped by the time bash's `[[ "$agent_field" != "$expected_agent" ]]` runs) but
+    # UNVERIFIED here, comparing the raw un-stripped string directly — a genuine decision-color
+    # divergence, not just a display-text one.
+    agent_field = jqjson.subst(jqjson.jq_text(verdict_obj.get("agent")))
+    verdict = jqjson.subst(jqjson.jq_text(verdict_obj.get("verdict")))
     top = top_finding_of(verdict_obj)
 
     reason = ""
@@ -253,10 +279,7 @@ def decide(expected_agent: str, raw: str) -> dict:
     else:
         color = VOCAB.get(agent_field, {}).get(verdict, "unverified")
         if color == "unverified":
-            reason = (
-                f"verdict '{verdict}' from agent field '{agent_field}' is outside the allowed "
-                "vocabulary"
-            )
+            reason = f"verdict '{verdict}' from agent field '{agent_field}' is outside the allowed vocabulary"
 
     invariant_fired = False
     if blocker_present(verdict_obj) and color != "red":
@@ -294,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
 
     expected_agent, raw_file = argv
     try:
-        with open(raw_file, "r", errors="replace") as fh:
+        with open(raw_file, errors="replace") as fh:
             raw = fh.read()
     except OSError as e:
         decision = {
@@ -316,8 +339,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if decision["color"] in ("red", "unverified"):
         print(
-            f"::error::{expected_agent} verdict is {decision['color']} "
-            f"({decision['verdict']}) — {decision['reason']}",
+            f"::error::{expected_agent} verdict is {decision['color']} ({decision['verdict']}) — {decision['reason']}",
             file=sys.stderr,
         )
         return 1

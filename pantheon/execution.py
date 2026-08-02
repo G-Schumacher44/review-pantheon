@@ -112,7 +112,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 __all__ = [
     "WrapperRefused",
@@ -124,6 +124,7 @@ __all__ = [
     "allowed_tools_for",
     "validate_execution",
     "execution_context_note",
+    "resolve_console_script",
     "main",
 ]
 
@@ -152,13 +153,20 @@ READONLY_SUBCOMMANDS: tuple[str, ...] = ("diff", "show", "log", "status")
 # breaks diff entirely rather than disabling it. --no-ext-diff (forced in build_readonly_argv())
 # already fully covers that config key on its own, so no `-c` override for it is used here either.
 GLOBAL_OVERRIDES: tuple[str, ...] = (
-    "-c", "core.fsmonitor=false",
-    "-c", "core.hooksPath=/dev/null",
-    "-c", "core.pager=cat",
-    "-c", "core.editor=true",
-    "-c", "log.showSignature=false",
-    "-c", "gc.auto=0",
-    "-c", "maintenance.auto=false",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "core.editor=true",
+    "-c",
+    "log.showSignature=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "maintenance.auto=false",
 )
 
 # TRUSTED_GIT_DIRS — the ONLY directories `git` is ever resolved from. NOT the ambient PATH, in
@@ -179,7 +187,7 @@ TRUSTED_GIT_DIRS: tuple[str, ...] = (
     "/opt/homebrew/bin",
 )
 
-_git_executable_cache: Optional[str] = None
+_git_executable_cache: str | None = None
 
 
 def _forced_env() -> dict[str, str]:
@@ -189,7 +197,17 @@ def _forced_env() -> dict[str, str]:
     TRUSTED_GIT_DIRS (never the ambient PATH) so a child process git itself spawns (there are
     none on the readonly allowlist today, but this is the same "never inherit, always construct"
     posture as every other key here) inherits nothing attacker-reachable either.
-    """
+
+    Explicitly force-clears the whole Python-interpreter-redirection env family
+    (``PYTHONUSERBASE``/``PYTHONPATH``/``PYTHONHOME``/``PYTHONSTARTUP``, plus
+    ``PYTHONNOUSERSITE=1`` set defensively) — a Codex review finding on this port's own PR,
+    companion to :func:`resolve_console_script`'s own fix: even though this dict is already
+    constructed fresh (never an ``os.environ`` copy, so these keys are already ABSENT rather
+    than forwarded), any downstream Python process this git invocation's own children might
+    spawn should never be able to fall back to inheriting one of these from further up an
+    ambient parent chain either. Absent-by-omission and explicitly-cleared read the same to a
+    child that just reads its own environ, but this way the guarantee doesn't depend on every
+    future maintainer remembering to keep these off the allowlist."""
     env: dict[str, str] = {}
     env["PATH"] = os.pathsep.join(TRUSTED_GIT_DIRS)
     home = os.environ.get("HOME")
@@ -201,6 +219,11 @@ def _forced_env() -> dict[str, str]:
     env["GIT_SEQUENCE_EDITOR"] = "true"
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["GIT_NO_LAZY_FETCH"] = "1"
+    env["PYTHONUSERBASE"] = ""
+    env["PYTHONPATH"] = ""
+    env["PYTHONHOME"] = ""
+    env["PYTHONSTARTUP"] = ""
+    env["PYTHONNOUSERSITE"] = "1"
     return env
 
 
@@ -231,8 +254,8 @@ def _git_executable() -> str:
 
 def run_git(
     args: Sequence[str],
-    cwd: Optional[str] = None,
-    timeout: Optional[float] = None,
+    cwd: str | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Low-level, TRUSTED git invocation core: constructs the clean env (_forced_env()) and
     prepends GLOBAL_OVERRIDES to every call. Shared by the persona-facing
@@ -254,7 +277,7 @@ def run_git(
     )
 
 
-def _verify_commit(side: str, cwd: Optional[str]) -> bool:
+def _verify_commit(side: str, cwd: str | None) -> bool:
     # Belt-and-braces, same as the bash original: a side beginning with '-' can never be a legal
     # ref name, so refuse it outright rather than ever handing an attacker-controlled,
     # dash-prefixed string to `git rev-parse` as an argument.
@@ -267,7 +290,7 @@ def _verify_commit(side: str, cwd: Optional[str]) -> bool:
     return result.returncode == 0
 
 
-def validate_diff_range(args: Sequence[str], cwd: Optional[str] = None) -> str:
+def validate_diff_range(args: Sequence[str], cwd: str | None = None) -> str:
     """Structural range verification for ``diff``'s one positional argument — mirrors
     cli/lib/pantheon-git-readonly.sh's diff-range block line for line. Returns the validated
     range string on success; raises WrapperRefused otherwise. Never a substring/pattern check:
@@ -307,24 +330,19 @@ def validate_diff_range(args: Sequence[str], cwd: Optional[str] = None) -> str:
     return first
 
 
-def build_readonly_argv(argv: Sequence[str], cwd: Optional[str] = None) -> list[str]:
+def build_readonly_argv(argv: Sequence[str], cwd: str | None = None) -> list[str]:
     """Validates the caller's FULL argv (the model's own typed command) per the
     EXEC/WRITE-SURFACE MATRIX in this module's docstring, and returns the argv to hand to
     ``run_git()`` for the real invocation (excluding the git binary and GLOBAL_OVERRIDES — those
     are ``run_git``'s job). Raises WrapperRefused on any refusal.
     """
     if not argv:
-        raise WrapperRefused(
-            "no subcommand given (expected one of: diff, show, log, status)"
-        )
+        raise WrapperRefused("no subcommand given (expected one of: diff, show, log, status)")
 
     subcommand, *rest = argv
 
     if subcommand not in READONLY_SUBCOMMANDS:
-        raise WrapperRefused(
-            f"subcommand '{subcommand}' is not on the read-only allowlist "
-            "(diff, show, log, status)"
-        )
+        raise WrapperRefused(f"subcommand '{subcommand}' is not on the read-only allowlist (diff, show, log, status)")
 
     for arg in rest:
         if arg.startswith("-"):
@@ -346,9 +364,7 @@ def build_readonly_argv(argv: Sequence[str], cwd: Optional[str] = None) -> list[
     return [subcommand, *rest]
 
 
-def run_readonly_wrapper(
-    argv: Sequence[str], cwd: Optional[str] = None
-) -> subprocess.CompletedProcess:
+def run_readonly_wrapper(argv: Sequence[str], cwd: str | None = None) -> subprocess.CompletedProcess:
     """The persona-facing entry point — the Python equivalent of the bash script's whole body
     (``cli/lib/pantheon-git-readonly.sh "$@"``). Validates argv, then runs the real git call
     through the same hardened core basepin.py uses.
@@ -407,6 +423,37 @@ def execution_context_note(tier: str, wrapper_path: str) -> str:
     )
 
 
+def resolve_console_script(name: str) -> str | None:
+    """Resolves an installed console script's own absolute path — checked ONLY at
+    ``os.path.dirname(sys.executable)`` (where a venv's or an ordinary system-wide install's
+    console scripts land, alongside ``python``/``pip``/``pantheon`` themselves), the same
+    resolution discipline :data:`TRUSTED_GIT_DIRS`/:func:`_git_executable` already use for
+    ``git`` itself: a single location fixed by how THIS interpreter process was launched, never
+    anything derived from the live environment. Shared by ``pantheon.cli``'s
+    ``_wrapper_invocation()`` and ``pantheon.providers``' ``default_allowed_tools()`` — both
+    resolve the readonly execution tier's own ``pantheon-git-readonly`` console script this way
+    (see ``pyproject.toml``'s ``[project.scripts]`` entry).
+
+    Deliberately does NOT also consult ``sysconfig``/``site``'s per-user scripts scheme
+    (``sysconfig.get_path("scripts", scheme=f"{os.name}_user")``) — an EARLIER version of this
+    function did, to also support ``pip install --user``. A Codex review finding on this port's
+    own PR caught the resulting hole, reproduced live: that scheme resolves through
+    ``PYTHONUSERBASE`` (``site.USER_BASE``), an ordinary environment variable a hostile launcher
+    can point anywhere — including AT the checked-out PR's own tree
+    (``PYTHONUSERBASE=$PWD``). Pointed there, this function would have resolved a PR-committed
+    ``bin/pantheon-git-readonly`` as if it were the real, trusted-installed console script,
+    handing a hostile checkout code execution under the guise of the readonly wrapper. The
+    convenience of finding a ``--user`` install is not worth reopening that door: this now
+    matches :data:`TRUSTED_GIT_DIRS`'s own "no config knob to widen this list" posture exactly.
+
+    Returns ``None`` (never raises) when not found, so a caller can decide its own fallback
+    rather than this function guessing one."""
+    candidate = os.path.join(os.path.dirname(sys.executable), name)
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------------------------
 # CLI — exists purely to give tests/test-git-readonly-wrapper.sh (adapted per docs/PYTHON-PORT.md
 # §4) a black-box subprocess target with the exact same shape as the bash wrapper script:
@@ -428,7 +475,7 @@ def _wrapper_cli(argv: list[str]) -> int:
     return result.returncode
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "wrapper":
         return _wrapper_cli(argv[1:])

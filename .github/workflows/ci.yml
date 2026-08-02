@@ -109,6 +109,12 @@ jobs:
       - name: Run state-persistence fixture tests
         run: bash tests/test-state-persistence.sh
 
+      - name: Run state-persistence Python-port migration-exam fixture tests (pantheon.state)
+        run: bash tests/test-state-persistence-python.sh
+
+      - name: Run prompt-assembly Python-port migration-exam fixture tests (pantheon.cli)
+        run: bash tests/test-prompt-assembly-python.sh
+
       - name: Run git-readonly-wrapper fixture tests
         run: bash tests/test-git-readonly-wrapper.sh
 
@@ -131,6 +137,27 @@ jobs:
 
       - name: Run release.yml tag-validation gate fixture tests
         run: bash tests/test-release-tag-gates.sh
+
+      - name: Install the pantheon package + ruff/mypy/pytest (build-time-only tooling, docs/PYTHON-PORT.md)
+        run: pip install --quiet -e . ruff mypy pytest
+
+      - name: pantheon console script smoke check (--help exits 0)
+        run: pantheon --help
+
+      - name: review-gate compat-shim console script smoke check (--help exits 0)
+        run: review-gate --help
+
+      - name: ruff check pantheon/ (lint)
+        run: ruff check pantheon/ tests/test_*.py
+
+      - name: ruff format --check pantheon/ (format)
+        run: ruff format --check pantheon/ tests/test_*.py
+
+      - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config)
+        run: mypy
+
+      - name: pytest (jqjson matrix + pure-function seams, docs/PYTHON-PORT.md)
+        run: pytest -q
 
       - name: Assert CONTRIBUTING.md's canonical test table matches tests/*.sh exactly
         run: |

@@ -7,6 +7,7 @@ two real modules, ``pantheon.verdict`` and ``pantheon.render`` — see docs/PYTH
 stdlib-only at runtime, Python >=3.9 — docs/PYTHON-PORT.md section 1 is the hard constraint this
 whole package (every module under it) must keep, not a default to relax later.
 """
+
 from __future__ import annotations
 
 # Single source of truth for the version string is pyproject.toml's [project].version — read it
@@ -16,9 +17,13 @@ from __future__ import annotations
 # when the package isn't installed (e.g. running straight out of a working tree/worktree without
 # `pip install -e .` — that's the normal state of this repo mid-port, not an error condition).
 try:
-    from importlib.metadata import PackageNotFoundError, version as _version
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _version
 except ImportError:  # pragma: no cover — importlib.metadata is stdlib on Python >=3.8
-    from importlib_metadata import PackageNotFoundError, version as _version  # type: ignore[no-redef]
+    from importlib_metadata import (  # type: ignore[import-not-found,no-redef]
+        PackageNotFoundError,
+    )
+    from importlib_metadata import version as _version  # type: ignore[no-redef]
 
 try:
     __version__ = _version("review-pantheon")
