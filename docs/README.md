@@ -2,7 +2,8 @@
 
 | Doc | Description |
 |---|---|
-| [DESIGN.md](../DESIGN.md) | The contract. Hard rules, the verdict schema, security posture, configuration keys, and the lane-differences table every agent and provider lane is required to follow. |
+| [DESIGN.md](../DESIGN.md) | The contract. Hard rules, the verdict schema, security posture, configuration keys, and the surface-differences table every agent and provider lane is required to follow. |
+| [HARDENING-HISTORY.md](HARDENING-HISTORY.md) | The security wrapper's round-by-round hardening history (Round 1–8) — moved out of DESIGN.md's main flow to keep the contract itself readable. DESIGN.md's "Security posture" section is still canonical for current-state behavior; this is the changelog. |
 | [SETUP.md](SETUP.md) | Install (three ways), the zero-token `--dry-run` demo, first live run, and troubleshooting (draft skips, UNVERIFIED causes, timeouts, force-push fallback). |
 | [CLI.md](CLI.md) | The full `review-gate` CLI reference: every flag, every `gate.conf` key, the execution tiers, the follow-up-mode state model, exit codes, reading a verdict comment, and worked examples. |
 | [RELEASING.md](../RELEASING.md) | The operator's release ceremony — dev→main promotion, tagging, moving the `v1` major tag, and the release gate `.github/workflows/release.yml` runs before publishing. |

@@ -156,52 +156,44 @@ PR opened                                   spec / design doc / proposal
 
 ## How the gate stays honest
 
+**The short version:**
+
+- Reviewing untrusted PR content runs read-only by default (`execution=readonly`).
+- That tool-scoping covers three surfaces — the CLI, the published action, and the vendored
+  workflow — all of which invoke Claude; non-Claude provider lanes aren't covered.
+- Nothing here eliminates a fully-compromised agent handing back a deceptive-but-schema-valid
+  verdict — cross-review by a second agent is the real backstop, not a guarantee.
+
+The rest of this section is the technical detail behind those three claims; DESIGN.md's ["Security
+posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design) is the canonical,
+full version (the read-provenance matrix, the wrapper's exec-surface matrix, and the round-by-round
+hardening history).
+
 - **Fail-closed, always.** A missing, empty, or unparseable verdict is `UNVERIFIED` (orange), never
   green. The gate extracts the trailing JSON object from whatever the model printed, validates it
   against the schema and that agent's own verdict vocabulary with `jq`; any failure demotes the
   result — it never upgrades one.
-- **Read-only, by construction.** Every persona is bound to read-only git (`git show`, `git diff`,
-  `git log`, `git status`) and forbidden from mutating the tree, index, or HEAD. If a check needs a
-  tree change to answer, the agent stops and reports the gap instead.
-- **Injection-aware, honestly scoped — here's exactly what that means.** PR metadata (number,
-  branch names, head/base SHA) is attacker-controlled on forks; it's validated against strict
-  character-class regexes before any of it reaches a shell command or a prompt, and unsafe
-  metadata fails closed — the Action never interpolates untrusted PR content directly into a
-  `run:` script either, it goes through `env:` indirection. House-rules/spec context files are
-  read pinned to the PR's **base** commit, never its head, inside randomized per-render
-  data-block fences, so a file the PR itself edits can't forge a close and smuggle content past
-  the boundary — **in the CLI lane and the published action** (`action.yml`); the vendored Way-A
-  workflow (`action/review.yml`) does not base-pin and reads these files from the checked-out
-  working tree instead, so a fork PR editing them there does reach the prompt on that one lane —
-  see [Lane differences](#lane-differences). The **persona a reviewer runs as and the script that
-  grades its verdict** are a stricter case of the same rule — not judgment content, but gate
-  *behavior* — and are base-pinned or read from this repo's own trusted checkout on **every**
-  lane, including the vendored workflow: see DESIGN.md's "Security posture" for the class
-  statement and the full read-provenance matrix. Every persona is told explicitly that everything
-  it reads — diff, file contents, PR metadata, pinned file content — is data, not instructions,
-  and that a directive found inside it is itself a reportable finding, not something to follow.
-  The verdict JSON is schema- and type-validated, and the blocker invariant forces red whenever
-  any finding is a blocker, regardless of the stated verdict word. Tool execution defaults to a
-  read-only tier (`execution=readonly`) that routes Bash through an argv-validating wrapper
-  script, run under an explicit deny-by-default permission mode (`--permission-mode dontAsk`) —
-  not a bare command-prefix pattern (which can't distinguish a read-only git subcommand from the
-  same subcommand carrying a writing/execution-capable flag, or one activated by config/
-  attributes rather than a flag at all) and not an unset permission mode (which leaves an
-  unlisted tool call unanswerable, not denied, outside an interactive terminal). **Scoped claim,
-  not a blanket one:** under this default `readonly` tier, reviewing hostile fork content does
-  not hand an agent this particular arbitrary-command-execution primitive through the tool-call
-  surface — that guarantee applies to `readonly` specifically, is one layer among several (not a
-  claim that reviewing a fork PR is safe in general — see "Honest limit" below), and does not
-  apply once `execution=trusted` is chosen, which restores full Bash and exists ONLY for
-  own-repo/trusted-author use, never for reviewing a fork PR you don't control. Claude Code
-  itself still always allows a small, built-in, non-configurable set of bare read-only commands
-  (including plain `git diff`/`show`/`log`/`status`) regardless of tier — expected, since those
-  are genuinely read-only; the wrapper's job is everything beyond that. **Honest limit:** none of this
-  can eliminate a schema-valid, deceptive verdict from an agent that's been fully compromised by
-  injected content — these layers make that harder to pull off and more visible when attempted
-  (an injection attempt becomes its own flagged finding, not a silent verdict flip), and
-  cross-review by a second independent agent is the main mitigation against any one agent being
-  fooled, not a guarantee against it.
+- **Read-only, by construction — under `readonly`.** Every persona is bound to read-only git
+  (`git show`, `git diff`, `git log`, `git status`) and forbidden from mutating the tree, index, or
+  HEAD; the `readonly` execution tier (the default) makes this a tool boundary the wrapper
+  mechanically enforces, not just a persona instruction. **Under `execution=trusted` it's persona
+  instruction only** — the wrapper isn't in the loop at all, so nothing mechanical stops a
+  compromised or misbehaving agent from mutating the tree; `trusted` exists for
+  own-repo/trusted-author use only, never for reviewing a fork PR you don't control. If a check
+  needs a tree change to answer, the agent stops and reports the gap instead.
+- **Injection-aware, honestly scoped.** PR metadata and file contents are attacker-controlled on
+  forks and are always treated as data, never instructions — validated against strict
+  character-class regexes before reaching a shell command or prompt, with house-rules/spec files
+  and gate-*behavior* files (personas, the verdict decider) read from base-pinned or
+  trusted-checkout provenance rather than a fork's own edits (one documented exception: the
+  vendored workflow's rules/spec reads — see [Surface differences](#surface-differences)). The
+  default `readonly` tier further restricts Bash on the three Claude-invoking surfaces to an
+  argv-validating read-only git wrapper under a deny-by-default permission mode, so reviewing
+  hostile content doesn't hand an agent arbitrary command execution — a scoped guarantee, not a
+  blanket one; it doesn't extend to `execution=trusted` or to non-Claude provider lanes, and it
+  can't eliminate a schema-valid, deceptive verdict from a fully-compromised agent. Full detail:
+  DESIGN.md's ["Security posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design);
+  execution-tier scope notes: [SECURITY.md](SECURITY.md).
 - **No auto-merge, ever.** The gate posts one combined PR comment — headline signal, verdict table,
   folded findings when it isn't green. A human reads it and decides.
 - **One persona, one source.** `agents/<name>.md` is the only hand-maintained copy of each
@@ -281,7 +273,7 @@ review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"]
 
 Run it from inside the target repo. Requires `gh` and `jq`. Reads defaults from `gate.conf` at
 the target repo's root — copy `gate.conf.example` yourself; `install.sh` does not install it
-(`gate.conf` only matters to the CLI lane). `--provider` and `--agents` override the config for a
+(`gate.conf` only matters to the CLI surface). `--provider` and `--agents` override the config for a
 single run.
 
 <details>
@@ -299,21 +291,22 @@ single run.
 
 Re-running against a PR that's already been reviewed at its current head SHA is a no-op; new
 commits trigger a **follow-up pass** that reviews only what changed and tells the agent to read
-its own prior comment first. State lives in `.review-gate-state.json` at the target repo's root
-(git-ignored, bootstraps itself empty). Follow-up mode is CLI-only — see [Lane
-differences](#lane-differences) for why.
+its own prior comment first. State lives in `.review-gate-state.json` at the target repo's root,
+bootstraps itself empty — git-ignored only via the `install.sh` (Way A) path, see
+[CLI.md](docs/CLI.md#the-state--follow-up-model) for the CLI-only-install caveat. Follow-up mode
+is CLI-only — see [Surface differences](#surface-differences) for why.
 
 **Draft PRs:** the CLI exits 0 and posts nothing, and prints an unmistakable
 `DRAFT — not reviewed, nothing posted` line to stdout.
 
 </details>
 
-## Lane differences
+## Surface differences
 
 The CLI and the GitHub Action share personas and the verdict-decision rule, but they aren't the
 same tool — they differ in follow-up mode, configuration, provider choice, and draft handling.
-See `DESIGN.md`'s ["Lane differences"](DESIGN.md#lane-differences) section for the full table and
-rationale.
+See `DESIGN.md`'s ["Surface differences"](DESIGN.md#surface-differences) section for the full
+table and rationale.
 
 ## Works with Conductor
 

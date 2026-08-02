@@ -1,6 +1,6 @@
 # CLI guide — `review-gate`
 
-The CLI-lane reference: every flag, every `gate.conf` key, the execution tiers, the
+The CLI-surface reference: every flag, every `gate.conf` key, the execution tiers, the
 follow-up-mode state model, exit codes, and worked examples. For install steps and the
 zero-token first run, see [SETUP.md](SETUP.md). For the binding contract (verdict schema,
 security posture, the full read-provenance matrix), see [DESIGN.md](../DESIGN.md). Everything
@@ -20,7 +20,7 @@ review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"]
 | `--provider <lane>` | no | `gate.conf`'s `provider=`, else `claude` | Provider lane in `cli/providers/` (`claude`, `codex`, `gemini`, `cursor`). Unknown lane name fails fast. |
 | `--agents "a b c"` | no | `gate.conf`'s `agents=`, else `"artemis apollo"` | Space-separated agent list. Each name must be one of `artemis apollo diogenes plato socrates`; an empty resolved list is a hard error. |
 | `--execution <tier>` | no | `gate.conf`'s `execution=` (base-pinned — see below), else `readonly` | `readonly` restricts Bash to the read-only git wrapper; `trusted` restores full Bash. See [Execution tiers](#execution-tiers-readonly-vs-trusted). |
-| `--dry-run` | no | off | Builds prompts and prints the would-be comment; calls no provider, posts nothing, writes no state. |
+| `--dry-run` | no | off | Builds prompts and prints the would-be comment; calls no provider, posts nothing, records no `reviewed_sha` for the PR. Can still bootstrap an empty `.review-gate-state.json` — see [caveat below](#the-state--follow-up-model). |
 | `-h`, `--help` | no | — | Prints usage and exits 0. |
 
 An explicit `--execution` is resolved immediately, before any `gh`/network call — it's an
@@ -30,10 +30,10 @@ listed here doesn't exist; an unrecognized argument prints usage and exits nonze
 ## `gate.conf`
 
 Lives at the target repo's root, simple `key=value`, one per line, everything optional (falls
-back to the default shown). **CLI-lane only** — the published action and the vendored workflow
+back to the default shown). **CLI surface only** — the published action and the vendored workflow
 don't read it at all; `action.yml`'s equivalents are explicit `with:` inputs, and
-`action/review.yml` has no config surface (see DESIGN.md's ["Lane
-differences"](../DESIGN.md#lane-differences)). `install.sh` does not install `gate.conf` for
+`action/review.yml` has no config surface (see DESIGN.md's ["Surface
+differences"](../DESIGN.md#surface-differences)). `install.sh` does not install `gate.conf` for
 you — copy [`gate.conf.example`](../gate.conf.example) yourself.
 
 | Key | Default | Notes |
@@ -52,7 +52,7 @@ tree. `execution=` is read from the PR's **base commit** (`git show $BASE_SHA:ga
 instead — never the working tree — because a maintainer who runs `gh pr checkout <n>` before
 invoking `review-gate` (a common local-review habit) would otherwise have a hostile PR's own
 `execution=trusted` silently restore full Bash before the gate inspects anything. This is the
-CLI-lane instance of the same base-pinned-provenance rule DESIGN.md's security posture applies to
+CLI-surface instance of the same base-pinned-provenance rule DESIGN.md's security posture applies to
 personas, the verdict decider, and the read-only wrapper itself — see DESIGN.md's ["Security
 posture"](../DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design) for the full
 read-provenance matrix.
@@ -119,7 +119,12 @@ DESIGN.md's "Security posture" section, "Tiered tool execution."
 **When to flip `trusted`.** `execution=trusted` (or `--execution trusted`) restores full Bash.
 Reserve it for reviewing your own repo's own PRs from your own checkout — this repo's own CI
 self-reviews its PRs exactly that way. Never point `trusted` at a fork PR you don't control:
-reviewing untrusted content is the whole reason `readonly` exists.
+reviewing untrusted content is the whole reason `readonly` exists. **The read-only discipline
+DESIGN.md rule 1 describes ("agents never mutate the tree, index, or HEAD") is a tool boundary
+under `readonly`, but under `trusted` it's persona instruction only** — the wrapper isn't in the
+loop at all, so nothing mechanical stops a compromised or misbehaving agent from running a
+mutating command. Fine for own-repo/trusted-author use precisely because you already trust the
+content being reviewed; not a substitute for `readonly` anywhere else.
 
 ## The state / follow-up model
 
@@ -148,16 +153,23 @@ the file will sit untracked-but-visible and can get accidentally `git add -A`'d 
 - **The recording rule is green/yellow-only, on purpose.** The state file's `reviewed_sha` entry
   is written only after a successful `gh pr comment` post **and** only when the overall result is
   `green` or `yellow`. A `red` or `unverified` outcome leaves it untouched, so the next run
-  retries the whole PR instead of treating a run that never actually gated anything as reviewed.
-  `--dry-run` and a draft-PR skip never reach that write at all — no comment is posted, so no
-  `reviewed_sha` is recorded. **One caveat: `--dry-run` still bootstraps the file itself.**
+  retries from the last SUCCESSFULLY recorded SHA — the full PR only if there was never one — not
+  the whole PR unconditionally: if PR review at SHA A already recorded `reviewed_sha: A`, and a
+  later follow-up run at SHA B comes back red/unverified, the file still reads `A` afterward, so
+  the NEXT run reviews `A..<current head>` incrementally, exactly like any other follow-up — it
+  does not re-audit the whole PR from scratch just because the most recent attempt failed to
+  gate. Only a PR with no prior recorded SHA at all falls back to a full-PR review on
+  red/unverified. `--dry-run` and a draft-PR skip never reach this write at all — no comment is
+  posted, so no `reviewed_sha` changes either way. **One caveat: `--dry-run` still bootstraps the
+  file itself.**
   `review-gate` creates `.review-gate-state.json` as `{}` on first run if it doesn't already
   exist — unconditionally, before the dry-run/draft branches are even reached (`cli/review-gate`'s
   `[[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"`) — so a `--dry-run` against a target repo
   that has never run `review-gate` before will leave a fresh, empty `.review-gate-state.json` in
-  the working tree even though it records nothing about the PR. Not a mutation you'd notice (an
-  empty JSON object, git-ignored), but a real one — "no state written" for `--dry-run` means "no
-  PR gets marked reviewed," not "the working tree is untouched."
+  the working tree even though it records nothing about the PR. Not a mutation most workflows
+  will notice (an empty JSON object) — but a real one, and NOT git-ignored unless you're on the
+  Way-A (`install.sh`) path (see the caveat above this list). "No state written" for `--dry-run`
+  means "no PR gets marked reviewed," not "the working tree is untouched."
 
 ## Exit codes + reading a verdict comment
 

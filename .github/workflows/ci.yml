@@ -112,6 +112,15 @@ jobs:
       - name: Run release.yml tag-validation gate fixture tests
         run: bash tests/test-release-tag-gates.sh
 
+      - name: Assert every tests/*.sh is listed in CONTRIBUTING.md's canonical table
+        run: |
+          set -euo pipefail
+          status=0
+          for f in tests/*.sh; do
+            grep -qF "\`tests/$(basename "$f")\`" CONTRIBUTING.md || { echo "::error::$f is missing from CONTRIBUTING.md's test table"; status=1; }
+          done
+          exit "$status"
+
   setup-smoke:
     # Clean-machine, real-Linux run of the setup story (see Dockerfile.smoke's header): required
     # binaries, both fixture suites above, install.sh and bootstrap.sh against fresh scratch

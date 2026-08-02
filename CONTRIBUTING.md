@@ -26,23 +26,29 @@ git clone https://github.com/G-Schumacher44/review-pantheon.git
 cd review-pantheon
 ```
 
-Prerequisites (bash, git, jq, gh, python3 for the Action lane, one provider CLI): see
+Prerequisites (bash, git, jq, gh, python3 for the Action surface, one provider CLI): see
 [docs/SETUP.md](docs/SETUP.md#prerequisites) for the full table and what each one gates.
 
-Run the suites — each is a standalone fixture test, no runner needed:
+Run the suites — each is a standalone fixture test, no runner needed. **This table is the
+canonical, complete list — verified against `git ls-tree -r tests/`** (13 files; DESIGN.md's
+"Layout" section points here instead of re-listing them, see DESIGN.md rule 5 on the two staying
+in sync):
 
 | Script | Covers |
 |---|---|
 | `tests/test-verdict-decision.sh` | The verdict-decision rule, cross-checked against both runtimes (`cli/lib/verdict.sh`, `action/decide_verdict.py`). |
 | `tests/test-base-pinned-read.sh` | `cli/lib/pantheon-base-pin.sh` — base-SHA-pinned reads, including the symlink-resolution edge case. |
 | `tests/test-render-comment.sh` | `cli/lib/render_comment.sh`, the combined-PR-comment renderer. |
-| `tests/test-install.sh` | `install.sh`'s editor/CLI projection lanes. |
+| `tests/test-install.sh` | `install.sh`'s editor/CLI projection targets. |
 | `tests/test-prompt-assembly.sh` | Prompt assembly, including the spec-aware Apollo path. |
 | `tests/test-state-persistence.sh` | `cli/review-gate`'s follow-up-mode state file. |
 | `tests/test-git-readonly-wrapper.sh` | `cli/lib/pantheon-git-readonly.sh`, the read-only execution tier's argv-validating wrapper. |
 | `tests/test-execution-tier.sh` | The tiered-execution feature (`readonly` vs `trusted`) end to end. |
 | `tests/test-action-refs.sh` | Every `github.action_path` reference in `action.yml` resolves, plus SHA-pin checks. |
 | `tests/test-setup-smoke.sh` | Clean-machine setup story — runs inside `Dockerfile.smoke` in CI, see below. |
+| `tests/test-bootstrap-release.sh` | `bootstrap.sh`'s `--version`/release-fetch, unit-level: URL builders, checksum verify (happy + mismatch), offline flag validation. |
+| `tests/test-bootstrap-release-e2e.sh` | The same `--version` path, integration-level: a real stubbed-`curl` checksum-verified fetch through extraction and a working `install.sh` run. |
+| `tests/test-release-tag-gates.sh` | `.github/workflows/release.yml`'s two tag gates: strict-semver validation and the `origin/main`-ancestry check. |
 
 ```bash
 bash tests/test-verdict-decision.sh
