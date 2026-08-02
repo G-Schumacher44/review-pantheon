@@ -202,6 +202,29 @@ def test_cli_env_forces_git_config_global_and_system_to_dev_null(monkeypatch) ->
     assert env["HOME"] == "/some/hostile/checkout"
 
 
+def test_cli_env_preserves_https_credential_auth_via_env_var_config_live(tmp_path, monkeypatch) -> None:
+    # Live, non-mocked proof of the fix for a Codex review finding on this port's own PR: pinning
+    # GIT_CONFIG_GLOBAL/SYSTEM to /dev/null (closing the core.sshCommand injection) also silently
+    # dropped a configured credential.helper (the common `gh auth setup-git` setup), breaking
+    # `git fetch` against a private HTTPS remote. `git config --get credential.helper` must
+    # resolve to the gh-delegated helper via the injected GIT_CONFIG_COUNT/KEY_0/VALUE_0 env vars
+    # -- never a file read -- even though no global/system config FILE is consulted at all.
+    monkeypatch.setenv("HOME", str(tmp_path / "irrelevant-home"))
+
+    env = cli_module._cli_env()
+    env["PATH"] = os.environ.get("PATH", "")
+
+    result = subprocess.run(
+        ["git", "config", "--get", "credential.helper"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "!gh auth git-credential"
+
+
 def test_cli_env_git_config_overrides_close_the_core_sshcommand_injection_live(tmp_path, monkeypatch) -> None:
     # Live, non-mocked reproduction: a hostile HOME whose ~/.gitconfig sets core.sshCommand to a
     # marker-writing command. Without GIT_CONFIG_GLOBAL/SYSTEM pinned to /dev/null, `git config

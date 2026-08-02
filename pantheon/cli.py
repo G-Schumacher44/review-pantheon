@@ -226,6 +226,23 @@ _CLI_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
 _CLI_GIT_CONFIG_OVERRIDES: dict[str, str] = {
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_CONFIG_SYSTEM": "/dev/null",
+    # Re-injects ONLY the one config key a private HTTPS remote's auth needs
+    # (`credential.helper`, delegated to gh's own stored credentials) via git's env-var config
+    # mechanism (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, git >= 2.31) —
+    # never by re-reading any file, so this doesn't reopen the door GIT_CONFIG_GLOBAL/SYSTEM
+    # above just closed. A Codex review finding on this port's own PR: pinning those two to
+    # `/dev/null` also silently dropped a configured `credential.helper` (the common `gh auth
+    # setup-git` setup), breaking `git fetch` against a private HTTPS remote — forwarding
+    # GH_TOKEN alone doesn't fix this, because git itself never reads that variable, only `gh`
+    # does. `gh auth git-credential` is itself a trusted-resolved invocation (this env's own
+    # PATH is pinned to `_TRUSTED_BIN_DIRS`, the same set `gh` is resolved from), so delegating
+    # to it here doesn't reopen an arbitrary-command door the way a file-based
+    # `credential.helper` from an untrusted HOME would. Verified live: `git config --get
+    # credential.helper` resolves to this value under the fully-pinned env, while `git config
+    # --get core.sshCommand` still resolves to nothing even from a hostile HOME's `.gitconfig`.
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "credential.helper",
+    "GIT_CONFIG_VALUE_0": "!gh auth git-credential",
 }
 
 _trusted_executable_cache: dict[str, str] = {}

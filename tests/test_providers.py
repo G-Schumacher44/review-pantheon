@@ -238,7 +238,6 @@ def test_terminate_group_sends_sigterm_then_sigkill_on_the_whole_group(monkeypat
             calls.append(("wait", timeout))
             raise subprocess.TimeoutExpired(cmd=["x"], timeout=timeout)
 
-    monkeypatch.setattr(providers.os, "getpgid", lambda pid: 999)
     monkeypatch.setattr(providers.os, "killpg", lambda pgid, sig: calls.append(("killpg", pgid, sig)))
 
     providers._terminate_group(_Proc())
@@ -270,7 +269,6 @@ def test_terminate_group_sends_sigkill_even_when_the_leader_exits_promptly(monke
             calls.append(("wait", timeout))
             return 0  # the leader exits promptly -- NOT a TimeoutExpired
 
-    monkeypatch.setattr(providers.os, "getpgid", lambda pid: 999)
     monkeypatch.setattr(providers.os, "killpg", lambda pgid, sig: calls.append(("killpg", pgid, sig)))
 
     providers._terminate_group(_Proc())
@@ -305,18 +303,58 @@ def test_terminate_group_kills_a_child_that_survives_the_leaders_prompt_exit(tmp
     assert not marker.exists(), "child that ignored SIGTERM survived past _terminate_group()"
 
 
-def test_terminate_group_is_a_noop_when_the_process_already_exited(monkeypatch) -> None:
-    def _raise_lookup_error(pid):
+def test_terminate_group_is_a_noop_when_the_whole_group_already_exited(monkeypatch) -> None:
+    # The whole process GROUP being fully gone by the time we signal it (every member already
+    # exited) surfaces as killpg raising ProcessLookupError -- must not propagate, and (unlike
+    # the stale pre-fix shape this test used to assert) must still ATTEMPT both signals rather
+    # than bailing out early on a lookup failure.
+    signals_attempted: list = []
+
+    def _raise_lookup_error(pgid, sig):
+        signals_attempted.append(sig)
         raise ProcessLookupError()
 
-    monkeypatch.setattr(providers.os, "getpgid", _raise_lookup_error)
+    monkeypatch.setattr(providers.os, "killpg", _raise_lookup_error)
 
     class _Proc:
         pid = 999
 
-    # Must not raise — a process that already exited between the timeout and this call is not
-    # an error (mirrors bash's own `2>/dev/null || true` posture for the identical race).
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=["x"], timeout=timeout)
+
+    # Must not raise — mirrors bash's own `2>/dev/null || true` posture for the identical race.
     providers._terminate_group(_Proc())
+
+    assert signals_attempted == [providers.signal.SIGTERM, providers.signal.SIGKILL]
+
+
+def test_terminate_group_kills_a_descendant_that_outlives_its_fully_reaped_leader(tmp_path) -> None:
+    # Live (non-mocked) repro of THIS finding's exact precondition: the leader exits almost
+    # immediately and is fully reaped by proc.wait() -- not merely a zombie -- while a background
+    # descendant it spawned keeps running well past that. Proves os.getpgid(proc.pid) raises
+    # ProcessLookupError at this point (the exact failure mode the finding named), yet
+    # _terminate_group -- which never calls os.getpgid, using proc.pid directly as the process
+    # group ID fixed at spawn time by start_new_session=True -- still reaches and kills the
+    # surviving descendant.
+    marker = tmp_path / "descendant-survived-reaped-leader"
+    script = tmp_path / "fast-exit-leader.sh"
+    script.write_text(f"#!/bin/sh\n( sleep 5; touch {marker} ) &\nexit 0\n")
+    script.chmod(0o755)
+
+    proc = subprocess.Popen(
+        [str(script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    proc.wait(timeout=2)  # the leader exits almost immediately and is fully reaped right here
+
+    with pytest.raises(ProcessLookupError):
+        os.getpgid(proc.pid)  # precondition: the exact lookup failure the finding named
+
+    providers._terminate_group(proc)
+
+    assert not marker.exists(), "descendant that outlived its (fully reaped) leader survived _terminate_group()"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -350,6 +388,20 @@ def test_provider_env_forwards_only_the_explicit_allowlist(monkeypatch) -> None:
     # Never a blanket copy — every key present must come from the explicit allowlist (plus PATH,
     # which _provider_env sets itself from _filtered_path).
     assert set(env) - {"PATH"} <= set(providers._PROVIDER_ENV_PASSTHROUGH_KEYS)
+
+
+def test_provider_env_forwards_proxy_vars_both_cases(monkeypatch) -> None:
+    # A Codex review finding on this port's own PR: dropping proxy vars from THIS allowlist
+    # (pantheon.cli's own git/gh env already carried the identical fix) let metadata/fetch
+    # succeed behind a corporate proxy while every provider's own network call still failed,
+    # reading UNVERIFIED for no visible reason.
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("https_proxy", "https://proxy.example:8443")
+
+    env = providers._provider_env()
+
+    assert env["HTTP_PROXY"] == "http://proxy.example:8080"
+    assert env["https_proxy"] == "https://proxy.example:8443"
 
 
 def test_provider_env_path_is_always_filtered_never_ambient(monkeypatch, tmp_path) -> None:

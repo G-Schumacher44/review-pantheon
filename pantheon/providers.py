@@ -220,6 +220,20 @@ _PROVIDER_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "CURSOR_API_KEY",
+    # Proxy transport vars -- a Codex review finding on this port's own PR: `pantheon.cli`'s own
+    # git/gh env already forwards these (dropping them broke `git fetch`/`gh pr view` behind a
+    # corporate HTTP(S) proxy); every networked PROVIDER invocation needs the identical fix, or
+    # a proxy-gated network still lets metadata/fetch through while every agent's own API call
+    # fails and reads UNVERIFIED. Both cases forwarded (see `pantheon.cli`'s own comment on this
+    # same allowlist for why).
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
 )
 
 
@@ -309,11 +323,22 @@ def _terminate_group(proc: subprocess.Popen) -> None:
     (``ProcessLookupError``, suppressed below, same as every other signal in this function).
     Every signal here is best-effort: a process that already exited between our check and our
     signal is not an error (mirrors bash's own ``2>/dev/null || true`` posture for the identical
-    race)."""
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return
+    race).
+
+    Deliberately never calls ``os.getpgid(proc.pid)`` to look the group up -- a Codex review
+    finding on this port's own PR, reproduced live: once the LEADER has exited and been reaped
+    (which can happen before this function ever runs -- ``communicate(timeout=...)`` can still
+    raise ``TimeoutExpired`` while blocked on a descendant that inherited the leader's stdout,
+    well after the leader itself is gone), ``os.getpgid(proc.pid)`` raises
+    ``ProcessLookupError`` even though the process GROUP (keyed to that same numeric ID) still
+    has live members -- an earlier version of this function treated that lookup failure as "the
+    whole group is gone" and returned immediately, leaving the surviving descendant unsignaled
+    entirely. ``start_new_session=True`` (see :func:`_run`) makes the process group's ID equal
+    to the leader's PID at spawn time, by construction -- a fixed fact that querying the (now
+    possibly-reaped) leader can only fail to confirm, never actually needs re-deriving. Using
+    ``proc.pid`` directly as the target ``killpg`` ID reaches every surviving group member
+    regardless of whether the leader itself is still queryable."""
+    pgid = proc.pid
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pgid, signal.SIGTERM)
     with contextlib.suppress(subprocess.TimeoutExpired):
