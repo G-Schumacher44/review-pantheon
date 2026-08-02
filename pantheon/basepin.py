@@ -66,7 +66,6 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Optional
 
 from pantheon import execution
 
@@ -90,11 +89,11 @@ MAX_HOPS = 32
 @dataclass
 class BasePinnedReadResult:
     status: int  # OK (0) / REFUSED (1) / ABSENT (2)
-    content: Optional[bytes] = None
-    error: Optional[str] = None
+    content: bytes | None = None
+    error: str | None = None
 
 
-def normalize_repo_path(path: str) -> Optional[str]:
+def normalize_repo_path(path: str) -> str | None:
     """Collapses "." and ".." components in a slash-separated, already-relative path using pure
     string manipulation (no filesystem access — a git-tree-relative path, not a real one).
     Returns the normalized path on success, or None on failure: an absolute input, an empty
@@ -122,7 +121,7 @@ def normalize_repo_path(path: str) -> Optional[str]:
     return "/".join(out)
 
 
-def _ls_tree_mode(base_sha: str, path: str, repo_dir: str) -> Optional[str]:
+def _ls_tree_mode(base_sha: str, path: str, repo_dir: str) -> str | None:
     result = execution.run_git(["ls-tree", base_sha, "--", path], cwd=repo_dir)
     if result.returncode != 0:
         return None
@@ -133,7 +132,7 @@ def _ls_tree_mode(base_sha: str, path: str, repo_dir: str) -> Optional[str]:
     return line.split()[0] if line.split() else None
 
 
-def _walk_prefix_mode(base_sha: str, cur: str, repo_dir: str):
+def _walk_prefix_mode(base_sha: str, cur: str, repo_dir: str) -> tuple[str | None, str | None, str | None, bool]:
     """Walks ``cur``'s path components left to right, ls-tree'ing each PREFIX (never the whole
     path in one shot). Returns (prefix, mode, remaining, found_symlink) — stops at the first
     prefix that is a symlink (mode "120000", possibly the leaf itself) or once every component
@@ -153,9 +152,7 @@ def _walk_prefix_mode(base_sha: str, cur: str, repo_dir: str):
     return prefix, mode, "", False
 
 
-def base_pinned_read(
-    base_sha: str, path: str, repo_dir: str = "."
-) -> BasePinnedReadResult:
+def base_pinned_read(base_sha: str, path: str, repo_dir: str = ".") -> BasePinnedReadResult:
     """See this module's docstring for the full contract and return-code meanings. <repo_dir>
     defaults to "." — every git call is routed through pantheon.execution.run_git(cwd=repo_dir),
     not an implicit process cwd, so behavior doesn't depend on whether the caller has already
@@ -199,7 +196,10 @@ def base_pinned_read(
                 return BasePinnedReadResult(status=ABSENT, error=f"'git show' failed for '{cur}'")
             # A tree (040000), gitlink/submodule (160000), or any other mode at the LEAF
             # position isn't readable content — treated as ordinary absence.
-            return BasePinnedReadResult(status=ABSENT, error=f"'{cur}' is not a regular file at base {base_sha} (mode {mode})")
+            return BasePinnedReadResult(
+                status=ABSENT,
+                error=f"'{cur}' is not a regular file at base {base_sha} (mode {mode})",
+            )
 
         # `prefix` is the first symlinked component found (leaf or intermediate); `remaining` is
         # whatever path (possibly empty) still follows it. Resolve `prefix` — target relative to
@@ -288,7 +288,7 @@ def _normalize_cli(argv: list[str]) -> int:
     return 0
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "read":
         return _read_cli(argv[1:])

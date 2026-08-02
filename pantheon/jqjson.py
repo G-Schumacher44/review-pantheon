@@ -49,12 +49,12 @@ a bare f-string/``str()``; every place a caller's bash counterpart captured a jq
 ``$(...)`` before an emptiness check or final interpolation applies ``subst`` to the result —
 ``tests/test-json-boundary.sh`` extends its mechanical assertion to cover both.
 """
+
 from __future__ import annotations
 
 import json
 import re
 import secrets
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 __all__ = ["JqParseError", "JqNaN", "loads", "dumps", "jq_text", "subst"]
@@ -177,33 +177,40 @@ def _parse_float(text: str) -> Any:
     jq: a magnitude that overflows a double's representable range (``1e400`` -> Python's bare
     ``float()`` silently gives ``+inf``) prints back as the still-finite, exact ``1E+400``; a
     magnitude too SMALL to represent (``1e-400`` -> Python's bare ``float()`` silently
-    UNDERFLOWS to ``0.0``) prints back as the still-nonzero, exact ``1E-400``; and a literal with
-    more significant digits than a double can hold exactly (``1.234567890123456789``, 19
-    significant digits — a double has roughly 17) prints back completely unchanged, digit for
-    digit, where Python's own float round-trip would silently round it to
-    ``1.2345678901234567``. All three are the same underlying phenomenon — jq never lost fidelity
-    converting the literal to a fixed-precision binary float in the first place, because it never
-    converts at all — so all three get the identical fix: preserve the exact source text as a
-    :class:`_RawBigNumber` instead of the lossy ``float()`` value, whenever ``float()``'s own
-    value does NOT exactly reproduce the literal's true decimal value.
+    UNDERFLOWS to ``0.0``) prints back as the still-nonzero, exact ``1E-400``; a literal with more
+    significant digits than a double can hold exactly (``1.234567890123456789``, 19 significant
+    digits — a double has roughly 17) prints back completely unchanged, digit for digit, where
+    Python's own float round-trip would silently round it to ``1.2345678901234567``; and — a gap
+    in an earlier version of this function, issue #19's "preserve jq formatting for representable
+    decimals" item — a literal whose VALUE round-trips through ``float()`` exactly fine but whose
+    SURFACE TEXT doesn't (trailing zeros: ``1.50``, ``0.10``, ``2.00``, ``3.140`` — verified live
+    against real jq, which preserves every one of these byte-for-byte, never normalizing away a
+    trailing zero the way Python's ``repr(float("1.50"))`` ("1.5") silently does). jq never lost
+    fidelity converting the literal to a fixed-precision binary float in the first place, because
+    it never converts at all — every one of these gets the identical fix: preserve the exact
+    source text (canonicalized only for exponent notation — see :func:`_canonicalize_number_text`)
+    as a :class:`_RawBigNumber` instead of the lossy ``float()`` value, whenever ``float()``'s own
+    canonical text form does NOT byte-for-byte match the (exponent-canonicalized) source text.
 
-    "Does not exactly reproduce" is checked via exact decimal arithmetic (the stdlib ``decimal``
-    module, which — unlike ``float`` — represents any finite decimal literal exactly): parse
-    ``text`` as a :class:`decimal.Decimal` (exact), parse ``repr(float(text))`` as a
-    :class:`decimal.Decimal` too (the exact decimal value of whatever double ``float(text)``
-    landed on, via Python's own shortest-round-trip ``repr()``), and preserve the raw text
-    whenever those two decimals differ. An ordinary, exactly-representable-enough literal (e.g.
-    ``0.1`` — not exactly representable in binary either, but round-trips through
-    ``float()``/``repr()`` back to the identical text "0.1", matching jq's own "0.1" output) is
-    completely unaffected: this only ever fires for the genuinely lossy cases above."""
+    "Does not byte-for-byte match" is a TEXT comparison, not a decimal-VALUE comparison — the
+    earlier version of this function compared :class:`decimal.Decimal` values instead
+    (``Decimal(text) != Decimal(repr(value))``), which is exactly why the trailing-zero class
+    above slipped through: ``Decimal("1.50") == Decimal("1.5")`` is ``True`` (equal as VALUES),
+    even though jq's own printed TEXT for the two differs. Comparing
+    :func:`_canonicalize_number_text`'s output against ``repr(value)`` directly (both plain
+    strings) strictly subsumes what the value-based check caught (an overflow, or a literal with
+    more significant digits than a double preserves, still produces two different strings here
+    too) while ALSO catching the trailing-zero/formatting-only class the value-based check was
+    blind to. An ordinary literal whose canonical text already matches Python's own ``repr()``
+    (e.g. ``0.1`` -> ``repr(0.1) == "0.1"``, ``100.0`` -> ``repr(100.0) == "100.0"``, both
+    confirmed live against real jq's identical output) is completely unaffected: this only ever
+    fires for a literal where the two texts genuinely diverge."""
     value = float(text)
     if value in (float("inf"), float("-inf")):
         return _RawBigNumber(_canonicalize_number_text(text))
-    try:
-        if Decimal(text) != Decimal(repr(value)):
-            return _RawBigNumber(_canonicalize_number_text(text))
-    except InvalidOperation:  # pragma: no cover — text already matched JSON's number grammar
-        pass
+    canonical = _canonicalize_number_text(text)
+    if canonical != repr(value):
+        return _RawBigNumber(canonical)
     return value
 
 

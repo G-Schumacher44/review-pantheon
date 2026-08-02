@@ -16,15 +16,16 @@
 #     (adapted to Python's shape — a dict-literal env key, not a bash `export`/`unset`
 #     statement).
 #
-# Explicitly OUT OF SCOPE here (deferred to Slice 4, named so nothing is silently dropped — see
-# docs/PYTHON-PORT.md §4's own table): Part B (cross-surface consistency across
-# cli/providers/claude.sh, action.yml, action/review.yml — those stay bash until Slice 5), Part C
-# (a real `pantheon gate --execution bogus-tier --pr 1` invocation — pantheon.cli doesn't exist
-# until Slice 4), Part D (action/review.yml's base-pinned wrapper resolution — Action-lane,
-# unrelated to this module), Part E (--permission-mode dontAsk on provider invocations — CLI-lane
-# wiring, Slice 4), Part G (cli/review-gate's execution= base-pinning — CLI-lane wiring, Slice 4).
-# tests/test-execution-tier.sh itself is UNCHANGED and still runs all of those, green, against
-# bash — this file does not replace it, it covers the module-level subset Slice 3 owns.
+# Slice 4 ADDS (below Part F): Part C equivalent (a real `pantheon gate --execution bogus-tier
+# --pr 1` invocation, now that pantheon.cli exists), Part E equivalent (--permission-mode dontAsk
+# in pantheon/providers.py's claude lane), and Part G equivalent (pantheon.cli's execution=
+# base-pinning, via real git fixture repos rather than an extracted bash block). Still explicitly
+# OUT OF SCOPE (bash/Action-lane surfaces this port doesn't touch, per docs/PYTHON-PORT.md §4):
+# Part B (cross-surface consistency across cli/providers/claude.sh, action.yml,
+# action/review.yml — those stay bash until Slice 5) and Part D (action/review.yml's base-pinned
+# wrapper resolution — Action-lane, unrelated to this module). tests/test-execution-tier.sh
+# itself is UNCHANGED and still runs its own Parts A-G, green, against bash — this file does not
+# replace it.
 #
 # No test framework — plain bash, `bash tests/test-execution-tier-python.sh` is the whole
 # invocation.
@@ -213,6 +214,128 @@ for gc_override in '"gc.auto=0"' '"maintenance.auto=false"'; do
     fail "pantheon/execution.py no longer forces -c $gc_override"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Part C equivalent (Slice 4) — pantheon.cli wiring: a real, fail-closed invocation from a
+# scratch (non-review-pantheon) git repo, before any gh/network call — mirrors the bash
+# original's Part C real-invocation fixture exactly.
+# ---------------------------------------------------------------------------
+section "Part C equivalent: pantheon gate --execution bogus-tier --pr 1 (real invocation)"
+
+if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
+  SCRATCH="$(mktemp -d)"
+  git init -q "$SCRATCH"
+
+  bogus_out="$(cd "$SCRATCH" && python3 -m pantheon.cli gate --execution bogus-tier --pr 1 2>&1)"
+  bogus_status=$?
+  if [[ $bogus_status -ne 0 ]] && grep -qF "unknown execution tier 'bogus-tier'" <<<"$bogus_out"; then
+    pass "pantheon gate --execution bogus-tier --pr 1: fails closed with the execution-tier error, before any gh call"
+  else
+    fail "pantheon gate --execution bogus-tier --pr 1: did not fail closed as expected (status=$bogus_status, output: $bogus_out)"
+  fi
+
+  rm -rf "$SCRATCH"
+else
+  fail "pantheon.cli is NOT importable — cannot run the Part C equivalent"
+fi
+
+# ---------------------------------------------------------------------------
+# Part E equivalent (Slice 4) — --permission-mode dontAsk on the claude provider lane.
+# ---------------------------------------------------------------------------
+section "Part E equivalent: --permission-mode dontAsk in pantheon/providers.py"
+
+PROVIDERS_SRC="$ROOT/pantheon/providers.py"
+if grep -qF '"--permission-mode", "dontAsk"' "$PROVIDERS_SRC"; then
+  pass "pantheon/providers.py's claude lane passes --permission-mode dontAsk"
+else
+  fail "pantheon/providers.py's claude lane does NOT pass --permission-mode dontAsk"
+fi
+
+if grep -qE '"--permission-mode",\s*"default"' "$PROVIDERS_SRC"; then
+  fail "pantheon/providers.py regressed back to --permission-mode default"
+else
+  pass "pantheon/providers.py does not pass --permission-mode default anywhere"
+fi
+
+# ---------------------------------------------------------------------------
+# Part G equivalent (Slice 4) — pantheon.cli's execution= is base-pinned, not working-tree-pinned
+# (the same Codex P1 finding cli/review-gate's own Part G closes) — exercised via real git
+# fixture repos and pantheon.cli's own private helper, the same shape
+# tests/test-prompt-assembly-python.sh's Part P3 uses for the sibling rules/spec-file reads.
+# ---------------------------------------------------------------------------
+section "Part G equivalent: pantheon.cli's execution= is base-pinned, not working-tree-pinned"
+
+if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
+  git_fixture_repo_exec() {
+    local dir="$1"
+    git -C "$dir" init -q
+    git -C "$dir" config user.email "test@example.com"
+    git -C "$dir" config user.name "test"
+    git -C "$dir" add -A
+    git -C "$dir" commit -q -m "fixture commit"
+    git -C "$dir" rev-parse HEAD
+  }
+
+  py_resolve_execution() {
+    python3 -c "
+import sys
+sys.path.insert(0, '$ROOT')
+from pantheon.cli import _resolve_execution_from_base
+print(_resolve_execution_from_base('$1', '$2'), end='')
+"
+  }
+
+  # G1 — base has execution=readonly committed; a fork PR's head EDITS gate.conf to
+  # execution=trusted. The base-pinned read must see 'readonly', never the working tree's
+  # 'trusted'.
+  FIXTURE_G1="$(mktemp -d)"
+  echo "execution=readonly" > "$FIXTURE_G1/gate.conf"
+  FIXTURE_G1_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G1")"
+  echo "execution=trusted" > "$FIXTURE_G1/gate.conf"
+  git -C "$FIXTURE_G1" commit -q -am "fork PR edits gate.conf to execution=trusted"
+
+  G1_RESULT="$(py_resolve_execution "$FIXTURE_G1" "$FIXTURE_G1_BASE_SHA")"
+  if [[ "$G1_RESULT" == "readonly" ]]; then
+    pass "base has execution=readonly, PR-edited working tree has execution=trusted -> base-pinned value (readonly) wins"
+  else
+    fail "base-pinning regression: expected 'readonly', got '$G1_RESULT' — the working-tree-edited value leaked through"
+  fi
+  rm -rf "$FIXTURE_G1"
+
+  # G2 — a fork PR INTRODUCES gate.conf for the first time (absent at base entirely) with
+  # execution=trusted. Must fall back to readonly, never read the PR-introduced file.
+  FIXTURE_G2="$(mktemp -d)"
+  echo "unrelated" > "$FIXTURE_G2/README.md"
+  FIXTURE_G2_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G2")"
+  echo "execution=trusted" > "$FIXTURE_G2/gate.conf"
+  git -C "$FIXTURE_G2" add gate.conf
+  git -C "$FIXTURE_G2" commit -q -m "fork PR introduces gate.conf with execution=trusted"
+
+  G2_RESULT="$(py_resolve_execution "$FIXTURE_G2" "$FIXTURE_G2_BASE_SHA")"
+  if [[ "$G2_RESULT" == "readonly" ]]; then
+    pass "gate.conf absent at base, PR introduces execution=trusted -> falls back to readonly, PR-introduced file never read"
+  else
+    fail "base-pinning regression: expected 'readonly' (gate.conf absent at base), got '$G2_RESULT'"
+  fi
+  rm -rf "$FIXTURE_G2"
+
+  # G3 — a LEGITIMATE, already-merged gate.conf at base with execution=trusted must still be
+  # honored — base-pinning isn't "always readonly," it's "trust the base commit, not the PR's own
+  # edits."
+  FIXTURE_G3="$(mktemp -d)"
+  echo "execution=trusted" > "$FIXTURE_G3/gate.conf"
+  FIXTURE_G3_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G3")"
+
+  G3_RESULT="$(py_resolve_execution "$FIXTURE_G3" "$FIXTURE_G3_BASE_SHA")"
+  if [[ "$G3_RESULT" == "trusted" ]]; then
+    pass "execution=trusted legitimately committed AT BASE (not PR-introduced) -> honored"
+  else
+    fail "expected 'trusted' (a legitimately base-committed value), got '$G3_RESULT'"
+  fi
+  rm -rf "$FIXTURE_G3"
+else
+  fail "pantheon.cli is NOT importable — cannot run the Part G equivalent"
+fi
 
 echo
 echo "execution-tier-python fixtures: $PASS passed, $FAIL failed"

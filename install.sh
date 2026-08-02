@@ -497,6 +497,8 @@ review-pantheon installed into $TARGET
 
 Post-install checklist:
   1. Set the repo secret CLAUDE_CODE_OAUTH_TOKEN (Settings -> Secrets and variables -> Actions).
+     Mint one with: claude setup-token (interactive, requires a Claude Code subscription) --
+     then store it with: gh secret set CLAUDE_CODE_OAUTH_TOKEN.
   2. Set the repo variable REVIEW_GATE_ENABLED=true (Settings -> Secrets and variables ->
      Actions -> Variables) — the workflow no-ops until this is set.
   3. .github/workflows/review.yml ships pinned to anthropics/claude-code-action's v1.0.183

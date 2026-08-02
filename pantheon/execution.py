@@ -112,7 +112,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 __all__ = [
     "WrapperRefused",
@@ -152,13 +152,20 @@ READONLY_SUBCOMMANDS: tuple[str, ...] = ("diff", "show", "log", "status")
 # breaks diff entirely rather than disabling it. --no-ext-diff (forced in build_readonly_argv())
 # already fully covers that config key on its own, so no `-c` override for it is used here either.
 GLOBAL_OVERRIDES: tuple[str, ...] = (
-    "-c", "core.fsmonitor=false",
-    "-c", "core.hooksPath=/dev/null",
-    "-c", "core.pager=cat",
-    "-c", "core.editor=true",
-    "-c", "log.showSignature=false",
-    "-c", "gc.auto=0",
-    "-c", "maintenance.auto=false",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "core.editor=true",
+    "-c",
+    "log.showSignature=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "maintenance.auto=false",
 )
 
 # TRUSTED_GIT_DIRS — the ONLY directories `git` is ever resolved from. NOT the ambient PATH, in
@@ -179,7 +186,7 @@ TRUSTED_GIT_DIRS: tuple[str, ...] = (
     "/opt/homebrew/bin",
 )
 
-_git_executable_cache: Optional[str] = None
+_git_executable_cache: str | None = None
 
 
 def _forced_env() -> dict[str, str]:
@@ -231,8 +238,8 @@ def _git_executable() -> str:
 
 def run_git(
     args: Sequence[str],
-    cwd: Optional[str] = None,
-    timeout: Optional[float] = None,
+    cwd: str | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Low-level, TRUSTED git invocation core: constructs the clean env (_forced_env()) and
     prepends GLOBAL_OVERRIDES to every call. Shared by the persona-facing
@@ -254,7 +261,7 @@ def run_git(
     )
 
 
-def _verify_commit(side: str, cwd: Optional[str]) -> bool:
+def _verify_commit(side: str, cwd: str | None) -> bool:
     # Belt-and-braces, same as the bash original: a side beginning with '-' can never be a legal
     # ref name, so refuse it outright rather than ever handing an attacker-controlled,
     # dash-prefixed string to `git rev-parse` as an argument.
@@ -267,7 +274,7 @@ def _verify_commit(side: str, cwd: Optional[str]) -> bool:
     return result.returncode == 0
 
 
-def validate_diff_range(args: Sequence[str], cwd: Optional[str] = None) -> str:
+def validate_diff_range(args: Sequence[str], cwd: str | None = None) -> str:
     """Structural range verification for ``diff``'s one positional argument — mirrors
     cli/lib/pantheon-git-readonly.sh's diff-range block line for line. Returns the validated
     range string on success; raises WrapperRefused otherwise. Never a substring/pattern check:
@@ -307,24 +314,19 @@ def validate_diff_range(args: Sequence[str], cwd: Optional[str] = None) -> str:
     return first
 
 
-def build_readonly_argv(argv: Sequence[str], cwd: Optional[str] = None) -> list[str]:
+def build_readonly_argv(argv: Sequence[str], cwd: str | None = None) -> list[str]:
     """Validates the caller's FULL argv (the model's own typed command) per the
     EXEC/WRITE-SURFACE MATRIX in this module's docstring, and returns the argv to hand to
     ``run_git()`` for the real invocation (excluding the git binary and GLOBAL_OVERRIDES — those
     are ``run_git``'s job). Raises WrapperRefused on any refusal.
     """
     if not argv:
-        raise WrapperRefused(
-            "no subcommand given (expected one of: diff, show, log, status)"
-        )
+        raise WrapperRefused("no subcommand given (expected one of: diff, show, log, status)")
 
     subcommand, *rest = argv
 
     if subcommand not in READONLY_SUBCOMMANDS:
-        raise WrapperRefused(
-            f"subcommand '{subcommand}' is not on the read-only allowlist "
-            "(diff, show, log, status)"
-        )
+        raise WrapperRefused(f"subcommand '{subcommand}' is not on the read-only allowlist (diff, show, log, status)")
 
     for arg in rest:
         if arg.startswith("-"):
@@ -346,9 +348,7 @@ def build_readonly_argv(argv: Sequence[str], cwd: Optional[str] = None) -> list[
     return [subcommand, *rest]
 
 
-def run_readonly_wrapper(
-    argv: Sequence[str], cwd: Optional[str] = None
-) -> subprocess.CompletedProcess:
+def run_readonly_wrapper(argv: Sequence[str], cwd: str | None = None) -> subprocess.CompletedProcess:
     """The persona-facing entry point — the Python equivalent of the bash script's whole body
     (``cli/lib/pantheon-git-readonly.sh "$@"``). Validates argv, then runs the real git call
     through the same hardened core basepin.py uses.
@@ -428,7 +428,7 @@ def _wrapper_cli(argv: list[str]) -> int:
     return result.returncode
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "wrapper":
         return _wrapper_cli(argv[1:])

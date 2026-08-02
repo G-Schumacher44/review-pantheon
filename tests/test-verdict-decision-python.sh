@@ -313,6 +313,51 @@ check "trailing-newline-in-agent-and-verdict-fields-still-decides-green" "artemi
 # compared the raw, un-subst'd "artemis\n"/"SHIP\n" strings directly and decided unverified.
 
 # ---------------------------------------------------------------------------
+# Issue #19 regression coverage (port slice 4's five jqjson/verdict parity-polish items — the
+# last two of the five; the other three landed as a cherry-picked fix earlier this slice, see
+# this PR's own history). Both proven failing pre-fix by direct repro before landing.
+# ---------------------------------------------------------------------------
+
+# top_finding_of: a MISSING field on an otherwise-present finding object must render as jq's own
+# "null" text, not collapse the whole finding to "no findings" — verified live against real bash
+# (cli/lib/verdict.sh's jq string-interpolation renders a missing key as "null"). Pre-fix, direct
+# dict-subscript access (f['severity']) raised KeyError on the missing 'file'/'line' keys here,
+# caught by a blanket except that discarded the present severity/issue data too.
+raw_file="$(mktemp)"
+printf '%s' '{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"blocker","issue":"x"}],"summary":"s"}' > "$raw_file"
+py_decision="$(cd "$ROOT" && python3 -m pantheon.verdict artemis "$raw_file" 2>/dev/null)"
+rm -f "$raw_file"
+py_top="$(jq -r '.top_finding' <<<"$py_decision" 2>/dev/null)"
+if [[ "$py_top" == "blocker: x (null:null)" ]]; then
+  echo "PASS missing-top-finding-fields-render-as-jq-nulls (top_finding='$py_top')"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL missing-top-finding-fields-render-as-jq-nulls: got '$py_top', expected 'blocker: x (null:null)'"
+  FAIL=$((FAIL + 1))
+fi
+# Cross-checked live against the real bash decider (cli/lib/verdict.sh, sourced directly) for
+# this exact findings shape: bash also decides top_finding='blocker: x (null:null)'.
+
+# jqjson decimal-formatting parity: a decimal literal whose float() VALUE round-trips exactly
+# fine but whose surface TEXT has trailing zeros (jq preserves the literal byte-for-byte; an
+# earlier version of pantheon.jqjson's _parse_float compared decimal VALUES, which treats
+# Decimal("1.50") == Decimal("1.5") as equal and silently reformats to "1.5", losing the trailing
+# zero jq keeps). Exercised here through a verdict field, matching this suite's own shape; the
+# module-level fixture matrix lives in tests/test_jqjson.py (pytest).
+raw_file="$(mktemp)"
+printf '%s' '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":1.50}' > "$raw_file"
+py_decision="$(cd "$ROOT" && python3 -m pantheon.verdict artemis "$raw_file" 2>/dev/null)"
+rm -f "$raw_file"
+py_summary="$(jq -r '.verdict_json.summary' <<<"$py_decision" 2>/dev/null)"
+if [[ "$py_summary" == "1.50" ]]; then
+  echo "PASS decimal-trailing-zero-preserved-not-reformatted (summary='$py_summary')"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL decimal-trailing-zero-preserved-not-reformatted: got '$py_summary', expected '1.50'"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

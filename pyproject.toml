@@ -1,15 +1,18 @@
-# pyproject.toml — SKELETON for the "pantheon" package, review-pantheon's Python CLI port (v2
-# track). See docs/PYTHON-PORT.md for the binding spec this skeleton implements. This file is
-# committed ahead of any port code on purpose (docs/PYTHON-PORT.md's own PR) — the
-# [project.scripts] entry point below references pantheon.cli:main, a module that does not exist
-# yet. Do not expect `pip install .` against this state of the tree to succeed; the pantheon/
-# package directory lands starting at Slice 2 of docs/PYTHON-PORT.md's slice plan.
+# pyproject.toml — the "pantheon" package, review-pantheon's Python CLI port (v2 track). See
+# docs/PYTHON-PORT.md for the binding spec this file implements. Slice 4 lands `pantheon.cli`
+# (the [project.scripts] entry point below, `pantheon = "pantheon.cli:main"`, is a real,
+# importable module as of this slice) plus the `review-gate` compat shim — `pip install -e .`
+# against this state of the tree succeeds and both console scripts run. Still marked
+# `Development Status :: 2 - Pre-Alpha` below: bash (`cli/review-gate`) remains the CANONICAL
+# implementation until the port's Slice 5 switchover retires it (docs/PYTHON-PORT.md section 7).
 #
 # stdlib-only at runtime is a hard constraint (docs/PYTHON-PORT.md section 1) —
 # [project.dependencies]
 # must stay empty for the life of this package. The build backend below (setuptools) is a
 # build-time-only dependency, never installed for an end user of the published package, and does
-# not compromise that constraint.
+# not compromise that constraint. Same posture for ruff/mypy/pytest (this file's own
+# [tool.ruff]/[tool.mypy]/[tool.pytest.ini_options] sections, port slice 4) — CI/dev-only
+# tooling, never a runtime dependency.
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -46,7 +49,55 @@ Issues = "https://github.com/G-Schumacher44/review-pantheon/issues"
 
 [project.scripts]
 pantheon = "pantheon.cli:main"
+# Slice-2-through-4 compat shim (docs/PYTHON-PORT.md section 2) — forwards every argument to
+# `pantheon gate`, prints a one-line deprecation note, exits with the same code. Removed at
+# Slice 5 alongside the rest of the bash CLI surface.
+review-gate = "pantheon.reviewgate_shim:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pantheon*"]
+
+# --- Python quality gates (port slice 4, docs/PYTHON-PORT.md) -----------------------------
+# Build-time-only tooling (ruff/mypy/pytest) — installed by CI, never a [project.dependencies]
+# entry (the stdlib-only runtime constraint in section 1 is about the RUNTIME package, not the
+# dev/CI toolchain that lints and tests it).
+
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+# UP (pyupgrade) is scoped by target-version above to py39-safe suggestions only — this repo's
+# floor is Python >=3.9 (section 1), so UP never proposes a 3.10+-only construct.
+
+[tool.mypy]
+# Checking-time target only — does NOT relax the package's own requires-python = ">=3.9" runtime
+# floor above. Modern mypy (2.x, what CI installs) dropped `python_version` support below 3.10;
+# "3.10" here is the lowest value mypy itself will still accept, not a claim that this package
+# needs 3.10 at runtime — `from __future__ import annotations` (every module) plus ruff's own
+# target-version = "py39" lint pass (which DOES enforce the real 3.9 floor, catching any 3.10+-
+# only syntax/stdlib construct) are what actually keeps this package 3.9-compatible.
+python_version = "3.10"
+packages = ["pantheon"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+# Pragmatic-strict, not maximal-strict: no --strict (that would additionally require
+# disallow_any_generics/disallow_subclassing_any/warn_return_any, none load-bearing for a
+# stdlib-only CLI package this size) — the flags above are the ones that catch a real class of
+# bug (an untyped def slipping past review, an unused ignore rotting stale) without demanding
+# annotation ceremony this package's own contributor floor (bash 3.2+, no tooling assumed)
+# doesn't otherwise ask for.
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+# Deliberately narrow to tests/test_*.py (the pytest unit layer — jqjson matrix + pure-function
+# seams only, per docs/PYTHON-PORT.md's migration-exam framing) — the tests/test-*.sh black-box
+# exam suites are a SEPARATE harness (plain bash, no pytest collection), never collected here.

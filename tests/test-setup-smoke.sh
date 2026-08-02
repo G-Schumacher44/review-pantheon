@@ -84,6 +84,73 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Stage 2b — the `pantheon` Python package's own quality gates (ruff lint+format, mypy,
+# pytest — port slice 4, docs/PYTHON-PORT.md), run against a real, clean-machine `pip install`
+# of the package (not just the dev-checkout `PYTHONPATH=` trick the other Python-port suites
+# use) — proves the package actually installs and its console scripts (`pantheon`, `review-gate`)
+# resolve on PATH, on real Linux/GNU coreutils, not just this repo's macOS dev loop. ruff/mypy/
+# pytest are build-time-only tooling (never a runtime [project.dependencies] entry — the
+# stdlib-only runtime constraint is unaffected), installed into an isolated venv here so this
+# stage never needs `--break-system-packages` against the container's system Python (Ubuntu
+# 24.04 marks it externally-managed, PEP 668).
+# ---------------------------------------------------------------------------
+section "Stage 2b: pantheon Python package — pip install + ruff/mypy/pytest quality gates"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  skip "pantheon package quality gates" "python3 not on PATH"
+else
+  VENV_DIR="$(mktemp -d)/venv"
+  if python3 -m venv "$VENV_DIR" >/dev/null 2>&1; then
+    pass "created an isolated venv for the pantheon package install"
+
+    if "$VENV_DIR/bin/pip" install --quiet -e "$ROOT" ruff mypy pytest 2>/tmp/pip-install-err.$$; then
+      pass "pip install -e . (plus ruff/mypy/pytest as build-time-only tooling) succeeded"
+
+      if "$VENV_DIR/bin/pantheon" --help >/dev/null 2>&1; then
+        pass "the installed 'pantheon' console script runs (--help exits 0)"
+      else
+        fail "the installed 'pantheon' console script failed to run"
+      fi
+
+      if "$VENV_DIR/bin/review-gate" --help >/dev/null 2>&1; then
+        pass "the installed 'review-gate' compat-shim console script runs (--help exits 0)"
+      else
+        fail "the installed 'review-gate' compat-shim console script failed to run"
+      fi
+
+      if ( cd "$ROOT" && "$VENV_DIR/bin/ruff" check pantheon/ tests/test_*.py ); then
+        pass "ruff check pantheon/ tests/test_*.py is clean"
+      else
+        fail "ruff check pantheon/ tests/test_*.py reported findings"
+      fi
+
+      if ( cd "$ROOT" && "$VENV_DIR/bin/ruff" format --check pantheon/ tests/test_*.py ); then
+        pass "ruff format --check pantheon/ tests/test_*.py is clean"
+      else
+        fail "ruff format --check pantheon/ tests/test_*.py reported unformatted files"
+      fi
+
+      if ( cd "$ROOT" && "$VENV_DIR/bin/mypy" ); then
+        pass "mypy (pyproject.toml's [tool.mypy] config) is clean"
+      else
+        fail "mypy reported findings"
+      fi
+
+      if ( cd "$ROOT" && "$VENV_DIR/bin/pytest" -q ); then
+        pass "pytest (the jqjson-matrix + pure-function-seam unit layer) passes"
+      else
+        fail "pytest reported failures"
+      fi
+    else
+      fail "pip install -e . (plus ruff/mypy/pytest) failed (see /tmp/pip-install-err.$$)"
+    fi
+  else
+    fail "could not create a venv for the pantheon package install"
+  fi
+  rm -rf "$(dirname "$VENV_DIR")"
+fi
+
+# ---------------------------------------------------------------------------
 # Stage 3 — install.sh, all four flags, against a freshly git-init'ed scratch repo (not this
 # repo's own checkout — a clean-machine install has no relationship to review-pantheon's tree).
 # ---------------------------------------------------------------------------
@@ -297,6 +364,59 @@ else
     fail "stage 5: could not clone $PINNED_REPO (see /tmp/smoke-clone-err.$$)"
   fi
   rm -rf "$CLONE_DIR"
+fi
+
+# ---------------------------------------------------------------------------
+# Stage 5b — the same tokened live dry-run, against `pantheon gate` (docs/PYTHON-PORT.md §4's
+# disposition for this suite: "The rest (install/bootstrap/--help/--dry-run through real and
+# symlinked prefixes) applies as-is via PANTHEON_CLI. Slice 4 (parity run)"). Same conditional
+# gating as Stage 5 above (token + network), plus `pantheon.cli` needing to be importable —
+# skipped loudly, not silently, when any of those isn't available.
+# ---------------------------------------------------------------------------
+section "Stage 5b: tokened live dry-run against pantheon gate (conditional, Python port)"
+
+if [[ -z "$SMOKE_TOKEN" ]]; then
+  skip "tokened live dry-run (pantheon gate)" "no GH_TOKEN/GITHUB_TOKEN in the environment"
+elif ! GH_TOKEN="$SMOKE_TOKEN" gh api rate_limit >/dev/null 2>&1; then
+  skip "tokened live dry-run (pantheon gate)" "GH_TOKEN/GITHUB_TOKEN set but GitHub API is unreachable"
+elif ! PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "import pantheon.cli" >/dev/null 2>&1; then
+  skip "tokened live dry-run (pantheon gate)" "pantheon.cli is not importable"
+else
+  CLONE_DIR_PY="$(mktemp -d)"
+  if GH_TOKEN="$SMOKE_TOKEN" git clone --quiet "https://github.com/${PINNED_REPO}.git" "$CLONE_DIR_PY" 2>/tmp/smoke-clone-err-py.$$; then
+    pass "stage 5b: cloned $PINNED_REPO"
+
+    DRYRUN_OUT_PY="$(cd "$CLONE_DIR_PY" && GH_TOKEN="$SMOKE_TOKEN" PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m pantheon.cli gate --pr "$PINNED_PR" --dry-run 2>&1)"
+    DRYRUN_STATUS_PY=$?
+
+    if [[ $DRYRUN_STATUS_PY -eq 0 || $DRYRUN_STATUS_PY -eq 1 ]]; then
+      pass "stage 5b: pantheon gate --pr $PINNED_PR --dry-run runs to completion (exit $DRYRUN_STATUS_PY)"
+    else
+      fail "stage 5b: pantheon gate --pr $PINNED_PR --dry-run exited unexpectedly ($DRYRUN_STATUS_PY)"
+    fi
+
+    if grep -qE '\.prompt\.md"?$' <<<"$DRYRUN_OUT_PY"; then
+      pass "stage 5b: dry-run output shows a built prompt file (*.prompt.md)"
+    else
+      fail "stage 5b: dry-run output missing a built prompt file path"
+    fi
+
+    if grep -q '\[dry-run\] would run: provider=' <<<"$DRYRUN_OUT_PY"; then
+      pass "stage 5b: dry-run output shows the would-be provider command"
+    else
+      fail "stage 5b: dry-run output missing the would-be provider command line"
+    fi
+
+    if grep -q '\[dry-run\] would post this comment to PR #'"$PINNED_PR"'' <<<"$DRYRUN_OUT_PY" \
+      && grep -q '| Agent | Verdict | Top finding |' <<<"$DRYRUN_OUT_PY"; then
+      pass "stage 5b: dry-run output shows the comment preview"
+    else
+      fail "stage 5b: dry-run output missing the comment preview"
+    fi
+  else
+    fail "stage 5b: could not clone $PINNED_REPO (see /tmp/smoke-clone-err-py.$$)"
+  fi
+  rm -rf "$CLONE_DIR_PY"
 fi
 
 # ---------------------------------------------------------------------------
