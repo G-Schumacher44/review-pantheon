@@ -32,7 +32,7 @@ Prerequisites (bash, git, jq, gh, python3 for the Action surface, one provider C
 Run the suites — each is a standalone fixture test, no runner needed. **This table is the
 canonical, complete list of the bash fixture suites (20 files; verified against `git ls-tree -r tests/*.sh`)**
 — DESIGN.md's "Layout" section points here instead of re-listing them, see DESIGN.md rule 5 on
-the two staying in sync. A separate pytest unit layer (7 files, `tests/test_*.py`; verified
+the two staying in sync. A separate pytest unit layer (8 files, `tests/test_*.py`; verified
 against `git ls-tree -r tests/*.py`) is its own documented category below — CI's sync-check
 (`.github/workflows/ci.yml`) asserts both tables' rows AND both prose counts against
 `git ls-tree -r tests/` on every PR, so a drift between either number and the actual tree fails
@@ -66,7 +66,7 @@ bash tests/test-verdict-decision.sh
 # ...repeat per script, or run the ones relevant to your change
 ```
 
-**Pytest unit layer (7 files, `tests/test_*.py`; verified against `git ls-tree -r tests/*.py`).**
+**Pytest unit layer (8 files, `tests/test_*.py`; verified against `git ls-tree -r tests/*.py`).**
 Collected via `pyproject.toml`'s `[tool.pytest.ini_options]` (`tests/test_*.py` only — never the
 black-box `tests/test-*.sh` suites above). Scope policy, binding:
 [docs/PYTHON-PORT.md §4's "Pytest unit layer — scope policy"](docs/PYTHON-PORT.md#4-migration-exam)
@@ -81,6 +81,7 @@ complements, not repeats.
 | `tests/test_execution.py` | `pantheon.execution.resolve_console_script`, the shared function behind both `pantheon.cli`'s and `pantheon.providers`' own console-script resolution. |
 | `tests/test_jqjson.py` | `pantheon.jqjson`'s four functions directly and in isolation, parametrized across the JSON-boundary edge-case matrix (docs/PYTHON-PORT.md §5). |
 | `tests/test_providers.py` | `pantheon.providers`' argv-construction, PATH-resolution, environment-construction, and timeout/process-group seams — the ONLY coverage this module has (no black-box `test-providers.sh` exists for the bash lanes either; docs/PYTHON-PORT.md §9's disclosed pre-existing gap, closed at this layer). |
+| `tests/test_render.py` | `pantheon.render`'s `_redact_repo_root_in_value` (the DATA-level repo-root redactor) and `_machine_tail_text`'s redact-before-serialize ordering — direct pure-function coverage for the two helpers a black-box round-trip through the CLI shim (`tests/test-render-comment-python.sh`) would obscure. |
 | `tests/test_state.py` | `pantheon.state`'s cross-filesystem write safety — where `update_state()`'s temp file gets created, so a cross-device rename (`OSError(EXDEV)`) can never happen. |
 | `tests/test_verdict.py` | `pantheon.verdict.emit_github_output`'s `$GITHUB_OUTPUT` side effect (port slice 5). |
 
