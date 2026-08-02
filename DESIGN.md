@@ -499,6 +499,32 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
      every key survived; none were removed (each ties to a specific lane's documented env-var
      auth mechanism, a locale/temp-dir convention every listed CLI needs to run, or the
      proxy-transport fix a prior Codex wave already justified).
+  - **A live Codex P1 reopened the SAME vulnerability through the provider's ENV rather than its
+    cwd, in a later round (round 6): layer 1 above (neutral cwd) closes the cwd door, but layer 3's
+    own re-audit missed that several allowlisted keys are themselves PATH-shaped config-dir
+    overrides a provider CLI honors — forwarding one blindly from ambient env reopens the identical
+    config/MCP/hook-loading exfiltration, one hop later. Concretely: `CLAUDE_CONFIG_DIR` forwarded
+    unconditionally meant a hostile checkout's own env-loading mechanism (a `.envrc`, an
+    environment-setting CI step reading repo content — any way a checkout can influence the parent
+    process's env before this module runs) pointing it AT a directory inside the checkout got a
+    normal Claude startup against attacker-controlled config, `--bare` or not (an explicit
+    `CLAUDE_CONFIG_DIR` override isn't something `--bare`'s own OAuth/keychain-skip behavior
+    touches). Closed by classifying every allowlisted key as PATH-SHAPED or not
+    (`pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS`'s own header comment is now that
+    classification, key by key, with the reasoning for each): `HOME` is never read from ambient env
+    at all — resolved via `pantheon.execution.real_home_dir()` (the POSIX passwd database,
+    `pwd.getpwuid`, un-redirectable by any environment variable — the identical fix already applied
+    to the readonly git wrapper's own env, now shared rather than re-derived); every other
+    PATH-SHAPED key (`CLAUDE_CONFIG_DIR`, the four `XDG_*` dirs, `TMPDIR`,
+    `GOOGLE_APPLICATION_CREDENTIALS`) is validated (`pantheon.providers._safe_path_env_value`) to
+    resolve OUTSIDE the repo root/cwd before being forwarded — a value that resolves inside either
+    is dropped (never forwarded, loudly), regardless of how it got set; the CLI's own default takes
+    over instead. A genuinely legitimate override (an operator's real, non-repo `CLAUDE_CONFIG_DIR`
+    for a second account) still passes the check and is forwarded unchanged. Fixture proof, both
+    directions, both the `--bare` and no-`--bare` (stored-keychain) paths:
+    `tests/test_providers.py`'s `test_claude_env_never_forwards_a_claude_config_dir_pointed_
+    inside_the_repo_root_with_bare`/`..._without_bare`/
+    `test_claude_env_still_forwards_a_legitimate_claude_config_dir_without_bare`.
   - **A consequence of exposing the repo's absolute path (step 1 above) that needed its own
     close: the reviewing model can echo that path back into a finding's own text, which then
     reaches the POSTED PR comment.** On a CI runner that's a harmless ephemeral path; on a CLI-lane

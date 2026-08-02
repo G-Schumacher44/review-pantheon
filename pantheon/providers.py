@@ -189,6 +189,17 @@ EXPLICITLY (the wrapper, Read/Grep/Glob, codex's repo-check opt-out), the behavi
 rootless (PATH resolution, ``pantheon.cli``'s own config reads), or the gap is an honestly
 disclosed residual (gemini/cursor). None of these should need rediscovering by a future review
 the way three of them were on this one.
+
+**The SAME contract, applied to the provider's ENV, not just its cwd (adversarial review, round
+6, Codex P1 — proof this list needed a sibling, not that it was wrong).** Everything above
+enumerates cwd-dependent behavior; it says nothing about a provider CLI's own env-var-driven
+config resolution — a SEPARATE door to the identical exfiltration vector, reopened when
+``_provider_env`` forwarded ``CLAUDE_CONFIG_DIR`` from ambient env unconditionally even after
+neutral cwd closed the cwd door. :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS`'s own header comment is
+that list's enumeration, in the identical spirit — every key classified PATH-SHAPED (needs a
+containment check, or a non-env resolution for ``HOME``) or not, so a NEW key added to that
+allowlist in the future has an obvious place to make the same call explicitly instead of
+defaulting to a blind passthrough.
 """
 
 from __future__ import annotations
@@ -305,55 +316,114 @@ def _read_prompt(prompt_file: str) -> str:
 # this module's own docstring already carries for their argv construction. Extend this list
 # explicitly when a real, documented need shows up; never fall back to a blanket copy to "just
 # make something work."
+#
+# EVERY key on this list is a security boundary (adversarial review, round 6, Codex P1 —
+# reopened CRITICAL-1 through a DIFFERENT door than the one already closed: not the provider's
+# cwd this time, but its ENV). Two mutually-exclusive categories, both audited below per-key:
+#
+#   PATH-SHAPED keys (a provider CLI — or the config-loading library underneath it, per the
+#   XDG Base Directory spec many of these CLIs honor as a fallback even without their OWN
+#   explicit override set — treats the value as a directory/file to READ CONFIG, MCP-server
+#   definitions, or hooks FROM at startup): forwarding one blindly from ambient env recreates
+#   CRITICAL-1's original exfiltration vector exactly, just one hop later — a hostile checkout's
+#   own env-loading mechanism (a `.envrc`, an environment-setting CI step reading repo content,
+#   ANY way a checkout can influence the parent process's env before this module runs — the same
+#   disclosed vector `pantheon.execution.real_home_dir`'s own docstring already names) pointing
+#   one of these AT a directory inside the checkout would let the provider CLI's own NORMAL
+#   startup load attacker-controlled MCP servers/hooks, entirely outside `--allowedTools`'s
+#   reach. These are listed in :data:`_PATH_SHAPED_ENV_KEYS` below and go through
+#   :func:`_safe_path_env_value` — verified (via :func:`_resolves_inside_a_trusted_root`) to
+#   resolve OUTSIDE the repo root/cwd before being forwarded; a value that resolves INSIDE either
+#   is dropped (never forwarded, loudly), regardless of how it got set. ``HOME`` specifically is
+#   never even READ from ambient env at all — see :func:`_provider_env`'s own body for why a
+#   validate-or-drop check isn't strong enough for that one specifically.
+#
+#   NON-path keys (opaque credential values, locale/region/profile-name strings, proxy URLs):
+#   these have no filesystem "resolves inside the checkout" meaning at all — a string like an
+#   API key or a locale tag can't be redirected at a directory the way a path can. Forwarded
+#   as-is, audited below to confirm none of them is secretly path-shaped in some CLI's own docs.
 _PROVIDER_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
-    # Process/locale basics every one of these CLIs needs to run and print sane output.
+    # --- Process/locale basics every one of these CLIs needs to run and print sane output ---
+    # HOME: PATH-SHAPED, see _PATH_SHAPED_ENV_KEYS below — never read from ambient env at all.
     "HOME",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TERM",
+    "USER",  # a username STRING (not a path) — printed/logged by some CLIs, never resolved as one.
+    "LOGNAME",  # same as USER — POSIX's older name for the identical username string.
+    "LANG",  # a locale tag ("en_US.UTF-8") — a string, not a filesystem path.
+    "LC_ALL",  # same shape as LANG.
+    "LC_CTYPE",  # same shape as LANG.
+    "TERM",  # a terminal-type STRING ("xterm-256color") — not a path.
+    # TMPDIR: PATH-SHAPED (where temp files land) — see _PATH_SHAPED_ENV_KEYS below.
     "TMPDIR",
+    # TZ can rarely be a tzfile path (":/usr/share/zoneinfo/...") on some POSIX systems, but a
+    # hijacked TZ only ever corrupts DISPLAYED timestamps — no config/MCP/hook loading, no
+    # capability grant, not the CRITICAL-1 vector class this audit is scoped to. Left as a plain
+    # passthrough on that basis (a real path-shaped USE would be cosmetic-only, not exploitable).
     "TZ",
+    # XDG_CONFIG_HOME/XDG_CACHE_HOME/XDG_DATA_HOME/XDG_STATE_HOME: PATH-SHAPED (the XDG Base
+    # Directory spec's own config/cache/data/state ROOTS — several of these provider CLIs fall
+    # back to computing a path under one of these, or under HOME, when their OWN dedicated
+    # override is unset) — see _PATH_SHAPED_ENV_KEYS below.
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
-    # Claude Code CLI — the only integration-tested lane. Auth surface documented in
-    # docs/SETUP.md's "Post-install checklist"/Way C auth table: CLAUDE_CODE_OAUTH_TOKEN or
-    # ANTHROPIC_API_KEY (exactly one). CLAUDE_CONFIG_DIR is the CLI's own conventional config-dir
-    # override. The Bedrock/Vertex vars are disclosed in docs/SETUP.md as "supported by
+    # --- Claude Code CLI — the only integration-tested lane ---
+    # Auth surface documented in docs/SETUP.md's "Post-install checklist"/Way C auth table:
+    # CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY (exactly one) — opaque credential VALUES, not
+    # paths; there is nothing to "resolve inside the checkout" about a bearer token string. The
+    # Bedrock/Vertex vars are disclosed in docs/SETUP.md as "supported by
     # anthropics/claude-code-action itself... NOT wired through THIS repo's composite action" —
     # that disclosure is about the Action's `with:` inputs, not this CLI lane; a locally
     # configured `claude` CLI using them still needs them forwarded to behave the same way it
     # would run outside this gate.
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    # CLAUDE_CONFIG_DIR: PATH-SHAPED — the CLI's own conventional config-dir override, and the
+    # ORIGINAL live vector this whole round-6 audit closes (Claude's own current headless docs:
+    # verified against code.claude.com before this fix, not assumed). See
+    # _PATH_SHAPED_ENV_KEYS below.
     "CLAUDE_CONFIG_DIR",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_REGION",
-    "AWS_DEFAULT_REGION",
+    "CLAUDE_CODE_USE_BEDROCK",  # a boolean-flag string ("1"/"true") — not a path.
+    "CLAUDE_CODE_USE_VERTEX",  # same shape as CLAUDE_CODE_USE_BEDROCK.
+    "AWS_ACCESS_KEY_ID",  # an opaque credential VALUE — not a path.
+    "AWS_SECRET_ACCESS_KEY",  # an opaque credential VALUE — not a path.
+    "AWS_SESSION_TOKEN",  # an opaque credential VALUE — not a path.
+    "AWS_REGION",  # a region-name STRING ("us-east-1") — not a path.
+    "AWS_DEFAULT_REGION",  # same shape as AWS_REGION.
+    # AWS_PROFILE names a SECTION inside ~/.aws/credentials|config by NAME, not by path — it
+    # can't itself point anywhere; the FILES it indexes into are HOME-anchored, and HOME is now
+    # always the passwd-resolved real value (see _provider_env's own body), never ambient.
     "AWS_PROFILE",
+    # GOOGLE_APPLICATION_CREDENTIALS: PATH-SHAPED (a service-account-key FILE path) — a hijacked
+    # value here doesn't leak secrets OUT so much as let an attacker SUBSTITUTE their own
+    # credentials for the review run's GCP identity; still "points into the checkout" per this
+    # audit's own rule, so it gets the identical containment check. See _PATH_SHAPED_ENV_KEYS
+    # below.
     "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_CLOUD_PROJECT",
-    "CLOUD_ML_REGION",
-    # codex/gemini/cursor — best-effort lanes, no dedicated auth-surface doc in this repo; these
-    # are each CLI's own conventional API-key env var name.
+    "GOOGLE_CLOUD_PROJECT",  # a project-ID STRING — not a path.
+    "CLOUD_ML_REGION",  # a region-name STRING — not a path.
+    # --- codex/gemini/cursor — best-effort lanes, no dedicated auth-surface doc in this repo ---
+    # Each is that CLI's own conventional API-key env var name — opaque credential VALUES, not
+    # paths. NOTE (this audit's own "sweep their docs" sweep, verified live, not assumed): each
+    # of these three CLIs ALSO has its own config-dir override — CODEX_HOME (defaults to
+    # ~/.codex), GEMINI_CONFIG_DIR (defaults to ~/.gemini or ~/.config/gemini), CURSOR_CONFIG_DIR
+    # (defaults to ~/.cursor) — but NONE of the three is on this passthrough list today, so none
+    # is currently forwarded/exploitable; if one is ever added, it MUST go through
+    # :data:`_PATH_SHAPED_ENV_KEYS`/:func:`_safe_path_env_value` like CLAUDE_CONFIG_DIR, never as
+    # a plain passthrough.
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "CURSOR_API_KEY",
-    # Proxy transport vars -- a Codex review finding on this port's own PR: `pantheon.cli`'s own
-    # git/gh env already forwards these (dropping them broke `git fetch`/`gh pr view` behind a
-    # corporate HTTP(S) proxy); every networked PROVIDER invocation needs the identical fix, or
-    # a proxy-gated network still lets metadata/fetch through while every agent's own API call
-    # fails and reads UNVERIFIED. Both cases forwarded (see `pantheon.cli`'s own comment on this
-    # same allowlist for why).
+    # --- Proxy transport vars ---
+    # a Codex review finding on this port's own PR: `pantheon.cli`'s own git/gh env already
+    # forwards these (dropping them broke `git fetch`/`gh pr view` behind a corporate HTTP(S)
+    # proxy); every networked PROVIDER invocation needs the identical fix, or a proxy-gated
+    # network still lets metadata/fetch through while every agent's own API call fails and reads
+    # UNVERIFIED. URLs, not filesystem paths — "resolves inside the checkout" has no meaning for
+    # a proxy URL; a hijacked proxy value is a DIFFERENT (network-MITM) risk class, already
+    # implicitly accepted for the same reason `pantheon.cli`'s own identical allowlist accepts it
+    # (out of scope for this specific containment-check fix, not a "still open" finding of it).
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -362,6 +432,28 @@ _PROVIDER_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "https_proxy",
     "no_proxy",
     "all_proxy",
+)
+
+# PATH-SHAPED keys from the allowlist above that need the containment check
+# (:func:`_resolves_inside_a_trusted_root`) before being forwarded — see the allowlist's own
+# header comment for the full rationale. ``HOME`` is deliberately NOT in this set: a
+# validate-or-drop check is weaker than never reading the ambient value in the first place (a
+# value could resolve OUTSIDE the repo root today and still have been set by the exact same
+# hostile env-loading mechanism this whole audit is about — the containment check only proves
+# "not currently pointed at the checkout", not "not attacker-influenced at all") — HOME instead
+# gets :func:`pantheon.execution.real_home_dir`'s OS-level (pwd database) resolution, which
+# cannot be redirected by any environment variable at all, matching the stronger guarantee that
+# function already gives the readonly git wrapper.
+_PATH_SHAPED_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "CLAUDE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "TMPDIR",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    }
 )
 
 # Force-cleared in every constructed env this module builds (never merely omitted) — a Codex
@@ -379,6 +471,30 @@ _PROVIDER_PYTHON_ENV_DEFENSIVE_CLEAR: dict[str, str] = {
     "PYTHONSTARTUP": "",
     "PYTHONNOUSERSITE": "1",
 }
+
+
+def _trusted_roots(repo_root: str | None = None) -> list[str]:
+    """The realpath-resolved directories a checkout-controlled value must never resolve inside —
+    the current working directory ALWAYS, plus ``repo_root`` when given (round 2's fix on
+    :func:`_filtered_path`, factored out here so :func:`_provider_env`'s own containment check —
+    round 6 — shares the identical root set rather than each caller keeping its own copy of the
+    same security-critical list). See :func:`_filtered_path`'s own docstring for why BOTH are
+    needed (cwd alone misses a repo-controlled entry when launched from a nested directory)."""
+    roots = [os.path.realpath(os.getcwd())]
+    if repo_root:
+        real_repo_root = os.path.realpath(repo_root)
+        if real_repo_root not in roots:
+            roots.append(real_repo_root)
+    return roots
+
+
+def _resolves_inside_a_trusted_root(path: str, roots: list[str]) -> bool:
+    """Whether ``path`` (realpath-resolved, following symlinks — never compared as a raw
+    string) is one of ``roots`` or lives somewhere underneath one. Shared by
+    :func:`_filtered_path` (a PATH entry) and :func:`_safe_path_env_value` (a path-shaped env
+    var's value) — the same "resolves inside a trusted root" test, one implementation."""
+    real_path = os.path.realpath(path)
+    return any(real_path == root or real_path.startswith(root + os.sep) for root in roots)
 
 
 def _filtered_path(repo_root: str | None = None) -> str:
@@ -399,21 +515,40 @@ def _filtered_path(repo_root: str | None = None) -> str:
     provider CLIs are installed through too many different mechanisms for a fixed directory
     allowlist (contrast ``pantheon.cli``'s/``pantheon.execution``'s ``TRUSTED_GIT_DIRS``,
     appropriate for git/gh specifically) to be practical here."""
-    roots = [os.path.realpath(os.getcwd())]
-    if repo_root:
-        real_repo_root = os.path.realpath(repo_root)
-        if real_repo_root not in roots:
-            roots.append(real_repo_root)
-
+    roots = _trusted_roots(repo_root)
     kept: list[str] = []
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         if not entry or not os.path.isabs(entry):
             continue
-        real_entry = os.path.realpath(entry)
-        if any(real_entry == root or real_entry.startswith(root + os.sep) for root in roots):
+        if _resolves_inside_a_trusted_root(entry, roots):
             continue
         kept.append(entry)
     return os.pathsep.join(kept)
+
+
+def _safe_path_env_value(key: str, value: str, roots: list[str]) -> str | None:
+    """Returns ``value`` unchanged when it resolves OUTSIDE every trusted root — an operator's
+    own, legitimate override (a real ``CLAUDE_CONFIG_DIR`` for a second account, say) — or
+    ``None`` (never forwarded) when it resolves INSIDE one, logging a loud warning either way a
+    value gets dropped. This is a validate-or-DROP gate, not a hard abort of the whole gate run:
+    every key routed through this is an OPTIONAL override (see :data:`_PATH_SHAPED_ENV_KEYS`'s
+    own header comment) whose absence just falls back to that provider CLI's own default — dropping
+    the hostile value, rather than aborting, is the correct fail-closed shape here (deny the
+    CAPABILITY the hostile value would have granted, without taking down an otherwise-legitimate
+    run over an env var most callers never even set). A relative ``value`` is realpath-resolved
+    against THIS process's own cwd by :func:`_resolves_inside_a_trusted_root` — the common case
+    (the gate is invoked from inside the repo checkout) naturally lands it under the cwd trusted
+    root already in ``roots``, so no separate relative-path special-case is needed."""
+    if _resolves_inside_a_trusted_root(value, roots):
+        print(
+            f"pantheon: warning: ambient {key} resolves inside a trusted root (the working "
+            "directory or the repo checkout) — refusing to forward it to the provider CLI (would "
+            "reopen the config/MCP/hook-loading exfiltration vector CRITICAL-1 closed, through "
+            f"the process's own environment instead of its cwd); {key} is omitted this run",
+            file=sys.stderr,
+        )
+        return None
+    return value
 
 
 def _provider_env(repo_root: str | None = None) -> dict[str, str]:
@@ -423,12 +558,35 @@ def _provider_env(repo_root: str | None = None) -> dict[str, str]:
     own docstring, round 3, for the concrete exploit a blanket copy left open). ``PATH`` is the
     filtered value from :func:`_filtered_path` (``repo_root``-aware); every other key is copied
     one at a time from the explicit :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` allowlist, never in
-    bulk."""
+    bulk.
+
+    **``HOME`` and every PATH-SHAPED key get extra treatment (adversarial review, round 6, Codex
+    P1 — reopened CRITICAL-1 through this function's ENV construction, not the cwd CRITICAL-1's
+    original fix already closed).** ``HOME`` is NEVER read from ambient env at all — resolved via
+    :func:`pantheon.execution.real_home_dir` (the passwd database), the identical fix already
+    applied to the readonly git wrapper's own env for the same hijack class, now shared rather
+    than re-derived here. Every key in :data:`_PATH_SHAPED_ENV_KEYS` (``CLAUDE_CONFIG_DIR`` and
+    the rest — see that set's own header comment) is passed through :func:`_safe_path_env_value`
+    first: a value that resolves inside the cwd or ``repo_root`` is dropped, never forwarded,
+    regardless of how it got set."""
     env: dict[str, str] = {"PATH": _filtered_path(repo_root)}
+
+    real_home = execution.real_home_dir()
+    if real_home:
+        env["HOME"] = real_home
+
+    roots = _trusted_roots(repo_root)
     for key in _PROVIDER_ENV_PASSTHROUGH_KEYS:
+        if key == "HOME":
+            continue  # handled above — never read from ambient env at all, see this function's own docstring.
         value = os.environ.get(key)
-        if value is not None:
-            env[key] = value
+        if value is None:
+            continue
+        if key in _PATH_SHAPED_ENV_KEYS:
+            value = _safe_path_env_value(key, value, roots)
+            if value is None:
+                continue
+        env[key] = value
     env.update(_PROVIDER_PYTHON_ENV_DEFENSIVE_CLEAR)
     return env
 
@@ -603,9 +761,25 @@ def _claude(
     pre-fix behavior for that one case). This does NOT reopen CRITICAL-1's own vulnerability
     either way: the neutral ``cwd`` (layer 1 of that fix, see :func:`_run`'s own docstring) is
     unconditional regardless of ``--bare`` — nothing repo-local exists in the scratch directory
-    for a provider's own startup-time discovery to find, credential source aside — ``--bare`` is
-    genuinely redundant defense-in-depth on top of that, not the primary control, so making it
-    conditional narrows an ADDITIONAL hardening layer, not the fix itself."""
+    for a provider's own startup-time discovery to find via cwd, credential source aside —
+    ``--bare`` is genuinely redundant defense-in-depth on top of that, not the primary control, so
+    making it conditional narrows an ADDITIONAL hardening layer, not the fix itself.
+
+    **Correction (adversarial review, round 6, Codex P1): the claim above was true for the CWD
+    door, but incomplete — CRITICAL-1 reopened through a SECOND, separate door this ``--bare``
+    conditionality never touched: the provider's own ENV.** Omitting ``--bare`` on the
+    stored-keychain path (correct, for local sessions — see above) still left
+    :func:`_provider_env` forwarding ``CLAUDE_CONFIG_DIR`` from ambient env unconditionally; a
+    hostile checkout's own env-loading mechanism pointing that AT a directory inside the checkout
+    got a normal Claude startup against attacker-controlled config (MCP servers, hooks) —
+    identical exfiltration, different door, ``--bare`` or not (an EXPLICIT ``CLAUDE_CONFIG_DIR``
+    override isn't something ``--bare``'s own OAuth/keychain-skip behavior touches either way).
+    Closed at :func:`_provider_env` itself, not here: every PATH-SHAPED key in
+    :data:`_PATH_SHAPED_ENV_KEYS` (``CLAUDE_CONFIG_DIR`` included) is now validated to resolve
+    outside the repo root/cwd before being forwarded, and ``HOME`` is never read from ambient env
+    at all — see that function's own docstring. Fixture proof, both ``--bare`` and no-``--bare``:
+    tests/test_providers.py's ``test_claude_env_never_forwards_a_claude_config_dir_pointed_
+    inside_the_repo_root_with_bare``/``..._without_bare``."""
     claude_bin = _resolve_cli("claude", repo_root)
     if claude_bin is None:
         raise ProviderError("'claude' CLI not found on PATH")

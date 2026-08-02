@@ -87,7 +87,7 @@ row. "PY" column names the exact mechanism in this module that closes it.
 
   Every row's "PY" column boils down to one structural fact: ``_forced_env()`` builds the
   subprocess environment as a **new dict containing only the keys this module explicitly sets**
-  — PATH is pinned to :data:`TRUSTED_GIT_DIRS` and HOME is pinned via :func:`_real_home_dir`
+  — PATH is pinned to :data:`TRUSTED_GIT_DIRS` and HOME is pinned via :func:`real_home_dir`
   (the passwd-database account home, never the ambient ``HOME`` env var — a Codex finding fixed
   this after an earlier version of this comment called HOME a safely-forwardable ambient value;
   it isn't, once a launcher environment can set it, the same class of hijack
@@ -134,6 +134,7 @@ __all__ = [
     "validate_execution",
     "execution_context_note",
     "resolve_console_script",
+    "real_home_dir",
     "main",
 ]
 
@@ -218,7 +219,7 @@ def _forced_env() -> dict[str, str]:
     child that just reads its own environ, but this way the guarantee doesn't depend on every
     future maintainer remembering to keep these off the allowlist.
 
-    ``HOME`` is pinned via :func:`_real_home_dir` (the passwd-database account home), never the
+    ``HOME`` is pinned via :func:`real_home_dir` (the passwd-database account home), never the
     ambient ``os.environ.get("HOME")`` — a second-round Codex finding on this same PR, same
     "never trust an env-derived HOME" principle :func:`_default_user_scripts_dir` was fixed for:
     forwarding a hijacked ambient ``HOME`` into this constructed env would let a hostile
@@ -227,7 +228,7 @@ def _forced_env() -> dict[str, str]:
     close everywhere else."""
     env: dict[str, str] = {}
     env["PATH"] = os.pathsep.join(TRUSTED_GIT_DIRS)
-    home = _real_home_dir()
+    home = real_home_dir()
     if home:
         env["HOME"] = home
     env["GIT_PAGER"] = "cat"
@@ -440,7 +441,7 @@ def execution_context_note(tier: str, wrapper_path: str) -> str:
     )
 
 
-def _real_home_dir() -> str | None:
+def real_home_dir() -> str | None:
     """The REAL account home directory for the process's current UID, resolved via the POSIX
     passwd database (``pwd.getpwuid(os.getuid()).pw_dir``) — NEVER via
     ``os.path.expanduser("~")`` or any other mechanism that reads the ``HOME`` environment
@@ -460,6 +461,14 @@ def _real_home_dir() -> str | None:
     Also used by :func:`_forced_env` to pin the ``HOME`` this module's own git subprocess calls
     receive, for the identical reason — never the ambient (potentially hijacked) ``HOME``.
 
+    **Public (not ``_``-prefixed) specifically so ``pantheon.providers`` can reuse it too**
+    (adversarial review, round 6, Codex P1 — reopened CRITICAL-1 through a DIFFERENT door: a
+    provider CLI's own env, not its cwd). ``pantheon.providers._provider_env()`` used to forward
+    the ambient ``HOME`` straight to every provider-CLI subprocess — the identical hijack class
+    this function was built to close for the readonly git wrapper, just never applied to the
+    broader provider-CLI env construction. Both call sites now share this ONE resolution instead
+    of each carrying its own copy of the same security-critical logic.
+
     Returns ``None`` (never raises, never falls back to ``os.path.expanduser``) when this lookup
     itself fails — no ``pwd`` module (Windows), or no passwd entry for this UID (some minimal/
     scratch container users) — rather than silently degrading to a weaker resolution."""
@@ -477,7 +486,7 @@ def _default_user_scripts_dir() -> str | None:
     ``--user`` layout) — WITHOUT reading ``PYTHONUSERBASE``, ``HOME``, or any other environment
     variable naming a filesystem location, to compute it. This is Python's own DEFAULT per-user
     base formula, replicated by hand from a value this process cannot have redirected:
-    :func:`_real_home_dir` (the passwd-database account home — see that function's own docstring
+    :func:`real_home_dir` (the passwd-database account home — see that function's own docstring
     for why ``os.path.expanduser("~")``/``HOME`` are never trusted for this, a second-round
     Codex finding on this same fix).
 
@@ -496,7 +505,7 @@ def _default_user_scripts_dir() -> str | None:
     environment cannot move, rather than either trusting an attacker-influenced env var or
     silently degrading to a weaker code path. The FIRST version of this fix used
     ``os.path.expanduser("~")`` for the "fixed formula" — itself still HOME-env-influenced, a
-    second Codex finding on this same PR; :func:`_real_home_dir` closes that too.
+    second Codex finding on this same PR; :func:`real_home_dir` closes that too.
 
     ``sysconfig.get_config_var("PYTHONFRAMEWORK")`` (used below to detect a macOS
     python.org/Apple framework build, whose per-user base is ``~/Library/Python/X.Y`` instead of
@@ -511,7 +520,7 @@ def _default_user_scripts_dir() -> str | None:
     adjacent-only check is the only lookup performed in that case, same as before this fix."""
     if os.name != "posix":
         return None
-    home = _real_home_dir()
+    home = real_home_dir()
     if not home:
         return None
     if sys.platform == "darwin" and sysconfig.get_config_var("PYTHONFRAMEWORK"):

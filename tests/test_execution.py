@@ -221,10 +221,10 @@ def test_default_user_scripts_dir_none_when_home_unresolvable(monkeypatch):
 
 
 def test_default_user_scripts_dir_none_when_pwd_module_absent(monkeypatch):
-    # The Windows/no-pwd-module case -- _real_home_dir() itself must return None, never fall
+    # The Windows/no-pwd-module case -- real_home_dir() itself must return None, never fall
     # back to expanduser/HOME.
     monkeypatch.setattr(execution, "pwd", None)
-    assert execution._real_home_dir() is None
+    assert execution.real_home_dir() is None
     assert execution._default_user_scripts_dir() is None
 
 

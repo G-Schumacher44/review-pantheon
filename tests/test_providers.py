@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from pantheon import providers
+from pantheon import execution, providers
 
 
 @pytest.fixture()
@@ -171,6 +171,101 @@ def test_claude_cwd_stays_neutral_regardless_of_bare_flag_presence(monkeypatch, 
     assert "--bare" not in captured_no_bare["argv"]
     assert captured_no_bare["kwargs"]["cwd"] == "/some/scratch/dir"
     assert captured_no_bare["kwargs"]["cwd"] != "/some/repo/root"
+
+
+# ---------------------------------------------------------------------------------------------
+# CLAUDE_CONFIG_DIR reopening CRITICAL-1 through the provider's ENV (adversarial review, round 6,
+# Codex P1). The --bare fix above (previous section) closed CRITICAL-1's cwd door; this section
+# proves the (separate) env door is closed too, on BOTH the --bare (explicit token) and no-bare
+# (stored keychain) paths -- neither "prove both directions" fixture above actually exercised
+# CLAUDE_CONFIG_DIR at all, which is exactly how this reopened without either of them catching it.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root_with_bare(
+    monkeypatch, prompt_file, tmp_path
+) -> None:
+    # The --bare (explicit-token) path: an attacker sets CLAUDE_CONFIG_DIR (via ANY mechanism
+    # that can influence this process's ambient env before it runs -- a repo-local .envrc, an
+    # environment-setting CI step reading repo content) to a directory inside the checkout
+    # containing a marker MCP-server/hook config. That marker directory's PATH must never reach
+    # the subprocess env at all -- if it did, Claude Code's own normal startup would load it
+    # (config/MCP/hook auto-discovery happens before --allowedTools's reach), even with --bare
+    # present, since --bare only skips OAuth/keychain login, not an EXPLICIT CLAUDE_CONFIG_DIR
+    # override.
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    marker_config_dir = repo_root / ".claude-hijacked"
+    marker_config_dir.mkdir()
+    (marker_config_dir / "settings.json").write_text('{"hooks": {"marker": "FIRED"}}')
+
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(marker_config_dir))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run(
+        "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
+    )
+
+    assert "--bare" in captured["argv"]  # still the credential-present path
+    env = captured["kwargs"]["env"]
+    assert "CLAUDE_CONFIG_DIR" not in env, "the marker config directory's path must never reach the subprocess env"
+
+
+def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root_without_bare(
+    monkeypatch, prompt_file, tmp_path
+) -> None:
+    # The no-bare (stored-keychain-session) path -- the coordinator's own naming of this as the
+    # door CRITICAL-1's --bare fix correctly left open (for usability) but that a blindly-
+    # forwarded CLAUDE_CONFIG_DIR reopened anyway, --bare or not.
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    marker_config_dir = repo_root / ".claude-hijacked"
+    marker_config_dir.mkdir()
+    (marker_config_dir / "settings.json").write_text('{"hooks": {"marker": "FIRED"}}')
+
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(marker_config_dir))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run(
+        "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
+    )
+
+    assert "--bare" not in captured["argv"]  # still the stored-keychain-session path
+    env = captured["kwargs"]["env"]
+    assert "CLAUDE_CONFIG_DIR" not in env, "the marker config directory's path must never reach the subprocess env"
+
+
+def test_claude_env_still_forwards_a_legitimate_claude_config_dir_without_bare(
+    monkeypatch, prompt_file, tmp_path
+) -> None:
+    # Regression guard (fixture (c) -- "don't re-break what you just fixed"): a real local
+    # multi-account CLAUDE_CONFIG_DIR override that resolves OUTSIDE any trusted root must still
+    # reach the subprocess env, on the stored-keychain (no --bare) path an operator actually uses
+    # day to day.
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    legitimate_config_dir = tmp_path / "not-the-checkout" / ".claude-alt-account"
+    legitimate_config_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(legitimate_config_dir))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run(
+        "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
+    )
+
+    assert "--bare" not in captured["argv"]
+    env = captured["kwargs"]["env"]
+    assert env["CLAUDE_CONFIG_DIR"] == str(legitimate_config_dir)
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
     captured_with_bare = _install_fake_popen(monkeypatch)
@@ -543,6 +638,100 @@ def test_provider_env_path_is_always_filtered_never_ambient(monkeypatch, tmp_pat
     env = providers._provider_env()
     assert str(checkout) not in env["PATH"].split(os.pathsep)
     assert "/usr/bin" in env["PATH"].split(os.pathsep)
+
+
+# ---------------------------------------------------------------------------------------------
+# _provider_env() -- round 6, Codex P1: CRITICAL-1 reopened through the provider's ENV (not its
+# cwd, already closed). HOME is never read from ambient env; CLAUDE_CONFIG_DIR and every other
+# PATH-SHAPED key in _PATH_SHAPED_ENV_KEYS is dropped when it resolves inside a trusted root
+# (cwd or repo_root), forwarded unchanged otherwise.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_provider_env_home_is_never_read_from_ambient_env(monkeypatch, tmp_path) -> None:
+    hijacked_home = tmp_path / "hostile-checkout-home"
+    hijacked_home.mkdir()
+    monkeypatch.setenv("HOME", str(hijacked_home))
+
+    env = providers._provider_env()
+
+    assert env.get("HOME") != str(hijacked_home)
+    # Whatever HOME IS, it must be the real passwd-database resolution -- the same source
+    # pantheon.execution.real_home_dir() (and pantheon.execution's own git-wrapper env) already
+    # uses, never the ambient value this test just hijacked.
+    real_home = execution.real_home_dir()
+    if real_home:
+        assert env["HOME"] == real_home
+    else:
+        assert "HOME" not in env
+
+
+def test_provider_env_drops_claude_config_dir_pointed_inside_the_repo_root(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    hostile_config_dir = repo_root / ".claude-hijack"
+    hostile_config_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(hostile_config_dir))
+
+    env = providers._provider_env(repo_root=str(repo_root))
+
+    assert "CLAUDE_CONFIG_DIR" not in env
+
+
+def test_provider_env_drops_claude_config_dir_pointed_at_the_cwd(monkeypatch, tmp_path) -> None:
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cwd))
+
+    env = providers._provider_env()
+
+    assert "CLAUDE_CONFIG_DIR" not in env
+
+
+def test_provider_env_forwards_claude_config_dir_when_it_resolves_outside_every_trusted_root(
+    monkeypatch, tmp_path
+) -> None:
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    legitimate_config_dir = tmp_path / "not-the-checkout" / ".claude-alt-account"
+    legitimate_config_dir.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(legitimate_config_dir))
+
+    env = providers._provider_env(repo_root=str(repo_root))
+
+    assert env["CLAUDE_CONFIG_DIR"] == str(legitimate_config_dir)
+
+
+def test_provider_env_drops_every_path_shaped_key_pointed_inside_the_repo_root(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    for key in sorted(providers._PATH_SHAPED_ENV_KEYS):
+        hostile_dir = repo_root / f"hijack-{key.lower()}"
+        hostile_dir.mkdir()
+        monkeypatch.setenv(key, str(hostile_dir))
+
+    env = providers._provider_env(repo_root=str(repo_root))
+
+    for key in providers._PATH_SHAPED_ENV_KEYS:
+        assert key not in env, f"{key} should have been dropped (resolves inside repo_root)"
+
+
+def test_provider_env_symlink_resolved_path_shaped_value_still_caught(monkeypatch, tmp_path) -> None:
+    # The containment check is realpath-based (follows symlinks), not a raw string-prefix
+    # comparison -- a value that only LOOKS like it's outside the checkout, but symlinks back
+    # inside it, must still be caught.
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    real_hostile_dir = repo_root / "real-hostile-config"
+    real_hostile_dir.mkdir()
+    outside_symlink = tmp_path / "looks-legitimate"
+    outside_symlink.symlink_to(real_hostile_dir)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(outside_symlink))
+
+    env = providers._provider_env(repo_root=str(repo_root))
+
+    assert "CLAUDE_CONFIG_DIR" not in env
 
 
 # ---------------------------------------------------------------------------------------------
