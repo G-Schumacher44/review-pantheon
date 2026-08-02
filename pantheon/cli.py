@@ -680,7 +680,7 @@ def _build_prompt(ctx: GateContext, agent: str, workdir: str) -> str:
     # even before this fix (those tools don't resolve relative to a "repo name").
     lines.append(f"- Repo root (absolute path — for Read/Grep/Glob path arguments): {ctx.repo_root}")
     # Belt-and-suspenders on top of pantheon.render's own mechanical redaction (the actual
-    # control — see render.redact_repo_root's docstring): tell the agent explicitly not to echo
+    # control — see render.redact_paths's docstring): tell the agent explicitly not to echo
     # this absolute path back into a finding. Findings already cite repo-relative paths by
     # convention (agents/*.md's own examples); this makes that convention explicit rather than
     # assumed, now that the run context above hands the agent an absolute path for the first time.
@@ -1150,7 +1150,7 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
         # persona (see _build_prompt's "Repo root (absolute path...)" line) so Read/Grep/Glob
         # still work from a neutral launch cwd; a model can echo that path back into a finding,
         # which would otherwise reach the posted PR comment verbatim (a maintainer's real home
-        # directory path, published into what may be a public PR). See render.redact_repo_root's
+        # directory path, published into what may be a public PR). See render.redact_paths's
         # own docstring for the full rationale.
         comment = render.render_comment(head_sha, agents, agent_data, repo_root=repo_root)
 

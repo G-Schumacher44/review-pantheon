@@ -100,7 +100,7 @@ class AgentRenderData:
 def _case_insensitive_path_platform() -> bool:
     """Whether the CURRENT platform's default filesystem treats path comparison
     case-insensitively — macOS (APFS/HFS+ default) and Windows both do; Linux does not. Used to
-    decide whether :func:`redact_repo_root`'s match pattern needs ``re.IGNORECASE``: on a
+    decide whether :func:`redact_paths`'s match pattern needs ``re.IGNORECASE``: on a
     case-insensitive filesystem, a provider CLI (or the model text it produces) can legitimately
     echo a differently-cased spelling of the SAME path — ``/Users/Alice/repo`` for a real
     ``/Users/alice/repo`` — and it still resolves to, and identifies, the same directory."""
@@ -115,15 +115,15 @@ def _path_redaction_variants(path: str) -> set[str]:
     through, or ``ctx.repo_root`` itself happening to carry a trailing ``/`` some `os.path.join`
     call left on it — and each of those spellings identifies the same real path just as much as
     the literal one this process holds. Deliberately does NOT also add a WITH-trailing-separator
-    variant: the stripped form alone already matches both directions via ordinary substring/regex
-    prefix matching (``"root"`` matches inside both ``"root/file"`` and a bare ``"root/"``,
-    leaving whichever separator was actually present in the TEXT untouched) — adding a second,
-    longer ``"root" + sep`` alternative would instead WIN that substring under this function's own
-    longest-first ordering and get consumed as part of the match, silently eating the separator
-    the caller's own path text needed to keep (``"<repo>src/gate.sh"`` instead of the correct
-    ``"<repo>/src/gate.sh"``) — caught live authoring this function's own fixture. Returned as a
-    set (order doesn't matter here); the caller sorts the UNION across every base path
-    longest-first before building the actual match pattern."""
+    variant: the stripped form alone already matches both directions via :func:`redact_paths`'s
+    own boundary-anchored matching (``"root"`` matches inside both ``"root/file"`` and a bare
+    ``"root/"``, leaving whichever separator was actually present in the TEXT untouched) — adding
+    a second, longer ``"root" + sep`` alternative would instead WIN that match under longest-first
+    ordering and get consumed as part of it, silently eating the separator the caller's own path
+    text needed to keep (``"<repo>src/gate.sh"`` instead of the correct ``"<repo>/src/gate.sh"``)
+    — caught live authoring this function's own fixture. Returned as a set (order doesn't matter
+    here); the caller sorts the UNION across every base path longest-first before building the
+    actual match pattern."""
     variants: set[str] = set()
     for base in (path, os.path.realpath(path)):
         stripped = base.rstrip(os.sep)
@@ -157,10 +157,42 @@ def _home_directory_redaction_targets(repo_root: str) -> set[str]:
     return targets
 
 
-def redact_repo_root(text: str, repo_root: str | None) -> str:
+# A match must be followed by a path separator, a non-path-component character, or the end of
+# the string — never continue directly into another path-component character
+# (alphanumeric/``.``/``-``/``_``). Without this, an unanchored substring match on the home-
+# directory target ``/home/alice`` would also eat the leading digits of an unrelated SIBLING
+# path like ``/home/alice2/service`` (which merely shares a prefix — a different user's home
+# directory entirely), corrupting it into ``<repo>2/service``. Adversarial review, round 5,
+# coordinator finding.
+_PATH_BOUNDARY = r"(?=/|[^A-Za-z0-9_.\-]|$)"
+
+
+def _json_escaped_variant(target: str) -> str | None:
+    """The JSON-string-escaped spelling of ``target`` (``\\`` -> ``\\\\``, then ``"`` -> ``\\"``
+    — backslash escaped FIRST, or the quote-escaping step's own inserted backslash would get
+    double-escaped by a backslash pass that ran second) — ``None`` when escaping changes nothing
+    (the common case: most paths hold neither character), so the caller doesn't add a redundant
+    duplicate alternative to the match pattern. See :func:`redact_paths`'s own docstring for why
+    every redaction target needs both its raw AND its escaped spelling searched for."""
+    escaped = target.replace("\\", "\\\\").replace('"', '\\"')
+    return escaped if escaped != target else None
+
+
+def redact_paths(text: str, repo_root: str | None) -> str:
     """Replaces every occurrence of ``repo_root`` (an absolute filesystem path) — AND every other
     spelling that identifies the same user/location — in ``text`` with the stable placeholder
-    ``<repo>``. Originally a fix for a real information-disclosure regression CRITICAL-1's own fix
+    ``<repo>``. THE single redaction chokepoint for this module (adversarial review, round 5,
+    coordinator finding, closing five straight rounds of instance-by-instance patching — too
+    narrow, then partial variants, then escape ordering, then unanchored substitution and a
+    missed fallback path): every place in this module that can carry model text or a path —
+    human-readable sections (:func:`sanitize_inline`), the machine tail's pretty-printed JSON
+    AND its raw-text fallback (:func:`_machine_tail_text`) — calls THIS function, and nothing
+    else in this module performs its own ad hoc path matching. ``tests/test_render.py``'s
+    ``test_redact_paths_is_the_only_redaction_chokepoint_in_this_module`` mechanically enforces
+    that a sixth call site can't add its own bespoke logic instead of routing through here (the
+    same enumeration-test pattern ``tests/test-json-boundary.sh`` uses for ``pantheon.jqjson``).
+
+    Originally a fix for a real information-disclosure regression CRITICAL-1's own fix
     (adversarial review) introduced: that fix exposes the repo's absolute path to the reviewing
     agent (``pantheon.cli._build_prompt``'s "Repo root (absolute path...)" Run-context line —
     necessary so ``Read``/``Grep``/``Glob`` still work once the provider no longer launches with
@@ -168,94 +200,65 @@ def redact_repo_root(text: str, repo_root: str | None) -> str:
     in a finding's ``file``/``issue``/``scenario``/``summary`` text — and that text gets POSTED to
     a PR comment. On CI runners that's a harmless ephemeral path, but a CLI-lane run from a
     maintainer's own machine has their REAL home directory path (often containing their username)
-    published into what may be a public PR comment — a real regression an otherwise-correct
-    security fix would have introduced.
+    published into what may be a public PR comment.
 
-    **Widened (adversarial review, round 2) — the original fix matched only the EXACT
-    ``repo_root`` string via ``str.replace``, which a live finding showed missed real variants a
-    model can legitimately produce without any adversarial intent at all:**
+    **What this function covers, and why each was needed (five rounds, now consolidated):**
 
       - A **parent-path leak** — the model cites the bare home-directory prefix
-        (``/Users/alice``) rather than the full repo path, e.g. summarizing "this run's checkout
-        under /Users/alice". Closed by :func:`_home_directory_redaction_targets`.
-      - A **trailing-slash form** — ``repo_root + "/"`` — that an exact-string match against the
-        no-trailing-slash ``repo_root`` never catches as a match at the SHORTER boundary (the
-        longer string still contains the shorter one as a substring for a simple prefix-leak, but
-        a value that is JUST the trailing-slash form standing alone needs its own target).
-      - A **symlink-resolved form** — ``os.path.realpath(repo_root)`` — a provider CLI (or the OS
-        path-resolution it goes through) can hand back the resolved form of a path this process
-        holds as a symlink (macOS's own ``/tmp`` → ``/private/tmp`` is a standing example), which
-        is a textually DIFFERENT string from ``repo_root`` even though it names the identical
-        directory.
+        (``/Users/alice``) rather than the full repo path. Closed by
+        :func:`_home_directory_redaction_targets`.
+      - A **trailing-slash / symlink-resolved form** — ``repo_root``/home with or without a
+        trailing separator, and each one's ``os.path.realpath`` — a provider CLI (or the OS path
+        resolution it goes through) can hand back a textually different spelling of the identical
+        directory (macOS's own ``/tmp`` -> ``/private/tmp`` is a standing example). Closed by
+        :func:`_path_redaction_variants`.
       - A **case variant** — on a case-insensitive filesystem (macOS/Windows — see
         :func:`_case_insensitive_path_platform`), ``/Users/Alice/repo`` and ``/users/alice/repo``
-        name the same directory; the match pattern uses ``re.IGNORECASE`` on those platforms only
-        (Linux paths ARE case-sensitive — redacting a same-spelled-but-different-case path there
-        would be a false-positive over-redaction, not a fix).
+        name the same directory; ``re.IGNORECASE`` applies on those platforms only (Linux paths
+        ARE case-sensitive — redacting a same-spelled-but-different-case path there would be a
+        false-positive over-redaction, not a fix).
+      - **JSON-escaped spellings** — a target containing a JSON-escapable character (a legal
+        ``"`` in a POSIX directory name, or a ``\\`` — Git Bash on Windows checks repos out under
+        paths containing one) can appear in TEXT that already went through JSON serialization
+        (:func:`_machine_tail_text`'s success path) OR text that was never OUR serialization at
+        all but is still JSON-shaped bytes an agent produced (:func:`_machine_tail_text`'s
+        raw-text FALLBACK, when the overall document fails to parse but individual string
+        fragments inside it are still validly-escaped JSON — missed in an earlier round: that
+        fallback only ever searched for the RAW, unescaped spelling). Both the raw and the
+        JSON-escaped form of every target are searched for here, unconditionally, for every
+        caller — one rule, not a per-call-site judgment call about which form THIS text happens
+        to be in.
+      - **Unanchored substring matching corrupting a sibling path** — redacting bare
+        ``/home/alice`` as a substring would also match (and mangle) the unrelated
+        ``/home/alice2/service``, which merely shares a prefix. Every alternative in the compiled
+        pattern is followed by :data:`_PATH_BOUNDARY`, a lookahead requiring the match to end at
+        a real path/token boundary (a ``/``, a non-path-component character, or end of string) —
+        never mid-component.
 
-    Every variant is escaped (:func:`re.escape`) and combined into ONE regex, alternatives ordered
-    LONGEST-first (regex alternation takes the first alternative that matches at a given position,
-    left to right — ordering longest-first is what makes "prefer the longer, more specific match"
-    deterministic rather than a ``re`` module implementation detail; e.g. text containing the full
-    ``repo_root`` must redact the WHOLE thing to ``<repo>``, not just its home-directory prefix,
-    leaving the rest of the path dangling unredacted next to a stray ``<repo>``).
+    Every variant (raw and JSON-escaped) is escaped for regex (:func:`re.escape`) and combined
+    into ONE pattern, alternatives ordered LONGEST-first (regex alternation takes the first
+    alternative that matches at a given position, left to right — ordering longest-first is what
+    makes "prefer the longer, more specific match" deterministic rather than a ``re`` module
+    implementation detail; e.g. text containing the full ``repo_root`` must redact the WHOLE
+    thing to ``<repo>``, not just its home-directory prefix, leaving the rest dangling
+    unredacted next to a stray ``<repo>``), each followed by the shared boundary lookahead.
 
-    Closed mechanically here, not by asking the persona nicely (the persona/context ALSO now say
-    findings must cite repo-relative paths — belt-and-suspenders, never the primary control):
-    every model-controlled display field in :func:`render_comment` routes through this before it
-    ever reaches a rendered PR comment, the exact chokepoint DESIGN.md's own "Validation surface"
-    section already describes for every other render-time sanitization this module does. A no-op
-    when ``repo_root`` is falsy (the common case for every caller that hasn't opted into this —
-    the two-runtime env-var bridge below, older callers)."""
+    A no-op when ``repo_root`` is falsy (the common case for every caller that hasn't opted into
+    this — the two-runtime env-var bridge below, older callers)."""
     if not repo_root:
         return text
-    targets = _path_redaction_variants(repo_root) | _home_directory_redaction_targets(repo_root)
-    if not targets:
+    raw_targets = _path_redaction_variants(repo_root) | _home_directory_redaction_targets(repo_root)
+    if not raw_targets:
         return text
-    ordered = sorted(targets, key=len, reverse=True)
+    all_targets: set[str] = set(raw_targets)
+    for t in raw_targets:
+        escaped = _json_escaped_variant(t)
+        if escaped is not None:
+            all_targets.add(escaped)
+    ordered = sorted(all_targets, key=len, reverse=True)
     flags = re.IGNORECASE if _case_insensitive_path_platform() else 0
-    pattern = re.compile("|".join(re.escape(t) for t in ordered), flags)
+    pattern = re.compile("(?:" + "|".join(re.escape(t) for t in ordered) + ")" + _PATH_BOUNDARY, flags)
     return pattern.sub("<repo>", text)
-
-
-def _redact_repo_root_in_value(value: Any, repo_root: str | None) -> Any:
-    """Recursively applies :func:`redact_repo_root` to every STRING leaf (and every string KEY)
-    inside a parsed JSON value (dict/list, recursively, or a bare scalar) — the DATA-level
-    counterpart to that function's own text-level redaction, and the actual fix for a real
-    ordering bug (adversarial review, round 4, coordinator finding): redacting AFTER a value has
-    already been JSON-serialized (:func:`jqjson.dumps`, which escapes ``"``/``\\``/control
-    characters) can no longer match ``repo_root``'s own literal text the moment ``repo_root``
-    itself contains any JSON-escapable character — a literal ``"`` in a POSIX directory name, or
-    a ``\\`` (a real shape, not just theoretical: Git Bash on Windows checks repos out under
-    paths containing one). Escaping and redaction must never run out of order: redact the raw
-    DATA first, so serialization only ever has to escape the SAFE ``<repo>`` replacement text
-    (which has no special characters to begin with) — never redact text that serialization has
-    already transformed. Every call site in this module that used to redact POST-serialization
-    (:func:`_machine_tail_text`'s ``dumps()`` output; a finding's own ``file``/``issue``/
-    ``scenario``/``severity`` field, each independently stringified via
-    ``jqjson.jq_text``/``jqjson.dumps`` for a non-string value BEFORE reaching
-    :func:`sanitize_inline`'s own redaction) now redacts the value itself at THIS chokepoint
-    instead, immediately after parsing/extraction and before it is ever stringified — see
-    :func:`render_comment`'s and :func:`_machine_tail_text`'s own bodies for the call sites.
-    Dict KEYS are redacted too, not just values: the machine tail dumps whatever keys an agent's
-    JSON actually contains, including ones no display field ever reads by name, so an adversarial
-    or accidental key literally containing the repo root would otherwise reach the machine tail
-    unredacted even though every named value does not. Non-string leaves (numbers, bools, null,
-    jq's NAN/``_RawBigNumber`` sentinels) pass through unchanged — none of them can hold a
-    filesystem path. A no-op (returns ``value`` unchanged, no copy made) when ``repo_root`` is
-    falsy, matching :func:`redact_repo_root`'s own convention."""
-    if not repo_root:
-        return value
-    if isinstance(value, str):
-        return redact_repo_root(value, repo_root)
-    if isinstance(value, dict):
-        return {
-            (redact_repo_root(k, repo_root) if isinstance(k, str) else k): _redact_repo_root_in_value(v, repo_root)
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_repo_root_in_value(v, repo_root) for v in value]
-    return value
 
 
 def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
@@ -263,9 +266,9 @@ def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
     renderer interpolates — table cells, prose, AND values placed inside a backtick code span.
     Mirrors ``cli/lib/render_comment.sh``'s ``_pantheon_sanitize_inline`` exactly, same order of
     operations (order matters — see that function's header comment for why each step is where it
-    is), plus one Python-port-only step (see :func:`redact_repo_root`'s own docstring for why
-    this port specifically needs it: the persona now sees the repo's absolute path, which bash's
-    own runtime never exposed to an agent in the first place):
+    is), plus one Python-port-only step (see :func:`redact_paths`'s own docstring for why this
+    port specifically needs it: the persona now sees the repo's absolute path, which bash's own
+    runtime never exposed to an agent in the first place):
 
       - Stringified via ``pantheon.jqjson.jq_text`` first (jq -r's raw-output form — see that
         function's docstring), not a bare ``str()``. By the time a value reaches here it has
@@ -277,10 +280,15 @@ def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
         (``d.verdict``/``d.reason``, which come from a bash counterpart that reads an env var
         DIRECTLY, never through ``$(...)``, and so were never jq-stringified or newline-stripped
         in the first place — see ``pantheon.jqjson.subst``'s own docstring for that distinction).
-      - ``repo_root`` (when given) redacted to ``<repo>`` — see :func:`redact_repo_root`. Done
-        EARLY (right after stringification, before any of the markdown-escaping steps below) so
-        the match is against the model's own literal text, not a version already mangled by a
-        later escaping step.
+        A non-string value's own ``jq_text`` call routes through ``jqjson.dumps`` internally
+        (JSON-serializing it, which escapes ``"``/``\\``/control chars) — :func:`redact_paths`'s
+        own escaped-spelling matching (not a separate step here) is what keeps THAT case covered
+        too, without this function needing to know or care which shape the value arrived in.
+      - ``repo_root`` (when given) redacted to ``<repo>`` — see :func:`redact_paths`. Done EARLY
+        (right after stringification, before any of the markdown-escaping steps below) so the
+        match is against the model's own literal text (modulo the JSON-escaping ``jq_text`` may
+        already have applied for a non-string value, which :func:`redact_paths` itself accounts
+        for), not a version already mangled by a LATER, unrelated escaping step below.
       - NUL (U+0000) dropped outright. Not a markdown/HTML concern like the rest of this
         function — it's a bash-parity one: bash's ``$(...)`` command substitution cannot hold a
         NUL byte and silently drops it (a documented bash limitation, not something
@@ -308,12 +316,13 @@ def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
     the machine tail was never at risk. The machine tail DOES still need the repo-root redaction
     above, though — it's not a markdown-safety concern the way NUL-handling is, it's the same
     information-disclosure concern reaching a second surface (the raw JSON is right below the
-    human-readable table, in the same comment) — see :func:`render_comment`'s own body for where
-    that's applied to the machine tail's own text, since :func:`_machine_tail_text` itself stays
-    focused on parse/pretty-print, not redaction.
+    human-readable table, in the same comment) — :func:`_machine_tail_text` calls
+    :func:`redact_paths` directly on its own output (both the pretty-printed-JSON success path
+    and the raw-text fallback), the same chokepoint this function calls, rather than going
+    through this function itself.
     """
     s = jqjson.jq_text(s)
-    s = redact_repo_root(s, repo_root)
+    s = redact_paths(s, repo_root)
     s = s.replace("\x00", "")
     s = s.replace("\n", " ")
     s = s.replace("|", "\\|")
@@ -493,28 +502,27 @@ def _machine_tail_text(raw_text: str, repo_root: str | None = None) -> str:
     non-object/non-array to an empty/absent result): the machine tail's whole purpose is showing
     what's actually there, parseable or not, exactly like bash's own fallback does.
 
-    ``repo_root`` redaction happens INSIDE this function, at two different points depending on
-    which branch runs — never applied to this function's own OUTPUT by the caller, which is the
-    ordering bug this signature change fixes (adversarial review, round 4, coordinator finding).
-    The parse-succeeds branch redacts the PARSED VALUE (:func:`_redact_repo_root_in_value`)
-    BEFORE :func:`jqjson.dumps` serializes it — ``dumps`` JSON-escapes ``"``/``\\``/control
-    characters, so redacting its OUTPUT text against ``repo_root``'s own raw, unescaped form
-    silently stops matching (and therefore stops redacting) the instant ``repo_root`` contains
-    any JSON-escapable character itself — a literal ``"`` in a POSIX directory name, or a ``\\``
-    (a real path shape, not just theoretical: Git Bash on Windows checks repos out under paths
-    containing one). Redacting the DATA first means ``dumps`` only ever has to escape the SAFE
-    ``<repo>`` replacement text, which has no special characters to begin with — the two steps
-    can no longer desync regardless of what ``repo_root`` itself contains. The parse-FAILS
-    (raw-text-fallback) branch never goes through ``dumps`` at all, so there is no escaping step
-    for a post-hoc redaction to desync from — :func:`redact_repo_root` runs directly on
-    ``raw_text`` there, which is already the correct order (redact-the-only-representation, since
-    there both times ARE just one)."""
+    ``repo_root`` redaction happens INSIDE this function, on this function's own OUTPUT, on
+    EITHER branch — never applied by the caller after the fact. Both branches call
+    :func:`redact_paths` directly, the module's one redaction chokepoint (adversarial review,
+    round 5, coordinator finding: an earlier round redacted the PARSED VALUE before
+    :func:`jqjson.dumps` serialized it, a data-level workaround for what :func:`redact_paths`'s
+    OWN escaped-spelling matching now handles directly — no separate pre-serialization pass is
+    needed once the chokepoint itself understands both the raw AND JSON-escaped spelling of every
+    target). The raw-text FALLBACK branch (parse fails) gets the identical treatment for a
+    distinct reason, missed in that same earlier round: this branch never goes through OUR
+    ``dumps()`` call at all, but ``raw_text`` can still be JSON-SHAPED bytes an agent produced
+    that are individually validly-escaped even though the overall document fails to parse (e.g.
+    truncated mid-object) — a plain raw-spelling-only search there would miss a
+    JSON-escapable-character ``repo_root`` hiding in an already-escaped fragment. Routing this
+    branch through the SAME :func:`redact_paths` call (which searches both spellings
+    unconditionally) closes that gap without this function needing its own separate judgment
+    call about which spelling ``raw_text`` happens to be in."""
     try:
         parsed = jqjson.loads(raw_text)
     except jqjson.JqParseError:
-        return redact_repo_root(raw_text, repo_root)
-    parsed = _redact_repo_root_in_value(parsed, repo_root)
-    return jqjson.dumps(parsed, indent=2, ensure_ascii=False)
+        return redact_paths(raw_text, repo_root)
+    return redact_paths(jqjson.dumps(parsed, indent=2, ensure_ascii=False), repo_root)
 
 
 def _escape_lone_surrogates(s: str) -> str:
@@ -566,7 +574,7 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
 
     ``repo_root``, when given (``pantheon.cli``'s ``run_gate()`` always passes its own resolved
     repo root), redacts every occurrence of that absolute path to ``<repo>`` in every
-    model-controlled display field AND the machine-tail JSON — see :func:`redact_repo_root`'s own
+    model-controlled display field AND the machine-tail JSON — see :func:`redact_paths`'s own
     docstring for the information-disclosure regression this closes (CRITICAL-1's own fix,
     adversarial review, now exposes the repo's absolute path to the persona so it can still use
     ``Read``/``Grep``/``Glob`` from a neutral launch cwd — a model can echo that path back into a
@@ -591,16 +599,14 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
     total_findings = 0
     for agent in agents:
         d = data_for(agent)
+        # No separate DATA-level redaction pass needed here (an earlier round had one): a
+        # finding's file/issue/scenario/severity/summary field can itself be a non-string JSON
+        # value, and jqjson.jq_text/dumps() on a non-string value JSON-escapes it, but
+        # redact_paths (called below, inside sanitize_inline) searches BOTH the raw and the
+        # JSON-escaped spelling of every target unconditionally — so extraction stays a plain
+        # findings_obj.get(...) and the single downstream sanitize_inline call is what closes
+        # this, the same chokepoint every other model-controlled field in this loop already uses.
         findings_obj = d.findings_json if isinstance(d.findings_json, dict) else {}
-        # Redact repo_root on this DATA now, before anything below stringifies any of it —
-        # a finding's file/issue/scenario/severity/summary field can itself be a non-string
-        # JSON value (an adversarial or malformed payload), and jqjson.jq_text/dumps() on a
-        # non-string value JSON-escapes it; redacting AFTER that escaping runs is the same
-        # ordering bug _machine_tail_text's own docstring documents (repo_root containing a
-        # `"`/`\` no longer matches its own already-escaped form). Redacting the whole dict here
-        # — keys too — means every downstream jq_text/dumps/sanitize_inline call in this loop
-        # only ever escapes the safe `<repo>` replacement text, never a raw un-redacted path.
-        findings_obj = _redact_repo_root_in_value(findings_obj, repo_root)
         total_findings += len(_safe_findings(findings_obj))
 
         # Sanitize the raw verdict value FIRST, then wrap it in our own backticks — sanitizing an
@@ -617,16 +623,14 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
 
     for agent in agents:
         d = data_for(agent)
+        # No separate DATA-level redaction pass needed here (an earlier round had one): a
+        # finding's file/issue/scenario/severity/summary field can itself be a non-string JSON
+        # value, and jqjson.jq_text/dumps() on a non-string value JSON-escapes it, but
+        # redact_paths (called below, inside sanitize_inline) searches BOTH the raw and the
+        # JSON-escaped spelling of every target unconditionally — so extraction stays a plain
+        # findings_obj.get(...) and the single downstream sanitize_inline call is what closes
+        # this, the same chokepoint every other model-controlled field in this loop already uses.
         findings_obj = d.findings_json if isinstance(d.findings_json, dict) else {}
-        # Redact repo_root on this DATA now, before anything below stringifies any of it —
-        # a finding's file/issue/scenario/severity/summary field can itself be a non-string
-        # JSON value (an adversarial or malformed payload), and jqjson.jq_text/dumps() on a
-        # non-string value JSON-escapes it; redacting AFTER that escaping runs is the same
-        # ordering bug _machine_tail_text's own docstring documents (repo_root containing a
-        # `"`/`\` no longer matches its own already-escaped form). Redacting the whole dict here
-        # — keys too — means every downstream jq_text/dumps/sanitize_inline call in this loop
-        # only ever escapes the safe `<repo>` replacement text, never a raw un-redacted path.
-        findings_obj = _redact_repo_root_in_value(findings_obj, repo_root)
         emoji = emoji_for_color(d.color)
 
         lines.append(f"**{agent}** @ `{short_sha}` — {emoji} {sanitize_inline(d.verdict, repo_root)}")
@@ -755,7 +759,7 @@ def render_from_env(head_sha: str, agents: list[str]) -> str:
     with a hand-built ``agent_data`` mapping. Also reads ``PANTHEON_REPO_ROOT`` (the same env var
     name ``pantheon.execution``'s wrapper CLI reads for the identical concept — see that module's
     ``_wrapper_cli`` docstring) so this black-box CLI seam can exercise :func:`render_comment`'s
-    ``repo_root``-redaction fix (see :func:`redact_repo_root`) too, not just its own in-process
+    ``repo_root``-redaction fix (see :func:`redact_paths`) too, not just its own in-process
     API — `tests/test-render-comment-python.sh`'s own fixture drives this env var."""
     repo_root = os.environ.get("PANTHEON_REPO_ROOT") or None
     return render_comment(head_sha, agents, {a: _agent_data_from_env(a) for a in agents}, repo_root=repo_root)
