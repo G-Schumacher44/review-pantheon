@@ -82,11 +82,17 @@ jobs:
       - name: Run verdict-decision fixture tests
         run: bash tests/test-verdict-decision.sh
 
+      - name: Run verdict-decision fixture tests (Python port, docs/PYTHON-PORT.md)
+        run: bash tests/test-verdict-decision-python.sh
+
       - name: Run base-pinned-read fixture tests (symlink-safe resolution)
         run: bash tests/test-base-pinned-read.sh
 
       - name: Run combined-comment renderer fixture tests
         run: bash tests/test-render-comment.sh
+
+      - name: Run combined-comment renderer fixture tests (Python port, docs/PYTHON-PORT.md)
+        run: bash tests/test-render-comment-python.sh
 
       - name: Run install.sh fixture tests
         run: bash tests/test-install.sh

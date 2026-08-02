@@ -596,8 +596,10 @@ action.yml                 the published composite action (see "Published action
                            the whole install for a target repo is examples/review-gate.yml
 examples/review-gate.yml   the ~20-line consumer stub for action.yml; the entire footprint of
                            the published-action surface in a target repo
-tests/                     13 fixture-test scripts, one per seam — CONTRIBUTING.md's dev-setup
-                           table is the canonical, complete list (verified against
+tests/                     15 fixture-test scripts (13 one-per-seam, plus two Python-port
+                           black-box equivalents docs/PYTHON-PORT.md's Slice 2 added — see that
+                           doc's section 4) — CONTRIBUTING.md's dev-setup table is the
+                           canonical, complete list (verified against
                            `git ls-tree -r tests/`; CI asserts the two stay in sync). Don't
                            re-list them here — that's exactly the forked-inventory shape rule 5
                            exists to prevent.
