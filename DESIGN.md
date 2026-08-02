@@ -5,8 +5,10 @@ verdicts **enforce** — wired into a fail-closed PR gate that can block a merge
 counsel agents (Socrates, Diogenes, Plato) whose verdicts **inform** a human's decision and never
 gate or block, regardless of what they're pointed at: a spec, a design doc, a proposal, existing
 code, or a diff. Agent-CLI-agnostic: Claude-first, with pluggable provider lanes (Codex, Gemini,
-Cursor). This document is the contract — the personas, runners, and workflow are all
-implementations of what's written here. See `docs/README.md` for a full doc index.
+Cursor). This document is the contract for this public rebuild (see the README's ["On generative
+AI use"](README.md#on-generative-ai-use) note for what that means) — the personas, runners,
+and workflow are all implementations of what's written here. See `docs/README.md` for a full doc
+index.
 
 ## The idea
 
@@ -38,6 +40,29 @@ about them is scoped to design documents only:
 They can be added to a CLI gate run via `--agents` or `gate.conf` for a shape check alongside the
 twins, but that wiring is the exception: their design purpose is a human reading their counsel
 and deciding, not a pipeline deciding for them.
+
+<details>
+<summary>Gate flow at a glance</summary>
+
+```
+GATE — enforce, every PR                    COUNSEL — inform, before merging
+------------------------------              ------------------------------
+PR opened                                   spec / design doc / proposal
+  -> prompt built (agents/<name>.md            / existing code / a diff
+     persona + diff/context block)               |
+  -> provider lane (cli/providers/*.sh            v
+     or claude-code-action)                    philosopher
+  -> JSON verdict --(missing/bad)-->            (socrates | diogenes | plato)
+     fail-closed: UNVERIFIED                     |
+  -> decider (verdict.sh | decide_verdict.py)     v
+     blocker invariant: any "blocker"          advisory verdict
+     finding forces red, verdict field           (GO / TRIM / DRIFTING / ...)
+     notwithstanding                              |
+  -> one combined PR comment                      v
+     (signal + table + folded findings)        human decides
+```
+
+</details>
 
 ## Hard rules (non-negotiable, all agents, all providers)
 
@@ -199,8 +224,23 @@ Per-tool support is tiered honestly, not uniformly:
   closest equivalent) convention was checked against that tool's own current official docs
   before implementing, not assumed from Claude Code parity. Where a tool has no repo-level
   command convention at all, `install.sh` says so and skips it rather than inventing one — see
-  the flag's own comment block in `install.sh` and the README's "Provider lanes" section for
-  what was verified vs. best-effort, and against which source, per tool.
+  the flag's own comment block in `install.sh`, and the verification matrix below for what was
+  checked against which source, per tool.
+
+<details>
+<summary>Per-tool editor/CLI install matrix (verified vs. best-effort)</summary>
+
+| Tool | What's generated | Status |
+|---|---|---|
+| **Claude Code** (`--claude`) | All five personas copied verbatim into `.claude/agents/`, plus a generated `/counsel` command (`.claude/commands/counsel.md`) that runs Socrates first, then Diogenes + Plato, and synthesizes the verdicts. | **Verified, first-class.** The personas are already this format; `/counsel` follows the documented [slash-command](https://docs.claude.com/en/docs/claude-code/slash-commands) convention. |
+| **Cursor** (`--cursor`) | All five personas as native subagents, `.cursor/agents/*.md` (frontmatter adapted to Cursor's schema). | **Verified against current official docs** ([cursor.com/docs/subagents](https://cursor.com/docs/subagents), Cursor 2.4+). Best-effort: not integration-tested against a live Cursor install in this repo's CI. |
+| **Codex CLI** (`--codex`) | All five personas as Codex Skills, `.agents/skills/<name>/SKILL.md`. | **Verified against current official docs** ([developers.openai.com/codex/skills](https://developers.openai.com/codex/skills)). Codex has no repo-level "custom command" convention, so Skills is used instead of inventing one. Best-effort: not integration-tested against a live Codex install. |
+| **Gemini CLI** (`--gemini`) | All five personas as custom commands, `.gemini/commands/<name>.toml`. | **Verified against official docs** ([custom-commands.md](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/custom-commands.md)). Best-effort: not integration-tested against a live Gemini CLI install. |
+
+Claude's `/counsel` is the only generated synthesis command — for the other tools, invoke the
+counsel personas individually and reason across their verdicts yourself.
+
+</details>
 
 ## Two runtimes, one rule
 

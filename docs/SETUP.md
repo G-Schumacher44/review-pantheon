@@ -18,7 +18,7 @@ you're past first run: [CLI.md](CLI.md).
 | `python3` | Action surface only | `action/decide_verdict.py` is the Action's verdict decider. The CLI surface doesn't need Python at all — its decider is `cli/lib/verdict.sh` (bash + `jq`). |
 | `curl` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Only needed for the no-local-checkout install path — fetches the repo tarball from GitHub's codeload endpoint. Not needed for a local-checkout install, `install.sh`, or normal CLI/Action use. |
 | `tar` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Extracts the tarball `curl` fetches. Same scope as `curl` above — not needed otherwise. |
-| One provider CLI | Actually calling a model | `claude` (Claude Code CLI) is the default lane and the only one integration-tested. `codex`, `gemini`, `cursor-agent` are best-effort — see the README's [Provider lanes](../README.md#provider-lanes) table. `--dry-run` (below) needs none of these installed. |
+| One provider CLI | Actually calling a model | `claude` (Claude Code CLI) is the default lane and the only one integration-tested. `codex`, `gemini`, `cursor-agent` are best-effort — see DESIGN.md's ["Provider lanes"](../DESIGN.md#provider-lanes) section. `--dry-run` (below) needs none of these installed. |
 | Authenticated `claude` CLI | A live (non-`--dry-run`) run on the default provider lane | Check with `claude auth status` before your first live run — an unauthenticated CLI fails the provider call, which surfaces as `UNVERIFIED` per agent (see [Troubleshooting](#troubleshooting) below), not a clear "log in" message. `--dry-run` needs no authentication at all — it never calls a provider. |
 
 ## Three ways to install
@@ -42,6 +42,17 @@ counsel agents. Idempotent — see `install.sh`'s own header comment and the REA
 
 You still run the CLI surface (`cli/review-gate`) from the review-pantheon checkout itself, not
 from the target repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
+
+**Post-install checklist:**
+
+1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN`.
+2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
+3. `.github/workflows/review.yml` ships pinned to a real, verified
+   `anthropics/claude-code-action` commit SHA (see that file's header comment for the release
+   and the source it was checked against) — if you re-pin it yourself, confirm the SHA still
+   matches a release you trust before relying on this gate.
+4. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
+5. Only after step 4 passes, consider making the check required.
 
 </details>
 
@@ -153,8 +164,13 @@ a passthrough for the cloud-provider ones. If you need pure cloud-provider auth 
 token at all), use Way A instead: `install.sh` vendors `action/review.yml` into your repo,
 which is then yours to edit — add the cloud-provider inputs to its `with:` block directly.
 
-Same post-install checklist as Way A otherwise: set `REVIEW_GATE_ENABLED=true`, open a test PR
-with a deliberately planted blocker, confirm red before trusting a green result.
+**Post-install checklist:**
+
+1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY` — wire whichever one
+   into the stub's `with:` block; see the auth-surface table above).
+2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
+3. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
+4. Only after step 3 passes, consider making the check required.
 
 Still want the Action surface but prefer the files reviewable in your own repo's history (or don't
 want to depend on this repo being public)? That's Way A, not Way C — `install.sh` vendors

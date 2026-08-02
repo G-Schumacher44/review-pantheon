@@ -2,161 +2,82 @@
 
 <img src="docs/assets/banner.png" alt="review-pantheon — Spec Driven AI Coding toolkit" width="100%"/>
 
-
-[![CI](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml/badge.svg)](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml)
+<!-- Badges render only for authenticated viewers while this repo is private; they'll render
+     for everyone once visibility flips to public — this is expected, not broken, and nothing
+     here needs to change when that happens. -->
+[![CI](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![fail-closed by design](https://img.shields.io/badge/fail--closed-by%20design-brightgreen)](#how-the-gate-stays-honest)
-[![providers](https://img.shields.io/badge/providers-claude%20%28verified%29%20%C2%B7%20codex%20%7C%20gemini%20%7C%20cursor%20%28best--effort%29-blue)](#provider-lanes)
 
 </div>
 
 # review-pantheon — Spec Driven AI Coding toolkit
 
-- AI-assisted, spec-driven development produces work faster than a human can independently
-  verify it — the bottleneck moves from writing the change to trusting the report of it.
-- Most "AI code review" collapses two different questions into one pass: does the diff look
-  right, and did the PR actually do what it claims. A single reviewer answering both tends to
-  skim the code for red flags and take the description mostly on faith.
-- A pass with no fail-closed rule turns a missing, empty, or malformed verdict into a quiet
-  green — the one failure mode that's worse than an honest red.
+- AI-assisted development produces work faster than a human can independently verify it — the
+  bottleneck moves from writing the change to trusting the report of it.
+- A pass with no fail-closed rule turns a missing or malformed verdict into a quiet green — the
+  one failure mode worse than an honest red.
 
-## What review-pantheon is
+A portable review gate — a GitHub Action plus a provider-agnostic CLI — that splits "does the
+diff look right" from "did the PR actually do what it claims" into two independent agents
+(Artemis, Apollo), backed by three advisory philosopher agents for the planning stage before
+anything is built. Built for teams where a written spec is the contract, not a suggestion read
+once and forgotten: `DESIGN.md` in this repo is itself that contract.
 
-A portable review gate — a GitHub Action plus a provider-agnostic CLI — built around **five
-read-only agent personas** (`agents/*.md`), split into two tiers: two **gate agents** (Artemis,
-Apollo) whose verdicts enforce and can block a merge, and three **counsel agents** (Socrates,
-Diogenes, Plato) whose verdicts inform a human decision and never gate.
-
-The verdict-decision rule — trailing-JSON extraction, schema validation, the blocker invariant —
-is implemented **twice, once per runtime** (`cli/lib/verdict.sh` in bash, `action/decide_verdict.py`
-in Python); a cross-runner fixture test in CI keeps the two in sync. **4 provider lanes**
-(`cli/providers/{claude,codex,gemini,cursor}.sh`) plug into the same CLI. Claude is the
-integration-tested lane; Codex, Gemini, and Cursor are best-effort by design and fail closed the
-same way an unparseable verdict does — see [Provider lanes](#provider-lanes) for the
-verified-vs-best-effort matrix. The GitHub Action's permissions are `contents: read` and
-`pull-requests: write` — no write access beyond posting one PR comment.
-
-review-pantheon is built for teams where a written spec is the contract, not a suggestion someone
-skims once and stops checking: `DESIGN.md` in this repo is itself that contract — its rule 5 says
-a disagreement between the design doc and the implementation is a bug in one of them, not a
-documentation nit. `REVIEW_RULES.example.md` is a template for an executable house-spec: rules
-the gate treats as blocker-class checks on every PR, not guidelines read once. Apollo's job —
-verifying delivery against claim — is the verification half of spec-driven development.
+**Who it's for:** teams or solo builders shipping AI-assisted changes fast enough that human
+review has become the bottleneck, who want a second opinion that can't be talked out of a red
+verdict by a confident-sounding PR description.
 
 ## Quick start
 
-### Option A — published action (zero footprint)
+Zero footprint — drop this into a workflow file (plus a PR trigger and `pull-requests: write`):
 
 ```yaml
 - uses: G-Schumacher44/review-pantheon@v1
   with: { claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} }
 ```
 
-Drop that (plus a PR trigger and `pull-requests: write`) into a workflow file and nothing else
-lands in your repo — `action.yml` reads personas and the verdict-decision script from its own
-checkout. Full ~20-line stub: [examples/review-gate.yml](examples/review-gate.yml). Auth is
-`claude_code_oauth_token` (above) or `anthropic_api_key` — exactly one, fails loud otherwise;
-Bedrock/Vertex/Foundry/OIDC federation aren't wired through this action (use Option B for
-those) — see [docs/SETUP.md](docs/SETUP.md#way-c--published-action-zero-repo-footprint-action-only).
-
-<details>
-<summary>Post-install checklist (Option A)</summary>
-
-1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY` — wire whichever one
-   into the stub's `with:` block).
-2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
-3. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
-4. Only after step 3 passes, consider making the check required.
-
-</details>
-
-### Option B — vendored install (`install.sh`)
+Nothing else lands in your repo. Want to try it first with zero tokens spent? From a local
+checkout:
 
 ```bash
-git clone <this repo> review-pantheon
-./review-pantheon/install.sh /path/to/your-repo
+cli/review-gate --pr <number> --dry-run
 ```
 
-Copies the five personas, the verdict-decision script, and a GitHub Actions workflow into your
-repo instead of referencing this one (`--claude --cursor --codex --gemini` additionally generates
-in-editor/CLI projections of the counsel agents — see [Provider lanes](#provider-lanes)). Choose
-this over Option A if you want the gate's own files reviewable in your repo's history, or you're
-not ready to depend on this repo being public. `install.sh` prints a post-install checklist when
-it finishes — the same steps below — work through it before trusting the gate. Want the same
-projections available in every repo instead of one at a time? `install.sh --user --claude
---cursor --codex --gemini` installs them at `$HOME` instead — see [docs/SETUP.md](docs/SETUP.md#way-a--vendored-install-installsh-files-land-in-your-repo).
-
-<details>
-<summary>Post-install checklist (Option B)</summary>
-
-1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN`.
-2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
-3. `.github/workflows/review.yml` ships pinned to a real, verified
-   `anthropics/claude-code-action` commit SHA (see that file's header comment for the release
-   and the source it was checked against) — if you re-pin it yourself, confirm the SHA still
-   matches a release you trust before relying on this gate.
-4. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
-5. Only after step 4 passes, consider making the check required.
-
-</details>
-
-Prefer the CLI? `cli/review-gate --pr <number>` runs the same panel locally against any repo with
-a `gh`-authenticated remote — see [CLI usage](#cli-usage). No repo footprint at all: `bootstrap.sh
---prefix ~/.review-pantheon` installs just the CLI onto your `PATH`, nothing written into any
-repo. Full install-and-demo walkthrough: [docs/SETUP.md](docs/SETUP.md).
+runs the real thing — real diff, real prompts — right up to calling a provider, then prints
+exactly what it *would* post. Prefer a vendored install, or the CLI only? Full walkthrough for
+every path: [docs/SETUP.md](docs/SETUP.md).
 
 ## The panel
 
-**Gate agents (the twins)** — enforce. Run on every PR, in CI and the CLI, against finished work;
-only these two run automatically in CI, and only these two verdicts can block a merge.
+**Gate agents** (Artemis, Apollo) enforce — they run on every PR and can block a merge.
+**Counsel agents** (Socrates, Diogenes, Plato) inform — a human weighs their verdict; they never
+gate, whatever they're pointed at (spec, design doc, proposal, code, or a diff).
 
-| Agent | Lens | Verdict vocabulary (green / yellow / red) |
+| Agent | Tier | Role |
 |---|---|---|
-| **Artemis** | Hunts bugs in the diff — correctness, untested failure paths, shortcuts, house-rule violations. Assumes nothing works until shown. | `SHIP` / `FIX_FIRST` / `STOP` |
-| **Apollo** | Verifies the claim — re-runs stated checks, diffs claimed scope against git reality, checks required records exist, and (when a spec file is configured) checks delivery against the governing spec. Skipped loudly on docs-only diffs. | `ACCEPT` / `ACCEPT_WITH_NOTES` / `RETURN` |
+| **Artemis** | Gate | Hunts bugs in the diff — assumes nothing works until shown. |
+| **Apollo** | Gate | Verifies the claim against git reality, and against the spec when one's configured. |
+| **Socrates** | Counsel | Maps distinct approaches, go/no-go — usually runs earliest. |
+| **Diogenes** | Counsel | Simplicity — is this more than it needs to be? |
+| **Plato** | Counsel | Coherence — one consistent shape, or drifting sprawl? |
 
-**Counsel agents (the philosophers)** — inform, never enforce. Their verdict is counsel a human
-weighs in a decision, not a mechanism that gates a merge — true whatever they're pointed at (spec,
-design doc, proposal, existing code, or a diff). Natural home is early, before merging; can be
-added to a CLI gate run via `--agents`/`gate.conf`, but that's the exception.
+Full persona definitions, verdict vocabulary, and the gate-flow diagram: [DESIGN.md](DESIGN.md).
 
-| Agent | Lens | Verdict vocabulary (green / yellow / red) |
-|---|---|---|
-| **Socrates** | Options and go/no-go — maps distinct approaches against the real codebase before anything is built. | `GO` / `GO_WITH_GUARDRAILS` / `NO_GO` |
-| **Diogenes** | Simplicity — assumes it works, asks only if it's more than it needs to be. | `LEAN` / `TRIM` / `GUT` |
-| **Plato** | Coherence — assumes it works, asks if it has one consistent shape or drifting sprawl. | `COHERENT` / `DRIFTING` / `FRACTURED` |
+## Where to go
 
-Artemis and Apollo are twins, not duplicates: she reviews the code, he reviews the story about the
-code, and a PR can pass one and fail the other. Diogenes and Plato are foils: Diogenes attacks
-over-structure, Plato attacks under-structure. Socrates typically runs earliest — before there's
-anything else in the room for the rest of the panel to weigh in on.
-
-<details>
-<summary>Gate flow at a glance</summary>
-
-```
-GATE — enforce, every PR                    COUNSEL — inform, before merging
-------------------------------              ------------------------------
-PR opened                                   spec / design doc / proposal
-  -> prompt built (agents/<name>.md            / existing code / a diff
-     persona + diff/context block)               |
-  -> provider lane (cli/providers/*.sh            v
-     or claude-code-action)                    philosopher
-  -> JSON verdict --(missing/bad)-->            (socrates | diogenes | plato)
-     fail-closed: UNVERIFIED                     |
-  -> decider (verdict.sh | decide_verdict.py)     v
-     blocker invariant: any "blocker"          advisory verdict
-     finding forces red, verdict field           (GO / TRIM / DRIFTING / ...)
-     notwithstanding                              |
-  -> one combined PR comment                      v
-     (signal + table + folded findings)        human decides
-```
-
-</details>
+| I want to... | Go to |
+|---|---|
+| Decide whether to adopt this | This page, plus the security TL;DR below |
+| Install it | [docs/SETUP.md](docs/SETUP.md) — three ways, zero-token demo |
+| Use the CLI | [docs/CLI.md](docs/CLI.md) — every flag, `gate.conf`, worked examples |
+| Understand the design contract | [DESIGN.md](DESIGN.md) — the binding spec |
+| Review security | [SECURITY.md](SECURITY.md) — scope, reporting, honest limits |
+| Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) — ground rules, dev setup |
+| Cut a release (operator) | [RELEASING.md](RELEASING.md) |
+| See the full doc index | [docs/README.md](docs/README.md) |
 
 ## How the gate stays honest
-
-**The short version:**
 
 - Reviewing untrusted PR content runs read-only by default (`execution=readonly`).
 - That tool-scoping covers three surfaces — the CLI, the published action, and the vendored
@@ -164,185 +85,23 @@ PR opened                                   spec / design doc / proposal
 - Nothing here eliminates a fully-compromised agent handing back a deceptive-but-schema-valid
   verdict — cross-review by a second agent is the real backstop, not a guarantee.
 
-The rest of this section is the technical detail behind those three claims; DESIGN.md's ["Security
-posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design) is the canonical,
-full version (the read-provenance matrix, the wrapper's exec-surface matrix, and the round-by-round
-hardening history).
-
-- **Fail-closed, always.** A missing, empty, or unparseable verdict is `UNVERIFIED` (orange), never
-  green. The gate extracts the trailing JSON object from whatever the model printed, validates it
-  against the schema and that agent's own verdict vocabulary with `jq`; any failure demotes the
-  result — it never upgrades one.
-- **Read-only, by construction — under `readonly`, for calls the wrapper sees.** Every persona is
-  bound to read-only git (`git show`, `git diff`, `git log`, `git status`) and forbidden from
-  mutating the tree, index, or HEAD; the `readonly` execution tier (the default) makes this a
-  tool boundary the wrapper mechanically enforces for calls that reach it, not just a persona
-  instruction. **Not absolute: Claude's own always-approved bare git calls bypass the wrapper
-  entirely** and aren't covered by its `GIT_OPTIONAL_LOCKS=0`/`GIT_NO_LAZY_FETCH=1` protections —
-  see [SECURITY.md](SECURITY.md#bypassing-the-wrapper-is-not-the-same-as-having-no-side-effects)
-  for the scope note. **Under `execution=trusted` it's persona instruction only** — the wrapper
-  isn't in the loop at all, so nothing mechanical stops a compromised or misbehaving agent from
-  mutating the tree; `trusted` exists for own-repo/trusted-author use only, never for reviewing a
-  fork PR you don't control. If a check needs a tree change to answer, the agent stops and
-  reports the gap instead.
-- **Injection-aware, honestly scoped.** The identifiers that reach a shell command — PR number,
-  branch names, head/base SHA — are validated against strict character-class regexes first; the
-  PR title and every file's contents are NOT regex-validated (they reach the prompt as typed) but
-  are always treated as data, never instructions, per every persona's explicit framing — a
-  directive found inside them is itself a reportable finding, not something to follow.
-  House-rules/spec files and gate-*behavior* files (personas, the verdict decider) are read from
-  base-pinned or trusted-checkout provenance rather than a fork's own edits (one documented
-  exception: the vendored workflow's rules/spec reads — see [Surface
-  differences](#surface-differences)). The
-  default `readonly` tier further restricts Bash on the three Claude-invoking surfaces to an
-  argv-validating read-only git wrapper under a deny-by-default permission mode, so reviewing
-  hostile content doesn't hand an agent arbitrary command execution — a scoped guarantee, not a
-  blanket one; it doesn't extend to `execution=trusted` or to non-Claude provider lanes, and it
-  can't eliminate a schema-valid, deceptive verdict from a fully-compromised agent. Full detail:
-  DESIGN.md's ["Security posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design);
-  execution-tier scope notes: [SECURITY.md](SECURITY.md).
-- **No auto-merge, ever.** The gate posts one combined PR comment — headline signal, verdict table,
-  folded findings when it isn't green. A human reads it and decides.
-- **One persona, one source.** `agents/<name>.md` is the only hand-maintained copy of each
-  personality; both runners load and template that same file.
-
-<details>
-<summary>Verdict JSON contract</summary>
-
-```json
-{
-  "agent": "artemis",
-  "verdict": "FIX_FIRST",
-  "has_blocker": false,
-  "findings": [
-    {
-      "severity": "should_fix",
-      "file": "src/gate.sh",
-      "line": 42,
-      "issue": "unquoted variable in rm path",
-      "scenario": "a branch name containing a space deletes the wrong path"
-    }
-  ],
-  "summary": "one-line human-readable verdict justification"
-}
-```
-
-`severity` is `blocker` | `should_fix` | `note`; `has_blocker` must be `true` iff any finding is a
-`blocker`. If a finding is `blocker` or `has_blocker: true`, the signal is forced red regardless
-of the stated `verdict` — an object where the verdict and the findings disagree is treated as red,
-not trusted at face value. Full schema and the color-map table: `DESIGN.md`.
-
-</details>
-
-## Provider lanes
-
-Claude is the default lane and the only one integration-tested (`cli/providers/claude.sh`, using
-`claude -p` with a restricted, read-only tool set). Codex, Gemini, and Cursor ship as best-effort —
-each asserts its own CLI is installed and is marked unverified against your installed version. The
-gate applies identical trailing-JSON extraction and schema validation to every lane, so a
-misbehaving one degrades to `UNVERIFIED`, never to a false green.
-
-Adding a lane is one file, `cli/providers/<name>.sh`, implementing one function:
-
-```bash
-provider_run() {
-  local model="$1" prompt_file="$2"
-  # run your CLI non-interactively against $prompt_file, print its raw stdout, return nonzero on failure
-}
-```
-
-The gate agents run headless, from CI or `review-gate`. The **counsel agents** belong in the
-planning conversation itself, so `install.sh --claude --cursor --codex --gemini` generates
-per-tool projections of them — every generated file carries a `GENERATED — do not edit, re-run
-install` header and is regenerated from `agents/*.md`, never hand-maintained.
-
-<details>
-<summary>Per-tool editor/CLI install matrix (verified vs. best-effort)</summary>
-
-| Tool | What's generated | Status |
-|---|---|---|
-| **Claude Code** (`--claude`) | All five personas copied verbatim into `.claude/agents/`, plus a generated `/counsel` command (`.claude/commands/counsel.md`) that runs Socrates first, then Diogenes + Plato, and synthesizes the verdicts. | **Verified, first-class.** The personas are already this format; `/counsel` follows the documented [slash-command](https://docs.claude.com/en/docs/claude-code/slash-commands) convention. |
-| **Cursor** (`--cursor`) | All five personas as native subagents, `.cursor/agents/*.md` (frontmatter adapted to Cursor's schema). | **Verified against current official docs** ([cursor.com/docs/subagents](https://cursor.com/docs/subagents), Cursor 2.4+). Best-effort: not integration-tested against a live Cursor install in this repo's CI. |
-| **Codex CLI** (`--codex`) | All five personas as Codex Skills, `.agents/skills/<name>/SKILL.md`. | **Verified against current official docs** ([developers.openai.com/codex/skills](https://developers.openai.com/codex/skills)). Codex has no repo-level "custom command" convention, so Skills is used instead of inventing one. Best-effort: not integration-tested against a live Codex install. |
-| **Gemini CLI** (`--gemini`) | All five personas as custom commands, `.gemini/commands/<name>.toml`. | **Verified against official docs** ([custom-commands.md](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/custom-commands.md)). Best-effort: not integration-tested against a live Gemini CLI install. |
-
-Claude's `/counsel` is the only generated synthesis command — for the other tools, invoke the
-counsel personas individually and reason across their verdicts yourself.
-
-</details>
-
-## CLI usage
-
-```
-review-gate --pr <number> [--provider <lane>] [--agents "artemis apollo"]
-            [--execution readonly|trusted] [--dry-run]
-```
-
-Run it from inside the target repo. Requires `gh` and `jq`. Reads defaults from `gate.conf` at
-the target repo's root — copy `gate.conf.example` yourself; `install.sh` does not install it
-(`gate.conf` only matters to the CLI surface). `--provider` and `--agents` override the config for a
-single run.
-
-<details>
-<summary>Full flag reference and follow-up mode</summary>
-
-- `--pr <number>` — required, the PR to review.
-- `--provider <lane>` — override `gate.conf`'s `provider=` for this run.
-- `--agents "<space-separated list>"` — override `gate.conf`'s `agents=` for this run.
-- `--execution readonly|trusted` — override `gate.conf`'s `execution=` for this run. `readonly`
-  (the default) scopes Bash to a read-only git allowlist; `trusted` restores full Bash —
-  own-repo/trusted-author use only, never for reviewing a fork PR you don't control. See
-  [How the gate stays honest](#how-the-gate-stays-honest).
-- `--dry-run` — builds the prompts and prints the would-be comment without calling any provider
-  or posting anything.
-
-Re-running against a PR that's already been reviewed at its current head SHA is a no-op; new
-commits trigger a **follow-up pass** that reviews only what changed and tells the agent to read
-its own prior comment first. State lives in `.review-gate-state.json` at the target repo's root,
-bootstraps itself empty — git-ignored only via the `install.sh` (Way A) path, see
-[CLI.md](docs/CLI.md#the-state--follow-up-model) for the CLI-only-install caveat. Follow-up mode
-is CLI-only — see [Surface differences](#surface-differences) for why.
-
-**Draft PRs:** the CLI exits 0 and posts nothing, and prints an unmistakable
-`DRAFT — not reviewed, nothing posted` line to stdout.
-
-</details>
-
-## Surface differences
-
-The CLI and the GitHub Action share personas and the verdict-decision rule, but they aren't the
-same tool — they differ in follow-up mode, configuration, provider choice, and draft handling.
-See `DESIGN.md`'s ["Surface differences"](DESIGN.md#surface-differences) section for the full
-table and rationale.
+Full technical detail, honestly scoped: [SECURITY.md](SECURITY.md) and DESIGN.md's ["Security
+posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design).
 
 ## Works with Conductor
 
-[aug-conductor-wrkflw](https://github.com/G-Schumacher44/aug-conductor-wrkflw) is a public,
-project-agnostic spec/slice/handoff scaffold by the same author. They pair: Conductor structures
-the plan (slices, handoffs, the exact next step); review-pantheon verifies the delivery (the
-gate) and pressure-tests the plan before it's built (the counsel).
-
-## What it deliberately doesn't do
-
-No fleet/multi-repo sweep, no third-party reviewer aggregation, no auto-merge or auto-approve, no
-write access beyond one PR comment, no pretending an unverified result is safe. See `DESIGN.md`'s
-["Deliberately absent"](DESIGN.md#deliberately-absent) section for the full list and rationale.
-
-## Docs
-
-Full doc index, including a per-persona table with each agent's role and link:
-[docs/README.md](docs/README.md). Start with `DESIGN.md` for the binding contract, including the
-verdict vocabulary table.
+[aug-conductor-wrkflw](https://github.com/G-Schumacher44/aug-conductor-wrkflw) pairs with this
+repo — it plans the work (slices, handoffs), review-pantheon verifies the delivery and
+pressure-tests the plan before it's built.
 
 ---
 
-**On generative AI use.** This repo was authored by Claude-based agents working from `DESIGN.md`
-as the binding spec — the same document described above as the contract the code must match.
-Every commit was gated by the repo's own review method before landing: hunter and verifier
-audits (Artemis, Apollo) plus a delivery-verify pass, run against this codebase the same way it
-runs against any other. Human-directed, spec-driven, self-gated.
-
-Contributing? See [CONTRIBUTING.md](CONTRIBUTING.md) (dev setup, review-loop contract) and [SECURITY.md](SECURITY.md) (report privately, don't open a public issue).
+<a name="on-generative-ai-use"></a>
+**On generative AI use.** review-pantheon is a public rebuild of a private review system the
+author already runs — ported and re-implemented from scratch for open distribution (no code
+copied over), with `DESIGN.md` as the rebuild's binding contract. Claude-based agents did the
+rebuild work, and every commit was gated by the repo's own review method (Artemis, Apollo, and a
+delivery-verify pass) before landing. Human-directed, spec-driven, self-gated.
 
 ## License
 

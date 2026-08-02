@@ -18,8 +18,8 @@
 # Claude, all five personas) as in-editor/in-CLI commands so they're usable interactively during
 # planning and design, not just from the CI gate. agents/*.md stays the single canonical source
 # (DESIGN.md rule 4) — every file these flags write is GENERATED from it at install time, never
-# a hand-maintained duplicate. See README's "Provider lanes" section and DESIGN.md's "Generated
-# per-tool projections" subsection for the design.
+# a hand-maintained duplicate. See DESIGN.md's "Provider lanes" and "Generated per-tool
+# projections" sections for the design.
 #
 # --user (combined with one or more of the above): installs the SAME generated projections at
 # USER level ($HOME) instead of into a target repo, so the personas follow you across every
@@ -457,7 +457,7 @@ Post-install checklist:
      trust a green result on a real PR.
   6. Only after step 5 passes, consider adding this workflow as a required status check.
   7. Using the CLI lane too? Copy gate.conf.example to gate.conf at your repo root and edit
-     it — it isn't installed automatically (see README's CLI usage section).
+     it — it isn't installed automatically (see docs/CLI.md's gate.conf section).
 
 Prefer zero repo footprint? Skip install.sh's gate files entirely and use the published
 action instead — see examples/review-gate.yml and README's "Option A — published action."
