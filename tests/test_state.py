@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from pantheon import state
 
 
@@ -61,3 +63,51 @@ def test_update_state_cleans_up_its_temp_file_on_a_write_failure(tmp_path, monke
     assert state_file.read_text() == "{}"
     leftovers = [f for f in os.listdir(state_dir) if f != ".review-gate-state.json"]
     assert leftovers == []
+
+
+# ---------------------------------------------------------------------------------------------
+# load_state_or_raise() / StateFileMalformed -- the read-side counterpart to update_state()'s
+# own write-side protection (a Codex review finding on this port's own PR): without this,
+# pantheon.cli's follow-up-mode read (via the permissive load_state()) would silently treat a
+# malformed state file as "no prior state," run every agent, and post a full-review comment --
+# and since update_state() correctly refuses to ever overwrite that malformed file, EVERY
+# subsequent invocation would repeat the exact same thing, forever (a duplicate-comment loop).
+# Mirrors bash's own posture: cli/review-gate's SEEN_SHA="$(jq -r ... "$STATE_FILE")" runs under
+# `set -euo pipefail`, aborting the whole script on a malformed read.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_load_state_or_raise_returns_well_formed_state(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text('{"42": {"reviewed_sha": "deadbeef"}}')
+    assert state.load_state_or_raise(str(state_file)) == {"42": {"reviewed_sha": "deadbeef"}}
+
+
+def test_load_state_or_raise_bootstraps_a_missing_file_to_empty_dict(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    assert state.load_state_or_raise(str(state_file)) == {}
+    assert state_file.exists()
+
+
+def test_load_state_or_raise_raises_on_malformed_json(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("not valid json at all { { {")
+
+    with pytest.raises(state.StateFileMalformed, match="not valid JSON"):
+        state.load_state_or_raise(str(state_file))
+
+
+def test_load_state_or_raise_raises_on_non_object_content(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("[1, 2, 3]")
+
+    with pytest.raises(state.StateFileMalformed, match="not a JSON object"):
+        state.load_state_or_raise(str(state_file))
+
+
+def test_load_state_still_fails_closed_to_empty_dict_for_the_same_malformed_content(tmp_path) -> None:
+    # load_state() itself is UNCHANGED (still permissive) -- this is the documented contrast
+    # load_state_or_raise() exists alongside, not a replacement.
+    state_file = tmp_path / "state.json"
+    state_file.write_text("not valid json at all { { {")
+    assert state.load_state(str(state_file)) == {}

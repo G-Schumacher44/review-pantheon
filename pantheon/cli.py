@@ -758,8 +758,19 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
     changed_files = [f for f in changed.splitlines() if f]
     docs_only = False if not changed_files else all(f.endswith(".md") or f.startswith("docs/") for f in changed_files)
 
-    # Follow-up mode.
-    gate_state = state.load_state(state_file)
+    # Follow-up mode. Uses load_state_or_raise(), not load_state() — a Codex review finding on
+    # this port's own PR: load_state()'s own fail-closed-to-{} default is correct for a
+    # genuinely absent/fresh state file, but silently folds a MALFORMED existing one into the
+    # same "no prior state" result — this run would then run every agent and post a full-review
+    # comment against a state file that update_state()'s own (correct) protection then refuses
+    # to ever update, so EVERY subsequent invocation repeats the exact same thing, forever.
+    # Mirrors bash's own posture instead: cli/review-gate's SEEN_SHA="$(jq -r ...
+    # "$STATE_FILE")" runs under `set -euo pipefail`, aborting the whole script on a malformed
+    # read, before any agent runs or any comment posts.
+    try:
+        gate_state = state.load_state_or_raise(state_file)
+    except state.StateFileMalformed as e:
+        _die(f"{e} — UNVERIFIED, posting nothing (fix or remove the file, then retry)")
     seen_sha = state.reviewed_sha_for(gate_state, pr_number)
     followup_note = ""
     if seen_sha:

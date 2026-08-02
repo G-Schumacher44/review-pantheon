@@ -46,11 +46,30 @@ from pantheon import execution, jqjson
 __all__ = [
     "bootstrap_state_file",
     "load_state",
+    "load_state_or_raise",
+    "StateFileMalformed",
     "reviewed_sha_for",
     "is_ancestor",
     "update_state",
     "main",
 ]
+
+
+class StateFileMalformed(Exception):
+    """Raised by :func:`load_state_or_raise` when ``state_file``'s EXISTING content is malformed
+    — never silently folded into "no prior state" the way :func:`load_state`'s own
+    fail-closed-to-``{}`` default is. A Codex review finding on this port's own PR: a caller
+    that's about to read state for FOLLOW-UP-MODE DETECTION (``pantheon.cli``'s ``run_gate()``)
+    needs a stricter contract than a display/no-crash read does — mirrors bash's own posture for
+    this exact case: ``cli/review-gate``'s ``SEEN_SHA="$(jq -r ... "$STATE_FILE")"`` runs under
+    ``set -euo pipefail``, so a malformed state file aborts the WHOLE SCRIPT right there, before
+    any agent ever runs or any comment ever posts. Without the equivalent here, ``run_gate()``
+    would silently treat a corrupted state file as "never reviewed," run every agent, and post a
+    full-review comment — and since :func:`update_state` (correctly) refuses to overwrite
+    malformed content, that failure never resolves: EVERY subsequent invocation repeats the
+    exact same full review and posts ANOTHER duplicate comment, forever, until a human manually
+    fixes the file. Write-side protection (never silently replacing malformed content) is
+    necessary but not sufficient on its own without this read-side counterpart."""
 
 
 def bootstrap_state_file(state_file: str) -> None:
@@ -83,6 +102,29 @@ def load_state(state_file: str) -> dict:
     except jqjson.JqParseError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def load_state_or_raise(state_file: str) -> dict:
+    """Like :func:`load_state`, but raises :class:`StateFileMalformed` instead of failing
+    closed to ``{}`` when ``state_file``'s EXISTING content fails to parse or isn't a JSON
+    object — see that exception's own docstring for the full rationale. :func:`load_state`
+    remains correct (and is NOT replaced) for a genuinely absent/freshly-bootstrapped file, and
+    for any caller (a display path, a diagnostic) that doesn't need to distinguish "no state
+    yet" from "state exists but is corrupted"; this function is for the one caller
+    (``pantheon.cli``'s follow-up-mode detection) that does."""
+    bootstrap_state_file(state_file)
+    try:
+        with open(state_file) as fh:
+            raw = fh.read()
+    except OSError as e:
+        raise StateFileMalformed(f"failed to read {state_file}: {e}") from e
+    try:
+        parsed = jqjson.loads(raw)
+    except jqjson.JqParseError as e:
+        raise StateFileMalformed(f"{state_file} is not valid JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise StateFileMalformed(f"{state_file}'s content is not a JSON object")
+    return parsed
 
 
 def reviewed_sha_for(state: dict, pr_number: str) -> str | None:

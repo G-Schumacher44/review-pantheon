@@ -288,27 +288,40 @@ def _resolve_cli(name: str, repo_root: str | None = None) -> str | None:
 
 
 def _terminate_group(proc: subprocess.Popen) -> None:
-    """TERM the whole process GROUP first (graceful), then KILL it after a short grace period if
-    still alive — mirrors ``cli/review-gate``'s own ``run_with_timeout`` fallback (TERM, wait
-    ~5s, KILL) so a provider CLI's own spawned tool subprocesses are cleaned up too, not just the
-    single direct child a bare ``proc.kill()`` would reach. Requires the process to have been
-    started with ``start_new_session=True`` (see :func:`_run`), which makes its PID its own
-    process group leader's PID too. Every signal here is best-effort: a process that already
-    exited between our check and our signal is not an error (mirrors bash's own
-    ``2>/dev/null || true`` posture for the identical race)."""
+    """TERM the whole process GROUP first (graceful), then unconditionally KILL the whole group
+    too, after a short grace period — mirrors ``cli/review-gate``'s own ``run_with_timeout``
+    fallback (TERM, wait ~5s, KILL) so a provider CLI's own spawned tool subprocesses are
+    cleaned up too, not just the single direct child a bare ``proc.kill()`` would reach.
+    Requires the process to have been started with ``start_new_session=True`` (see
+    :func:`_run`), which makes its PID its own process group leader's PID too.
+
+    The follow-up ``killpg(..., SIGKILL)`` fires REGARDLESS of whether ``proc.wait()`` (the
+    LEADER's own exit) already succeeded within the grace period — a Codex review finding on
+    this port's own PR, reproduced live: a provider whose LEADER exits promptly on SIGTERM but
+    whose own spawned CHILD ignores or delays SIGTERM leaves that child alive, because
+    ``proc.wait()`` only waits for the leader, not the whole group — an earlier version of this
+    function only escalated to SIGKILL inside the ``except TimeoutExpired`` branch, so a leader
+    that exited "on time" (even though a descendant it spawned did not) skipped the SIGKILL step
+    entirely. A process group's ID stays valid as long as ANY member is still alive (the group
+    is keyed to the leader's original PID even after the leader itself exits) — so sending
+    SIGKILL to the group unconditionally, after the grace period, catches that remaining
+    descendant every time; ``killpg`` on an already-fully-dead group is a harmless no-op
+    (``ProcessLookupError``, suppressed below, same as every other signal in this function).
+    Every signal here is best-effort: a process that already exited between our check and our
+    signal is not an error (mirrors bash's own ``2>/dev/null || true`` posture for the identical
+    race)."""
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
         return
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pgid, signal.SIGTERM)
-    try:
+    with contextlib.suppress(subprocess.TimeoutExpired):
         proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(pgid, signal.SIGKILL)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=5)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=5)
 
 
 def _run(

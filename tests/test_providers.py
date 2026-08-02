@@ -252,6 +252,59 @@ def test_terminate_group_sends_sigterm_then_sigkill_on_the_whole_group(monkeypat
     assert term_index < kill_index
 
 
+def test_terminate_group_sends_sigkill_even_when_the_leader_exits_promptly(monkeypatch) -> None:
+    # The exact gap a Codex review finding caught, live-reproduced (see
+    # test_terminate_group_kills_a_child_that_survives_the_leaders_prompt_exit below for the
+    # real-subprocess version): the LEADER can exit within the grace period (proc.wait()
+    # returns normally, no TimeoutExpired) while one of its own spawned children ignores or
+    # delays SIGTERM and is still alive. An earlier version of _terminate_group only sent
+    # SIGKILL from inside the `except TimeoutExpired` branch, so a leader that exited "on time"
+    # skipped the SIGKILL step entirely, leaving that descendant running. SIGKILL must fire
+    # UNCONDITIONALLY after the grace period, not only when the leader itself timed out.
+    calls: list = []
+
+    class _Proc:
+        pid = 999
+
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+            return 0  # the leader exits promptly -- NOT a TimeoutExpired
+
+    monkeypatch.setattr(providers.os, "getpgid", lambda pid: 999)
+    monkeypatch.setattr(providers.os, "killpg", lambda pgid, sig: calls.append(("killpg", pgid, sig)))
+
+    providers._terminate_group(_Proc())
+
+    assert ("killpg", 999, providers.signal.SIGTERM) in calls
+    assert ("killpg", 999, providers.signal.SIGKILL) in calls
+
+
+def test_terminate_group_kills_a_child_that_survives_the_leaders_prompt_exit(tmp_path) -> None:
+    # Live (non-mocked) repro of the exact scenario the finding named: a fake provider whose
+    # LEADER exits promptly on SIGTERM (the default disposition, untrapped) while its own
+    # spawned CHILD explicitly ignores SIGTERM (`trap '' TERM`) and keeps sleeping. Proves the
+    # child does NOT survive -- SIGKILL (unblockable, unlike SIGTERM) reaches it via the
+    # unconditional killpg() this fix added.
+    marker = tmp_path / "child-survived-sigterm"
+    script = tmp_path / "fake-provider.sh"
+    script.write_text(f"#!/bin/sh\n( trap '' TERM; sleep 4; touch {marker} ) &\nCHILD_PID=$!\nwait \"$CHILD_PID\"\n")
+    script.chmod(0o755)
+
+    proc = subprocess.Popen(
+        [str(script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        proc.communicate(timeout=1)
+        raise AssertionError("expected TimeoutExpired -- the fixture script runs longer than 1s")
+    except subprocess.TimeoutExpired:
+        providers._terminate_group(proc)
+
+    assert not marker.exists(), "child that ignored SIGTERM survived past _terminate_group()"
+
+
 def test_terminate_group_is_a_noop_when_the_process_already_exited(monkeypatch) -> None:
     def _raise_lookup_error(pid):
         raise ProcessLookupError()
