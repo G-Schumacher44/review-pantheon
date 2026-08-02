@@ -290,7 +290,7 @@ treat each listed rule as a blocker-class check. Ships with `REVIEW_RULES.exampl
 
 `gate.conf` in the target repo root (simple `key=value`, all optional) — **CLI surface only**; the
 Action doesn't read it (see "Surface differences" below). `install.sh` does not install it —
-CLI-surface users copy `gate.conf.example` themselves (README documents this under CLI usage).
+CLI-surface users copy `gate.conf.example` themselves (see [docs/CLI.md](docs/CLI.md#gateconf)).
 
 ```
 provider=claude          # lane in cli/providers/
@@ -490,7 +490,7 @@ identical tools. Differences are intentional, not oversights:
 | Provider choice | Pluggable lane (`--provider`, `cli/providers/*.sh`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
 | Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Still reads `REVIEW_RULES.md`/`DESIGN.md` straight from the checked-out working tree (this surface's inline "Build prompt" step is a third, hand-synced copy of the prompt-build logic — see "Layout" below — and wasn't brought forward in this fix). The published `action.yml` surface (a **different** file from this table's `action/review.yml` column) got the same base-pinning as the CLI. This remains the one open item in issue #6's provenance sweep — judgment CONTENT, not gate behavior (see the class statement above), which is why it's tracked as a documented exception rather than left silently unswept. |
-| Persona / verdict-decider provenance | N/A — always `$PANTHEON_ROOT/agents` and `cli/lib/verdict.sh`, this repo's own installed copy; the target repo never supplies these on the CLI surface. | Base-pinned, same as the CLI's non-issue: `$ACTION_PATH/agents` and `$ACTION_PATH/action/decide_verdict.py` by default (this repo's own trusted checkout); base-pinned into `$RUNNER_TEMP` when `personas_path` opts into reading from the target repo instead. | Base-pinned into `$RUNNER_TEMP` via "Resolve gate scripts (base-pinned)" (issue #6 — closed in this PR; previously read straight from `$GITHUB_WORKSPACE`, the PR's own checkout, same class as the read-only git wrapper fix above). |
+| Persona / verdict-decider provenance | N/A — always `$PANTHEON_ROOT/agents` and `cli/lib/verdict.sh`, this repo's own installed copy; the target repo never supplies these on the CLI surface. | Base-pinned on both GitHub Action surfaces, same as the CLI's non-issue: the published `action.yml` reads `$ACTION_PATH/agents` and `$ACTION_PATH/action/decide_verdict.py` by default (this repo's own trusted checkout), base-pinned into `$RUNNER_TEMP` when `personas_path` opts into reading from the target repo instead; `action/review.yml` (a **different** file from this table's column) base-pins both into `$RUNNER_TEMP` via its own "Resolve gate scripts (base-pinned)" step (issue #6 — closed in this PR; previously read straight from `$GITHUB_WORKSPACE`, the PR's own checkout, same class as the read-only git wrapper fix above). |
 
 ## Published action
 

@@ -12,7 +12,7 @@
 #
 # Does NOT install gate.conf — that file only matters to the CLI lane, and copying it into
 # every repo by default meant most installs got a config file they never look at. CLI-lane
-# users copy gate.conf.example themselves (README documents this under CLI usage).
+# users copy gate.conf.example themselves (docs/CLI.md documents this under gate.conf).
 #
 # --claude / --cursor / --codex / --gemini (combinable): install the counsel agents (and, for
 # Claude, all five personas) as in-editor/in-CLI commands so they're usable interactively during
@@ -42,9 +42,9 @@ Usage: install.sh /abs/path/to/target-repo [--claude] [--cursor] [--codex] [--ge
 
   (no flags)   Gate-only install: personas + verdict script + GitHub Action (default, unchanged).
   --claude     Also install personas as Claude Code subagents + a /counsel command.
-  --cursor     Also generate Cursor subagents, .cursor/agents/*.md (best-effort — see README).
-  --codex      Also generate Codex Skills, .agents/skills/*/SKILL.md (best-effort — see README).
-  --gemini     Also generate Gemini CLI commands, .gemini/commands/*.toml (best-effort — see README).
+  --cursor     Also generate Cursor subagents, .cursor/agents/*.md (best-effort — see DESIGN.md).
+  --codex      Also generate Codex Skills, .agents/skills/*/SKILL.md (best-effort — see DESIGN.md).
+  --gemini     Also generate Gemini CLI commands, .gemini/commands/*.toml (best-effort — see DESIGN.md).
   --user       Install the per-tool agent projections at USER level ($HOME) instead of into a
                target repo — no target-repo argument, requires at least one of the flags above,
                and does NOT install the gate files (those are repo concepts).
@@ -460,5 +460,5 @@ Post-install checklist:
      it — it isn't installed automatically (see docs/CLI.md's gate.conf section).
 
 Prefer zero repo footprint? Skip install.sh's gate files entirely and use the published
-action instead — see examples/review-gate.yml and README's "Option A — published action."
+action instead — see examples/review-gate.yml and docs/SETUP.md's "Way C — published action."
 EOF
