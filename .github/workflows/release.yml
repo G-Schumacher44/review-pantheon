@@ -205,16 +205,24 @@ jobs:
           # Explicit, enumerated CLI-surface manifest — deliberately NOT a glob (`cp -R ./*` or
           # similar) so an untracked or build-only file sitting in the checkout can never leak
           # into a release tarball. This list is the "review-gate CLI surface" contract: the
-          # runner, the personas, both installers, and the example config/rules/license/readme a
-          # fresh install needs. Keep it in sync by hand if that surface changes.
+          # runner, the personas, the canonical skills, both installers, and the example
+          # config/rules/license/readme a fresh install needs. Keep it in sync by hand if that
+          # surface changes.
           #
           # action/decide_verdict.py and action/review.yml (only those two — NOT action/lib/,
           # which is action.yml's composite-action runtime, not something install.sh reads) are
           # included because install.sh's default (no --user) mode requires them at
           # $SCRIPT_DIR/action/... and dies loud if they're missing (a Codex P1 finding on this
           # PR: without them, install.sh from an extracted release tarball always failed).
+          #
+          # skills/ is included for the identical reason: install.sh unconditionally requires
+          # $SCRIPT_DIR/skills to exist (the four canonical Claude Code skills — gate, counsel,
+          # spec-driven, design-contract — install.sh --claude installs verbatim), so a release
+          # tarball missing it breaks install.sh from an extracted release the same way a missing
+          # action/ did before that Codex finding.
           cp -R cli "$STAGE/cli"
           cp -R agents "$STAGE/agents"
+          cp -R skills "$STAGE/skills"
           cp bootstrap.sh "$STAGE/bootstrap.sh"
           cp install.sh "$STAGE/install.sh"
           mkdir -p "$STAGE/action"

@@ -71,6 +71,7 @@ Full persona definitions, verdict vocabulary, and the gate-flow diagram: [DESIGN
 | Decide whether to adopt this | This page, plus the security TL;DR below |
 | Install it | [docs/SETUP.md](docs/SETUP.md) — three ways, zero-token demo |
 | Use the CLI | [docs/CLI.md](docs/CLI.md) — every flag, `gate.conf`, worked examples |
+| Use it inside Claude Code | [skills/](skills) — `/gate` and `/counsel` commands plus the `gate`/`counsel`/`spec-driven`/`design-contract` skills, installed via `install.sh --claude` |
 | Understand the design contract | [DESIGN.md](DESIGN.md) — the binding spec |
 | Review security | [SECURITY.md](SECURITY.md) — scope, reporting, honest limits |
 | Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) — ground rules, dev setup |
