@@ -96,8 +96,16 @@ def load_state(state_file: str) -> dict:
     ``pantheon.cli``'s own file writes/reads: under a non-UTF-8 locale, an implicit
     platform-default decode can raise an uncaught ``UnicodeDecodeError`` that this function's
     own ``except OSError`` wouldn't catch — ``errors="replace"`` closes that structurally,
-    matching this port's own established pattern for exactly this class of input)."""
-    bootstrap_state_file(state_file)
+    matching this port's own established pattern for exactly this class of input). Also fails
+    closed to ``{}`` (never raises) when even :func:`bootstrap_state_file` itself can't write a
+    fresh ``{}`` into an unwritable directory — a Codex review finding on this port's own PR,
+    companion to the identical fix on :func:`load_state_or_raise`: this function's whole contract
+    is "never a crash", so a bootstrap failure gets the same treatment as every other failure
+    mode already handled below, not a bare traceback."""
+    try:
+        bootstrap_state_file(state_file)
+    except OSError:
+        return {}
     try:
         with open(state_file, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
@@ -119,8 +127,17 @@ def load_state_or_raise(state_file: str) -> dict:
     yet" from "state exists but is corrupted"; this function is for the one caller
     (``pantheon.cli``'s follow-up-mode detection) that does. Same explicit
     ``encoding="utf-8"``/``errors="replace"`` posture as :func:`load_state` — see that
-    function's own docstring for why."""
-    bootstrap_state_file(state_file)
+    function's own docstring for why. Also raises :class:`StateFileMalformed` (rather than
+    letting a raw ``OSError``/``PermissionError`` propagate past this function's own caller —
+    ``pantheon.cli``'s ``main()`` only catches ``GateError``) when even
+    :func:`bootstrap_state_file` itself can't write a fresh ``{}`` into an unwritable directory —
+    a Codex review finding on this port's own PR: this is a real "can't verify" outcome, not a
+    bug in this function, so it gets the same fail-closed treatment as any other unreadable/
+    malformed state, not a bare traceback."""
+    try:
+        bootstrap_state_file(state_file)
+    except OSError as e:
+        raise StateFileMalformed(f"failed to create {state_file}: {e}") from e
     try:
         with open(state_file, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
@@ -209,7 +226,14 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
         )
         return
 
-    bootstrap_state_file(state_file)
+    try:
+        bootstrap_state_file(state_file)
+    except OSError as e:
+        print(
+            f"pantheon: warning: comment posted but failed to create {state_file} for update: {e}",
+            file=sys.stderr,
+        )
+        return
     try:
         with open(state_file, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()

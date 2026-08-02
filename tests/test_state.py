@@ -111,3 +111,60 @@ def test_load_state_still_fails_closed_to_empty_dict_for_the_same_malformed_cont
     state_file = tmp_path / "state.json"
     state_file.write_text("not valid json at all { { {")
     assert state.load_state(str(state_file)) == {}
+
+
+# ---------------------------------------------------------------------------------------------
+# bootstrap_state_file() in an UNWRITABLE directory -- a Codex review finding on this port's own
+# PR: bootstrap_state_file()'s own open() call, unguarded at each of its three call sites, let a
+# raw PermissionError/OSError propagate all the way past pantheon.cli's main() (which only
+# catches GateError) as a bare traceback instead of a clean, fail-closed exit. Each call site now
+# wraps its own bootstrap_state_file() call according to that site's OWN existing contract for
+# an OSError on the READ side just below it -- load_state_or_raise() raises StateFileMalformed
+# (already caught by pantheon.cli's run_gate() and converted to GateError -- unchanged, existing
+# wiring from an earlier wave), load_state() fails closed to {}, update_state() warns and
+# returns.
+# ---------------------------------------------------------------------------------------------
+
+
+def _unwritable_dir(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("running as root -- POSIX permission checks are bypassed, precondition unmet")
+    d = tmp_path / "unwritable"
+    d.mkdir()
+    d.chmod(0o500)  # read + execute, no write
+    return d
+
+
+def test_bootstrap_state_file_raises_oserror_on_an_unwritable_directory_live(tmp_path) -> None:
+    # Precondition proof, not the fix itself: confirms bootstrap_state_file()'s own open() call
+    # genuinely raises OSError/PermissionError under this condition on this platform, live and
+    # unmocked -- so the three wrapped call sites below are closing a REAL gap.
+    unwritable = _unwritable_dir(tmp_path)
+    state_file = unwritable / "state.json"
+    with pytest.raises(OSError):
+        state.bootstrap_state_file(str(state_file))
+
+
+def test_load_state_or_raise_fails_closed_to_state_file_malformed_on_an_unwritable_directory(tmp_path) -> None:
+    unwritable = _unwritable_dir(tmp_path)
+    state_file = unwritable / "state.json"
+
+    with pytest.raises(state.StateFileMalformed, match="failed to create"):
+        state.load_state_or_raise(str(state_file))
+
+
+def test_load_state_fails_closed_to_empty_dict_on_an_unwritable_directory(tmp_path) -> None:
+    unwritable = _unwritable_dir(tmp_path)
+    state_file = unwritable / "state.json"
+
+    assert state.load_state(str(state_file)) == {}
+
+
+def test_update_state_warns_and_returns_on_an_unwritable_directory_never_raises(tmp_path, capsys) -> None:
+    unwritable = _unwritable_dir(tmp_path)
+    state_file = unwritable / "state.json"
+
+    state.update_state("green", "42", "deadbeefcafe", str(state_file), str(tmp_path))
+
+    captured = capsys.readouterr()
+    assert "failed to create" in captured.err

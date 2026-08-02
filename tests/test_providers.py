@@ -373,7 +373,10 @@ def test_provider_env_does_not_forward_execution_bearing_variables(monkeypatch) 
     env = providers._provider_env()
 
     assert "NODE_OPTIONS" not in env
-    assert "PYTHONPATH" not in env
+    # PYTHONPATH is present but FORCE-CLEARED (never the injected payload) -- part of the
+    # Python-family defensive clear, not a bare "never forwarded" allowlist omission (see
+    # _PROVIDER_PYTHON_ENV_DEFENSIVE_CLEAR's own comment).
+    assert env["PYTHONPATH"] == ""
     assert "LD_PRELOAD" not in env
 
 
@@ -385,9 +388,30 @@ def test_provider_env_forwards_only_the_explicit_allowlist(monkeypatch) -> None:
 
     assert env["ANTHROPIC_API_KEY"] == "sk-test-123"
     assert "SOME_RANDOM_VAR_NOT_ON_THE_ALLOWLIST" not in env
-    # Never a blanket copy — every key present must come from the explicit allowlist (plus PATH,
-    # which _provider_env sets itself from _filtered_path).
-    assert set(env) - {"PATH"} <= set(providers._PROVIDER_ENV_PASSTHROUGH_KEYS)
+    # Never a blanket copy — every key present must come from the explicit allowlist, PATH (set
+    # by _provider_env itself from _filtered_path), or the Python-family defensive-clear keys.
+    allowed = (
+        set(providers._PROVIDER_ENV_PASSTHROUGH_KEYS) | {"PATH"} | set(providers._PROVIDER_PYTHON_ENV_DEFENSIVE_CLEAR)
+    )
+    assert set(env) <= allowed
+
+
+def test_provider_env_force_clears_the_python_family_defensively(monkeypatch) -> None:
+    # A Codex review finding on this port's own PR, companion to
+    # pantheon.execution.resolve_console_script's own fix: PYTHONUSERBASE (among this whole
+    # family) is exactly the env var that let a hostile launcher redirect console-script
+    # resolution at a checked-out PR's own tree. Proves every one of these is force-cleared to a
+    # safe value regardless of what the ambient environment set them to.
+    monkeypatch.setenv("PYTHONUSERBASE", "/hostile/checkout")
+    monkeypatch.setenv("PYTHONHOME", "/hostile/checkout")
+    monkeypatch.setenv("PYTHONSTARTUP", "/hostile/checkout/payload.py")
+
+    env = providers._provider_env()
+
+    assert env["PYTHONUSERBASE"] == ""
+    assert env["PYTHONHOME"] == ""
+    assert env["PYTHONSTARTUP"] == ""
+    assert env["PYTHONNOUSERSITE"] == "1"
 
 
 def test_provider_env_forwards_proxy_vars_both_cases(monkeypatch) -> None:

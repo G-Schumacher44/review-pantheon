@@ -245,6 +245,22 @@ _CLI_GIT_CONFIG_OVERRIDES: dict[str, str] = {
     "GIT_CONFIG_VALUE_0": "!gh auth git-credential",
 }
 
+# Force-cleared in every constructed env this module builds (never merely omitted) — a Codex
+# review finding on this port's own PR, companion to `pantheon.execution.resolve_console_script`'s
+# own fix: `PYTHONUSERBASE` (among this whole family) is exactly the env var that let a hostile
+# launcher redirect console-script resolution at a checked-out PR's own tree. This dict is
+# already constructed fresh (never an `os.environ` copy), so these keys would already be ABSENT
+# rather than forwarded to `git`/`gh` -- explicitly clearing them here means that guarantee
+# doesn't rely on every future maintainer remembering to keep them off the allowlist, and closes
+# the door for any Python process this git/gh invocation's own children might spawn too.
+_CLI_PYTHON_ENV_DEFENSIVE_CLEAR: dict[str, str] = {
+    "PYTHONUSERBASE": "",
+    "PYTHONPATH": "",
+    "PYTHONHOME": "",
+    "PYTHONSTARTUP": "",
+    "PYTHONNOUSERSITE": "1",
+}
+
 _trusted_executable_cache: dict[str, str] = {}
 
 
@@ -278,6 +294,7 @@ def _cli_env() -> dict[str, str]:
         if value is not None:
             env[key] = value
     env.update(_CLI_GIT_CONFIG_OVERRIDES)
+    env.update(_CLI_PYTHON_ENV_DEFENSIVE_CLEAR)
     return env
 
 

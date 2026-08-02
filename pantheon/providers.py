@@ -236,6 +236,22 @@ _PROVIDER_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "all_proxy",
 )
 
+# Force-cleared in every constructed env this module builds (never merely omitted) — a Codex
+# review finding on this port's own PR, companion to `pantheon.execution.resolve_console_script`'s
+# own fix: `PYTHONUSERBASE` (among this whole family) is exactly the env var that let a hostile
+# launcher redirect console-script resolution at a checked-out PR's own tree. This dict is
+# already constructed fresh (never an `os.environ` copy), so these keys would already be ABSENT
+# rather than forwarded to a provider CLI -- explicitly clearing them here means that guarantee
+# doesn't rely on every future maintainer remembering to keep them off the allowlist, and closes
+# the door for any Python process a provider CLI's own children might spawn too.
+_PROVIDER_PYTHON_ENV_DEFENSIVE_CLEAR: dict[str, str] = {
+    "PYTHONUSERBASE": "",
+    "PYTHONPATH": "",
+    "PYTHONHOME": "",
+    "PYTHONSTARTUP": "",
+    "PYTHONNOUSERSITE": "1",
+}
+
 
 def _filtered_path(repo_root: str | None = None) -> str:
     """The ambient ``PATH``, with any entry that is relative, or that resolves inside a TRUSTED
@@ -285,6 +301,7 @@ def _provider_env(repo_root: str | None = None) -> dict[str, str]:
         value = os.environ.get(key)
         if value is not None:
             env[key] = value
+    env.update(_PROVIDER_PYTHON_ENV_DEFENSIVE_CLEAR)
     return env
 
 
