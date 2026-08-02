@@ -462,6 +462,60 @@ export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
 assert_byte_identical "nul-in-severity-stripped-before-comparison-not-just-display"
 
 # ---------------------------------------------------------------------------
+# Fixture: repo-root redaction (a coordinator-flagged information-disclosure regression:
+# CRITICAL-1's own fix, adversarial review, exposes the repo's absolute path to the reviewing
+# persona so Read/Grep/Glob still work once the provider no longer launches with the repo
+# checkout as its own cwd — a model can echo that absolute path back into a finding's
+# file/issue/scenario/summary text, which then reaches a POSTED PR comment verbatim: on a CLI-
+# lane run from a maintainer's own machine, that's their real home directory path, published
+# into what may be a public PR). Closed via PANTHEON_REPO_ROOT: every model-controlled display
+# field, AND the machine-tail JSON, must have every occurrence of that path replaced with the
+# stable placeholder `<repo>` before the comment is ever rendered — see
+# pantheon.render.redact_repo_root's own docstring.
+# ---------------------------------------------------------------------------
+reset_agent_env
+FIXTURE_ABS_REPO_ROOT="/Users/realmaintainer/dev/review-pantheon"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST
+ARTEMIS_TOP="finding under $FIXTURE_ABS_REPO_ROOT/src/gate.sh"
+ARTEMIS_FINDINGS="$(python3 -c "
+import json
+root = '$FIXTURE_ABS_REPO_ROOT'
+print(json.dumps({
+    'agent': 'artemis',
+    'verdict': 'FIX_FIRST',
+    'has_blocker': False,
+    'findings': [{
+        'severity': 'should_fix',
+        'file': root + '/src/gate.sh',
+        'line': 12,
+        'issue': 'leaked path in issue: ' + root + '/src/gate.sh',
+        'scenario': 'leaked path in scenario: ' + root,
+    }],
+    'summary': 'leaked path in summary: ' + root,
+}))
+")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$FIXTURE_ABS_REPO_ROOT"
+
+out="$(render "$HEAD_SHA" artemis)"
+assert_not_contains "repo-root-redaction" "table top-finding cell does not leak the absolute repo root" "$out" "$FIXTURE_ABS_REPO_ROOT"
+assert_not_contains "repo-root-redaction" "finding's file field does not leak the absolute repo root" "$out" "$FIXTURE_ABS_REPO_ROOT/src/gate.sh"
+assert_not_contains "repo-root-redaction" "finding's issue text does not leak the absolute repo root" "$out" "leaked path in issue: $FIXTURE_ABS_REPO_ROOT"
+assert_not_contains "repo-root-redaction" "finding's scenario text does not leak the absolute repo root" "$out" "leaked path in scenario: $FIXTURE_ABS_REPO_ROOT"
+assert_not_contains "repo-root-redaction" "summary text does not leak the absolute repo root" "$out" "leaked path in summary: $FIXTURE_ABS_REPO_ROOT"
+assert_not_contains "repo-root-redaction" "machine-tail raw JSON does not leak the absolute repo root either" "$out" "$FIXTURE_ABS_REPO_ROOT"
+assert_contains "repo-root-redaction" "the redaction placeholder appears in its place" "$out" "<repo>/src/gate.sh"
+
+unset PANTHEON_REPO_ROOT
+
+# Regression-direction guard: WITHOUT PANTHEON_REPO_ROOT set at all, the same fixture must NOT
+# be redacted (redaction is opt-in via that env var — a caller that never set it, or a value
+# that's the empty string, must see the model's real text unchanged; this also proves the
+# assertions above are testing the redaction mechanism, not some unrelated always-on scrub).
+out_no_redact="$(render "$HEAD_SHA" artemis)"
+assert_contains "repo-root-redaction" "without PANTHEON_REPO_ROOT, the absolute path is NOT redacted (opt-in, not always-on)" "$out_no_redact" "$FIXTURE_ABS_REPO_ROOT"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

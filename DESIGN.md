@@ -371,9 +371,9 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
   | Personas (`agents/*.md`) | ✅ `$PANTHEON_ROOT/agents` — review-pantheon's own installed copy, never the target repo's | ✅ `$ACTION_PATH/agents` by default; ✅ base-pinned into `$RUNNER_TEMP` when `personas_path` is set (this PR) | ✅ base-pinned into `$RUNNER_TEMP` (this PR — was `$GITHUB_WORKSPACE`) |
   | Verdict decider (`cli/lib/verdict.sh` / `decide_verdict.py`) | ✅ `$PANTHEON_ROOT/cli/lib/verdict.sh` — this repo's own file | ✅ `$ACTION_PATH/action/decide_verdict.py` | ✅ base-pinned into `$RUNNER_TEMP` (this PR — was `$GITHUB_WORKSPACE`) |
   | Read-only git wrapper | ✅ `$PANTHEON_ROOT/cli/lib/pantheon-git-readonly.sh` | ✅ `$ACTION_PATH/cli/lib/pantheon-git-readonly.sh` | ✅ base-pinned into `$RUNNER_TEMP` (prior fix) |
-  | House rules / spec (`REVIEW_RULES.md` / `DESIGN.md`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ⚠️ read from `$GITHUB_WORKSPACE` — documented exception, see "Surface differences" |
-  | `gate.conf`'s `execution=` key | ✅ base-pinned | — (no `gate.conf`; `execution` is an explicit input, operator-typed, not PR content) | — (no config surface at all) |
-  | `gate.conf`'s other keys (provider/model/base_branch/rules_file/spec_file/agents) | ⚠️ working-tree-sourced — lower-stakes, doesn't control tool-execution breadth or which files get read | — | — |
+  | House rules / spec (`REVIEW_RULES.md` / `DESIGN.md`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned into `$RUNNER_TEMP` (closed by an adversarial-review fix — was `$GITHUB_WORKSPACE`, see "Surface differences") |
+  | `gate.conf`'s `execution=`/`provider=`/`rules_file=`/`spec_file=`/`agents=` keys | ✅ base-pinned (all five, one `git show`+parse — an adversarial-review fix generalized `execution=`'s own pre-existing base-pinning to the other four, closing docs/CLI.md's disclosed issue #13 for `provider=` along the way) | — (no `gate.conf`; these are explicit inputs, operator-typed, not PR content) | — (no config surface at all) |
+  | `gate.conf`'s `model=`/`base_branch=` keys | ⚠️ working-tree-sourced — neither affects tool-execution breadth or which file is trusted as a judgment boundary (`model` only picks which model an already-scoped provider uses; `base_branch` is a fallback only ever consulted when `gh pr view` itself doesn't report a `baseRefName`) | — | — |
   | `.review-gate-state.json` (follow-up-mode `reviewed_sha`) | ⚠️ working-tree-sourced (see "Honest limit" below) | — | — |
   | Prompt-builder shell (`cli/lib/execution.sh`, `action/lib/build_prompt.sh`, `action/lib/combine_verdicts.sh`) | ✅ this repo's own file | ✅ `$ACTION_PATH/...` | ✅ inline in the workflow file itself (this repo's own committed YAML, not the target repo's content) |
   | The diff / file contents under review | untrusted **by design** — this is the data the gate exists to evaluate; never treated as instructions (`agents/*.md`'s "Untrusted data, not instructions") | same | same |
@@ -467,6 +467,90 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
     duplicating the table here. Getting there took eight rounds of individual Codex/Apollo
     findings against this same wrapper, each reproduced live against the pre-fix version before
     the fix landed: [docs/HARDENING-HISTORY.md](docs/HARDENING-HISTORY.md).
+- **Provider processes launch from a neutral cwd, never the repo checkout — the CLI (Python)
+  lane only, an adversarial-review fix.** `--allowedTools`/the read-only wrapper scope what a
+  provider CLI's *tool calls* can do, but a provider CLI's own STARTUP also auto-discovers
+  repo-local configuration from its current working directory — entirely before any tool call,
+  entirely outside `--allowedTools`'s reach: a PR-committed `.mcp.json` (Claude Code auto-loads
+  and SPAWNS every listed MCP server — arbitrary command execution, not a scoped tool call), a
+  PR-committed `.claude/settings.json` (hooks that fire on tool events, including an ALLOWED
+  `Read`), or `CLAUDE.md`-style project-memory files (PR-controlled prompt content injected
+  before this repo's own persona framing ever runs). Live-reproduced by the reviewer with a fake
+  `claude` binary that printed which MCP servers it would spawn and confirmed a PR-committed hook
+  would fire on an allowed `Read`. Closed with three layers, none alone sufficient:
+  1. `pantheon.cli` creates a scratch directory it owns (never the checkout, never anywhere
+     inside it) and passes it as every provider's own `cwd` (`pantheon.providers`' `neutral_cwd`
+     parameter) — nothing repo-local for a provider's own startup-time scan to find. The agent
+     still reaches repo content exclusively through the readonly git wrapper (now told the real
+     repo root via a fixed `--repo-root` literal baked into its own Bash-tool permission prefix —
+     see `pantheon.cli._wrapper_invocation`) and explicit `Read`/`Grep`/`Glob` calls against the
+     repo root's own now-advertised absolute path (the prompt's Run-context block; previously
+     only the basename).
+  2. The claude lane also passes `--bare` — verified against Claude Code's current official
+     headless docs before adding, not assumed: documented to skip auto-discovery of hooks,
+     skills, plugins, MCP servers, auto memory, and CLAUDE.md, in one flag, layered on top of (not
+     instead of) the neutral cwd. Codex/Gemini/Cursor have **no documented equivalent flag** as of
+     this writing (each CLI's own current official docs were checked) — a disclosed, honest
+     residual exposure for those three best-effort lanes, narrowed (nothing repo-local in a
+     neutral cwd) but not eliminated, not silently treated as closed.
+  3. `pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS` (the explicit env allowlist every
+     provider subprocess receives) was re-audited against "does this key exist only because it's
+     convenient, or because a named lane's documented auth/locale surface genuinely needs it" —
+     every key survived; none were removed (each ties to a specific lane's documented env-var
+     auth mechanism, a locale/temp-dir convention every listed CLI needs to run, or the
+     proxy-transport fix a prior Codex wave already justified).
+  - **A consequence of exposing the repo's absolute path (step 1 above) that needed its own
+    close: the reviewing model can echo that path back into a finding's own text, which then
+    reaches the POSTED PR comment.** On a CI runner that's a harmless ephemeral path; on a CLI-lane
+    run from a maintainer's own machine it's their real home directory (often containing their
+    username), published into what may be a public PR — an information-disclosure regression an
+    otherwise-correct fix would have introduced. Closed mechanically, not by asking the persona
+    nicely: `pantheon.render`'s existing sanitize-at-render chokepoint (`sanitize_inline` — the
+    same function DESIGN.md's "Validation surface" section already describes as the one place
+    every model-controlled display field is sanitized before it reaches a comment) now also
+    redacts every occurrence of the repo's absolute path to the placeholder `<repo>`, in every
+    human-readable field AND the machine-tail raw-JSON block (the same information would otherwise
+    just resurface there, unredacted). The prompt's own Run-context block additionally tells the
+    persona explicitly that findings must cite repo-RELATIVE paths (belt-and-suspenders — never
+    the primary control, since prompt instructions are advisory, not enforced). Fixture:
+    `tests/test-render-comment-python.sh`'s repo-root-redaction case — a verdict whose summary/
+    issue/file/scenario contain the absolute repo root renders with every occurrence replaced by
+    `<repo>`, including the machine tail, with a regression-direction guard proving the redaction
+    is opt-in (via `PANTHEON_REPO_ROOT`) and doesn't fire when unset.
+- **Every `gate.conf` key that shapes gate BEHAVIOR is base-pinned, not just `execution=` — an
+  adversarial-review fix generalizing a class this repo's own docs/CLI.md had already disclosed
+  as unfixed (issue #13, for `provider=` specifically).** `provider=`/`rules_file=`/`spec_file=`/
+  `agents=` now resolve from the PR's BASE commit only (`pantheon.cli._load_base_pinned_gate_conf`
+  — one `git show`+parse for all five keys alongside `execution=`), the identical mechanism and
+  identical `gh pr checkout <n>`-before-invoking-the-CLI trust boundary `execution=`'s own
+  base-pinning already existed to close: a working-tree-sourced `provider=` could point at any
+  known lane, silently swapping WHICH agent CLI's own judgment gates the merge; a working-tree-
+  sourced `rules_file=`/`spec_file=` could redirect either key at a path absent at base, silently
+  downgrading the base-pinned CONTENT read's own loud "not present" fallback into a full bypass
+  of the real house rules/spec without ever touching their trusted text; a working-tree-sourced
+  `agents=` could swap the enforcing twin panel for a weaker or non-blocking list. `model=`/
+  `base_branch=` remain working-tree-sourced — neither affects tool-execution breadth or which
+  file is trusted as a judgment boundary — see the "Read → provenance matrix" table above for the
+  current split. An explicit `--provider`/`--agents` CLI flag still wins, exactly like
+  `--execution` already did over its own base-pinned default — this closes PR-controlled
+  CONFIGURATION, never an operator's own explicit, interactively-typed choice.
+- **`REVIEW_RULES.md`/`DESIGN.md` are now base-pinned on the vendored workflow (`action/review.yml`)
+  too — an adversarial-review fix closing this surface's own disclosed exception, see "Surface
+  differences" below.** This step's "Build prompt" step used to only PRESENCE-CHECK these two
+  files at `$GITHUB_WORKSPACE` (the PR's own HEAD checkout) and tell the agent "present — go read
+  it"; the agent then read the actual CONTENT live from that same PR-controlled working tree via
+  its own `Read` tool, entirely outside base-pinning — a reviewer built a working PoC (a PR
+  editing `REVIEW_RULES.md` on its own head to add a favorable house rule, applied verbatim).
+  Fixed the identical way the wrapper/persona/pantheon-package reads on this same surface already
+  are: `pantheon_base_pinned_read` resolves CONTENT from the PR's BASE commit into `$RUNNER_TEMP`,
+  fenced with the same randomized BEGIN/END anti-collision markers `action/lib/build_prompt.sh`
+  already uses for this content, now added to this step's own inline copy alongside them.
+- **`PR_TITLE`/`BASE_REF` are now fenced with the same randomized-marker treatment file content
+  already got, on both Action surfaces** (`action/review.yml`'s inline "Build prompt" step,
+  `action/lib/build_prompt.sh`) — an adversarial-review finding: these two PR-event-context
+  values were interpolated straight into the surrounding prose unfenced, while base-pinned file
+  content got the anti-injection BEGIN/END treatment. `PR_TITLE` specifically is PR-author-
+  controlled data; both now get the identical fence-and-label treatment, at a smaller scale.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is
@@ -510,7 +594,7 @@ identical tools. Differences are intentional, not oversights:
 | Configuration | `gate.conf` (provider, model, base branch, rules file, agent list, execution tier). | None — twin panel (artemis, apollo), `REVIEW_RULES.md`, and the read-only execution tier are hardcoded in the workflow. |
 | Provider choice | Pluggable lane (`--provider`, `cli/providers/*.sh`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
-| Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Still reads `REVIEW_RULES.md`/`DESIGN.md` straight from the checked-out working tree (this surface's inline "Build prompt" step is a third, hand-synced copy of the prompt-build logic — see "Layout" below — and wasn't brought forward in this fix). The published `action.yml` surface (a **different** file from this table's `action/review.yml` column) got the same base-pinning as the CLI. This remains the one open item in issue #6's provenance sweep — judgment CONTENT, not gate behavior (see the class statement above), which is why it's tracked as a documented exception rather than left silently unswept. |
+| Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Base-SHA-pinned into `$RUNNER_TEMP` (closed by an adversarial-review fix — this surface's inline "Build prompt" step is still a third, hand-synced copy of the prompt-build logic, see "Layout" below, but it now resolves rules/spec CONTENT the same way its "Resolve gate scripts (base-pinned)" step already resolves the persona/pantheon-verdict trio, instead of presence-checking `$GITHUB_WORKSPACE` and letting the agent read live PR-head content). This closes what was the one remaining open item in issue #6's provenance sweep on this surface — see "Security posture" above for the fix and its own PoC. |
 | Persona / verdict-decider provenance | N/A — always `$PANTHEON_ROOT/agents` and `cli/lib/verdict.sh`, this repo's own installed copy; the target repo never supplies these on the CLI surface. | Base-pinned on both GitHub Action surfaces, same as the CLI's non-issue: the published `action.yml` reads `$ACTION_PATH/agents` and `$ACTION_PATH/action/decide_verdict.py` by default (this repo's own trusted checkout), base-pinned into `$RUNNER_TEMP` when `personas_path` opts into reading from the target repo instead; `action/review.yml` (a **different** file from this table's column) base-pins both into `$RUNNER_TEMP` via its own "Resolve gate scripts (base-pinned)" step (issue #6 — closed in this PR; previously read straight from `$GITHUB_WORKSPACE`, the PR's own checkout, same class as the read-only git wrapper fix above). |
 
 ## Published action

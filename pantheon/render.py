@@ -97,12 +97,38 @@ class AgentRenderData:
 # ---------------------------------------------------------------------------
 
 
-def sanitize_inline(s: Any) -> str:
+def redact_repo_root(text: str, repo_root: str | None) -> str:
+    """Replaces every occurrence of ``repo_root`` (an absolute filesystem path) in ``text`` with
+    the stable placeholder ``<repo>`` — a fix for a real information-disclosure regression
+    CRITICAL-1's own fix (adversarial review) introduced: that fix exposes the repo's absolute
+    path to the reviewing agent (``pantheon.cli._build_prompt``'s "Repo root (absolute path...)"
+    Run-context line — necessary so ``Read``/``Grep``/``Glob`` still work once the provider no
+    longer launches with the repo checkout as its own cwd) so the model can now ECHO that
+    absolute path back verbatim in a finding's ``file``/``issue``/``scenario``/``summary`` text —
+    and that text gets POSTED to a PR comment. On CI runners that's a harmless ephemeral path, but
+    a CLI-lane run from a maintainer's own machine has their REAL home directory path (often
+    containing their username) published into what may be a public PR comment — a real regression
+    an otherwise-correct security fix would have introduced. Closed mechanically here, not by
+    asking the persona nicely (the persona/context ALSO now say findings must cite repo-relative
+    paths — belt-and-suspenders, never the primary control): every model-controlled display field
+    in :func:`render_comment` routes through this before it ever reaches a rendered PR comment,
+    the exact chokepoint DESIGN.md's own "Validation surface" section already describes for
+    every other render-time sanitization this module does. A no-op when ``repo_root`` is falsy
+    (the common case for every caller that hasn't opted into this — the two-runtime env-var
+    bridge below, older callers)."""
+    if not repo_root:
+        return text
+    return text.replace(repo_root, "<repo>")
+
+
+def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
     """Markdown/HTML-hostile-content-safe + single-line, for ANY model-controlled string this
     renderer interpolates — table cells, prose, AND values placed inside a backtick code span.
     Mirrors ``cli/lib/render_comment.sh``'s ``_pantheon_sanitize_inline`` exactly, same order of
     operations (order matters — see that function's header comment for why each step is where it
-    is):
+    is), plus one Python-port-only step (see :func:`redact_repo_root`'s own docstring for why
+    this port specifically needs it: the persona now sees the repo's absolute path, which bash's
+    own runtime never exposed to an agent in the first place):
 
       - Stringified via ``pantheon.jqjson.jq_text`` first (jq -r's raw-output form — see that
         function's docstring), not a bare ``str()``. By the time a value reaches here it has
@@ -114,6 +140,10 @@ def sanitize_inline(s: Any) -> str:
         (``d.verdict``/``d.reason``, which come from a bash counterpart that reads an env var
         DIRECTLY, never through ``$(...)``, and so were never jq-stringified or newline-stripped
         in the first place — see ``pantheon.jqjson.subst``'s own docstring for that distinction).
+      - ``repo_root`` (when given) redacted to ``<repo>`` — see :func:`redact_repo_root`. Done
+        EARLY (right after stringification, before any of the markdown-escaping steps below) so
+        the match is against the model's own literal text, not a version already mangled by a
+        later escaping step.
       - NUL (U+0000) dropped outright. Not a markdown/HTML concern like the rest of this
         function — it's a bash-parity one: bash's ``$(...)`` command substitution cannot hold a
         NUL byte and silently drops it (a documented bash limitation, not something
@@ -138,9 +168,15 @@ def sanitize_inline(s: Any) -> str:
     — as backslash-u-XXXX sequences regardless of ASCII-escaping mode, per the JSON spec, exactly
     like jq's own non-``-r`` pretty-printer does for the bash machine tail. A raw NUL byte only
     ever reaches bash's output via the ``-r`` (raw-string) mode this human-readable path uses;
-    the machine tail was never at risk.
+    the machine tail was never at risk. The machine tail DOES still need the repo-root redaction
+    above, though — it's not a markdown-safety concern the way NUL-handling is, it's the same
+    information-disclosure concern reaching a second surface (the raw JSON is right below the
+    human-readable table, in the same comment) — see :func:`render_comment`'s own body for where
+    that's applied to the machine tail's own text, since :func:`_machine_tail_text` itself stays
+    focused on parse/pretty-print, not redaction.
     """
     s = jqjson.jq_text(s)
+    s = redact_repo_root(s, repo_root)
     s = s.replace("\x00", "")
     s = s.replace("\n", " ")
     s = s.replace("|", "\\|")
@@ -167,7 +203,7 @@ def emoji_for_color(color: str) -> str:
     return {"green": "🟢", "yellow": "🟡", "red": "🔴"}.get(color, "🟠")
 
 
-def severity_badge(severity: Any) -> str:
+def severity_badge(severity: Any, repo_root: str | None = None) -> str:
     """Mirrors ``_pantheon_severity_badge``: the three known severities get a fixed label; an
     out-of-enum severity is visibly flagged (not silently treated as a fourth kind of legitimate
     badge) and sanitized like every other model-controlled field.
@@ -186,7 +222,7 @@ def severity_badge(severity: Any) -> str:
         return "should_fix"
     if severity == "note":
         return "note"
-    return f"unrecognized-severity({sanitize_inline(severity)})"
+    return f"unrecognized-severity({sanitize_inline(severity, repo_root)})"
 
 
 def _safe_findings(verdict_obj: Any) -> list[dict]:
@@ -367,11 +403,19 @@ def overall_color(colors: Iterable[str]) -> str:
     return overall
 
 
-def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
+def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root: str | None = None) -> str:
     """The full combined-PR-comment markdown, as one string — mirrors
     ``pantheon_render_comment`` line for line. ``agent_data`` maps each agent name in ``agents``
     to an :class:`AgentRenderData` (missing entries fall back to that dataclass's defaults, the
-    same fail-closed defaults the bash contract's ``${!var:-default}`` expansions use)."""
+    same fail-closed defaults the bash contract's ``${!var:-default}`` expansions use).
+
+    ``repo_root``, when given (``pantheon.cli``'s ``run_gate()`` always passes its own resolved
+    repo root), redacts every occurrence of that absolute path to ``<repo>`` in every
+    model-controlled display field AND the machine-tail JSON — see :func:`redact_repo_root`'s own
+    docstring for the information-disclosure regression this closes (CRITICAL-1's own fix,
+    adversarial review, now exposes the repo's absolute path to the persona so it can still use
+    ``Read``/``Grep``/``Glob`` from a neutral launch cwd — a model can echo that path back into a
+    finding, which would otherwise reach a posted PR comment verbatim)."""
     short_sha = head_sha[:7] if head_sha else ""
     if not short_sha:
         short_sha = "unknown"
@@ -397,8 +441,8 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
 
         # Sanitize the raw verdict value FIRST, then wrap it in our own backticks — sanitizing an
         # already-backtick-wrapped string would treat those backticks as hostile content too.
-        vcell = f"`{sanitize_inline(d.verdict)}` — {d.color}"
-        topcell = sanitize_inline(_table_top_cell(d.verdict, d.top, findings_obj))
+        vcell = f"`{sanitize_inline(d.verdict, repo_root)}` — {d.color}"
+        topcell = sanitize_inline(_table_top_cell(d.verdict, d.top, findings_obj), repo_root)
         lines.append(f"| {agent} | {vcell} | {topcell} |")
 
     lines.append("")
@@ -412,7 +456,7 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
         findings_obj = d.findings_json if isinstance(d.findings_json, dict) else {}
         emoji = emoji_for_color(d.color)
 
-        lines.append(f"**{agent}** @ `{short_sha}` — {emoji} {sanitize_inline(d.verdict)}")
+        lines.append(f"**{agent}** @ `{short_sha}` — {emoji} {sanitize_inline(d.verdict, repo_root)}")
         lines.append("")
 
         # jq_text-ify AND subst (trailing-newline-strip) BEFORE testing emptiness, not after:
@@ -429,11 +473,11 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
             summary = d.top
         if not summary:
             summary = "no summary reported."
-        lines.append(sanitize_inline(summary))
+        lines.append(sanitize_inline(summary, repo_root))
         lines.append("")
 
         if d.invariant and d.reason:
-            lines.append(f"**Overridden verdict:** {sanitize_inline(d.reason)}")
+            lines.append(f"**Overridden verdict:** {sanitize_inline(d.reason, repo_root)}")
             lines.append("")
 
         any_finding = False
@@ -447,14 +491,14 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
             # own case-statement comparison, which is why `sev` is pre-processed here rather than
             # left for severity_badge() to stringify only in its unrecognized-severity fallback.
             sev = jqjson.subst(jqjson.jq_text(_or_default(finding.get("severity"), "note")))
-            f_field = sanitize_inline(jqjson.subst(jqjson.jq_text(_or_default(finding.get("file"), "?"))))
+            f_field = sanitize_inline(jqjson.subst(jqjson.jq_text(_or_default(finding.get("file"), "?"))), repo_root)
             ln = _finding_line_or_placeholder(finding.get("line"))
             issue = jqjson.subst(jqjson.jq_text(_or_default(finding.get("issue"), "")))
             scenario = jqjson.subst(jqjson.jq_text(_or_default(finding.get("scenario"), "")))
-            badge = severity_badge(sev)
-            lines.append(f"- {badge} `{f_field}:{ln}` — {sanitize_inline(issue)}")
+            badge = severity_badge(sev, repo_root)
+            lines.append(f"- {badge} `{f_field}:{ln}` — {sanitize_inline(issue, repo_root)}")
             if scenario:
-                lines.append(f"  scenario: {sanitize_inline(scenario)}")
+                lines.append(f"  scenario: {sanitize_inline(scenario, repo_root)}")
         if any_finding:
             lines.append("")
 
@@ -470,7 +514,7 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
         # populate it lazily from findings_json — by the time any AgentRenderData instance
         # exists, __post_init__ has always run and this is never actually None.
         assert d.findings_raw is not None
-        lines.append(_machine_tail_text(d.findings_raw))
+        lines.append(redact_repo_root(_machine_tail_text(d.findings_raw), repo_root))
         lines.append("```")
         lines.append("")
     lines.append("</details>")
@@ -530,8 +574,13 @@ def _agent_data_from_env(agent: str) -> AgentRenderData:
 def render_from_env(head_sha: str, agents: list[str]) -> str:
     """Reads the bash-contract env vars (``<NAME>_COLOR`` etc.) for each agent in ``agents`` and
     renders the comment — the env-var-driven equivalent of calling ``render_comment`` directly
-    with a hand-built ``agent_data`` mapping."""
-    return render_comment(head_sha, agents, {a: _agent_data_from_env(a) for a in agents})
+    with a hand-built ``agent_data`` mapping. Also reads ``PANTHEON_REPO_ROOT`` (the same env var
+    name ``pantheon.execution``'s wrapper CLI reads for the identical concept — see that module's
+    ``_wrapper_cli`` docstring) so this black-box CLI seam can exercise :func:`render_comment`'s
+    ``repo_root``-redaction fix (see :func:`redact_repo_root`) too, not just its own in-process
+    API — `tests/test-render-comment-python.sh`'s own fixture drives this env var."""
+    repo_root = os.environ.get("PANTHEON_REPO_ROOT") or None
+    return render_comment(head_sha, agents, {a: _agent_data_from_env(a) for a in agents}, repo_root=repo_root)
 
 
 def overall_color_from_env(agents: list[str]) -> str:
