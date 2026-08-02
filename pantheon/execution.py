@@ -112,6 +112,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import sysconfig
 from collections.abc import Sequence
 
 __all__ = [
@@ -423,34 +424,86 @@ def execution_context_note(tier: str, wrapper_path: str) -> str:
     )
 
 
+def _default_user_scripts_dir() -> str | None:
+    """Computes the DEFAULT ``pip install --user`` console-script directory (issue #21 P1,
+    docs/PYTHON-PORT.md §5's "no config knob to widen this list" posture applied to the
+    ``--user`` layout) — WITHOUT reading ``PYTHONUSERBASE`` (or any other environment variable
+    naming a filesystem location) to compute it. This is Python's own DEFAULT per-user base
+    formula, replicated by hand from a value this process cannot have redirected:
+    ``os.path.expanduser("~")`` (HOME — already trusted elsewhere in this module, see
+    :func:`_forced_env`'s own comment: "PATH and HOME are the sole two ambient values carried
+    forward... neither names an executable or write target an attacker controls").
+
+    History: an EARLIER version of :func:`resolve_console_script` consulted
+    ``sysconfig.get_path("scripts", scheme=f"{os.name}_user")`` directly to support
+    ``pip install --user`` — a Codex review finding caught that this resolves through
+    ``PYTHONUSERBASE``, an ordinary env var a hostile launcher can point AT a checked-out PR's
+    own tree, so that lookup was removed outright (see git history / this module's own past
+    revisions). Issue #21 P1 (slice 5): removing the lookup left EVERY real ``pip install --user``
+    layout unresolved, and the caller's own fallback (``python -m pantheon.execution wrapper``,
+    invoked with a hostile checkout as cwd) reopens the exact ``-m``-prepends-cwd-to-sys.path
+    shadow vector ``resolve_console_script``'s own adjacent-only check exists to close — "fall
+    back to the unsafe form" is not an acceptable resolution for a layout `pipx`/`pip --user`
+    make real. This function closes that the same way :data:`TRUSTED_GIT_DIRS` closes the
+    analogous git-lookup problem: compute the trusted location from a FIXED formula the
+    environment cannot move, rather than either trusting an attacker-influenced env var or
+    silently degrading to a weaker code path.
+
+    ``sysconfig.get_config_var("PYTHONFRAMEWORK")`` (used below to detect a macOS
+    python.org/Apple framework build, whose per-user base is ``~/Library/Python/X.Y`` instead of
+    ``~/.local``) is a BUILD-TIME constant compiled into this interpreter — not the
+    environment-configurable ``sysconfig.get_path(..., scheme=..._user)`` call the vulnerability
+    above was about — so consulting it here does not reopen that hole (also verified structurally
+    by tests/test_execution.py's ``test_never_consults_sysconfig_get_path`` fixture, which patches
+    ``sysconfig.get_path`` — not ``get_config_var`` — to fail loud if ever called).
+
+    Returns ``None`` on a platform this port does not special-case (Windows; or POSIX with no
+    resolvable ``HOME``) — :func:`resolve_console_script`'s adjacent-only check is the only
+    lookup performed in that case, same as before this fix."""
+    if os.name != "posix":
+        return None
+    home = os.path.expanduser("~")
+    if not home or home == "~":
+        return None
+    if sys.platform == "darwin" and sysconfig.get_config_var("PYTHONFRAMEWORK"):
+        return os.path.join(home, "Library", "Python", f"{sys.version_info.major}.{sys.version_info.minor}")
+    return os.path.join(home, ".local")
+
+
 def resolve_console_script(name: str) -> str | None:
-    """Resolves an installed console script's own absolute path — checked ONLY at
-    ``os.path.dirname(sys.executable)`` (where a venv's or an ordinary system-wide install's
-    console scripts land, alongside ``python``/``pip``/``pantheon`` themselves), the same
-    resolution discipline :data:`TRUSTED_GIT_DIRS`/:func:`_git_executable` already use for
-    ``git`` itself: a single location fixed by how THIS interpreter process was launched, never
-    anything derived from the live environment. Shared by ``pantheon.cli``'s
-    ``_wrapper_invocation()`` and ``pantheon.providers``' ``default_allowed_tools()`` — both
-    resolve the readonly execution tier's own ``pantheon-git-readonly`` console script this way
-    (see ``pyproject.toml``'s ``[project.scripts]`` entry).
+    """Resolves an installed console script's own absolute path. Checks TWO fixed locations, in
+    order, both immune to environment redirection:
 
-    Deliberately does NOT also consult ``sysconfig``/``site``'s per-user scripts scheme
-    (``sysconfig.get_path("scripts", scheme=f"{os.name}_user")``) — an EARLIER version of this
-    function did, to also support ``pip install --user``. A Codex review finding on this port's
-    own PR caught the resulting hole, reproduced live: that scheme resolves through
-    ``PYTHONUSERBASE`` (``site.USER_BASE``), an ordinary environment variable a hostile launcher
-    can point anywhere — including AT the checked-out PR's own tree
-    (``PYTHONUSERBASE=$PWD``). Pointed there, this function would have resolved a PR-committed
-    ``bin/pantheon-git-readonly`` as if it were the real, trusted-installed console script,
-    handing a hostile checkout code execution under the guise of the readonly wrapper. The
-    convenience of finding a ``--user`` install is not worth reopening that door: this now
-    matches :data:`TRUSTED_GIT_DIRS`'s own "no config knob to widen this list" posture exactly.
+      1. ``os.path.dirname(sys.executable)`` — where a venv's, `pipx`'s, or an ordinary
+         system-wide install's console scripts land, alongside ``python``/``pip``/``pantheon``
+         themselves. The same resolution discipline :data:`TRUSTED_GIT_DIRS`/
+         :func:`_git_executable` already use for ``git`` itself: a location fixed by how THIS
+         interpreter process was launched, never anything derived from the live environment.
+      2. :func:`_default_user_scripts_dir`'s ``bin`` subdirectory — the DEFAULT ``pip install
+         --user`` console-script location (issue #21 P1), computed from HOME by a fixed formula
+         that never reads ``PYTHONUSERBASE`` — see that function's own docstring for the full
+         "resolve safely, don't fail open OR silently degrade" rationale and the vulnerability
+         history it fixes.
 
-    Returns ``None`` (never raises) when not found, so a caller can decide its own fallback
-    rather than this function guessing one."""
+    Shared by ``pantheon.cli``'s ``_wrapper_invocation()`` and ``pantheon.providers``'
+    ``default_allowed_tools()`` — both resolve the readonly execution tier's own
+    ``pantheon-git-readonly`` console script this way (see ``pyproject.toml``'s
+    ``[project.scripts]`` entry).
+
+    An operator who has set a NON-default ``PYTHONUSERBASE`` (a real, legitimate customization)
+    is not covered by check 2 above — that stays an explicit, narrower miss than the
+    vulnerability this function refuses to reopen; a caller's own fallback path (loud warning,
+    weaker guarantee) still applies to that edge case, same as to a genuine dev-checkout/no-install
+    case. Returns ``None`` (never raises) when not found at either location, so a caller can
+    decide its own fallback rather than this function guessing one."""
     candidate = os.path.join(os.path.dirname(sys.executable), name)
     if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
         return candidate
+    user_base = _default_user_scripts_dir()
+    if user_base is not None:
+        candidate = os.path.join(user_base, "bin", name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     return None
 
 

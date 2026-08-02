@@ -168,3 +168,104 @@ def test_update_state_warns_and_returns_on_an_unwritable_directory_never_raises(
 
     captured = capsys.readouterr()
     assert "failed to create" in captured.err
+
+
+# ---------------------------------------------------------------------------------------------
+# Symlink refusal at bootstrap -- issue #21 P2 (docs/PYTHON-PORT.md's port slice 5). The
+# pre-fix bootstrap_state_file() used `if not os.path.exists(state_file): open(state_file, "w")`
+# -- os.path.exists() follows symlinks and reads False for a DANGLING one (the target doesn't
+# exist), so that condition was True and the open() ran anyway. A plain open(path, "w") on a
+# dangling symlink is a write-THROUGH-symlink primitive: it creates the symlink's TARGET, not
+# the symlink itself. Since bootstrap_state_file() runs unconditionally on every invocation
+# (before --dry-run's own skip branches), a hostile PR checkout committing
+# ".review-gate-state.json" as a dangling symlink could make a bare `pantheon gate --dry-run`
+# silently create an attacker-chosen file.
+#
+# Proven failing pre-fix: reverting bootstrap_state_file()'s body to
+# `if not os.path.exists(state_file): open(state_file, "w").write("{}\n")` and re-running
+# test_bootstrap_state_file_refuses_a_dangling_symlink below makes it FAIL -- the dangling
+# symlink's target gets created with "{}\n" instead of the function raising OSError. Verified
+# locally by temporarily reverting pantheon/state.py to that pre-fix body and re-running this
+# file with `pytest tests/test_state.py -k dangling_symlink -q`; restored before committing.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_bootstrap_state_file_refuses_a_dangling_symlink(tmp_path) -> None:
+    checkout = tmp_path / "hostile-checkout"
+    checkout.mkdir()
+    target = tmp_path / "planted-by-attacker.json"  # parent dir (tmp_path) exists — a real
+    # write-through would succeed here pre-fix; only a genuine dangling-symlink refusal stops it
+    state_file = checkout / ".review-gate-state.json"
+    os.symlink(str(target), str(state_file))
+    assert not target.exists()  # dangling: the symlink's target does not exist
+
+    with pytest.raises(OSError):
+        state.bootstrap_state_file(str(state_file))
+
+    # The would-be write-through-symlink primitive never fired: the target directory was never
+    # even created, let alone seeded with "{}\n".
+    assert not target.exists()
+    # The symlink itself is untouched too.
+    assert os.path.islink(state_file)
+
+
+def test_bootstrap_state_file_refuses_a_symlink_pointing_at_a_real_file(tmp_path) -> None:
+    # Non-dangling case: the symlink's target DOES already exist. Refused too -- this function's
+    # contract is "never follow a symlink at this path", not "only refuse when the target is
+    # missing".
+    checkout = tmp_path / "hostile-checkout"
+    checkout.mkdir()
+    real_target = tmp_path / "some-other-real-file.json"
+    real_target.write_text('{"already": "here"}')
+    state_file = checkout / ".review-gate-state.json"
+    os.symlink(str(real_target), str(state_file))
+
+    with pytest.raises(OSError):
+        state.bootstrap_state_file(str(state_file))
+
+    # The real target file is untouched -- never opened/truncated through the symlink.
+    assert real_target.read_text() == '{"already": "here"}'
+
+
+def test_load_state_fails_closed_to_empty_dict_on_a_dangling_symlink(tmp_path) -> None:
+    # load_state()'s own fail-closed-to-{} contract (never a crash) extends to this refusal --
+    # a caller on the display/no-crash path degrades to "no prior state", same as any other
+    # bootstrap failure.
+    checkout = tmp_path / "hostile-checkout"
+    checkout.mkdir()
+    target = tmp_path / "planted-by-attacker.json"  # parent dir (tmp_path) exists — a real
+    # write-through would succeed here pre-fix; only a genuine dangling-symlink refusal stops it
+    state_file = checkout / ".review-gate-state.json"
+    os.symlink(str(target), str(state_file))
+
+    assert state.load_state(str(state_file)) == {}
+    assert not target.exists()
+
+
+def test_load_state_or_raise_fails_closed_to_state_file_malformed_on_a_dangling_symlink(tmp_path) -> None:
+    checkout = tmp_path / "hostile-checkout"
+    checkout.mkdir()
+    target = tmp_path / "planted-by-attacker.json"  # parent dir (tmp_path) exists — a real
+    # write-through would succeed here pre-fix; only a genuine dangling-symlink refusal stops it
+    state_file = checkout / ".review-gate-state.json"
+    os.symlink(str(target), str(state_file))
+
+    with pytest.raises(state.StateFileMalformed, match="failed to create"):
+        state.load_state_or_raise(str(state_file))
+    assert not target.exists()
+
+
+def test_update_state_warns_and_returns_on_a_dangling_symlink_never_raises_never_writes(tmp_path, capsys) -> None:
+    checkout = tmp_path / "hostile-checkout"
+    checkout.mkdir()
+    target = tmp_path / "planted-by-attacker.json"  # parent dir (tmp_path) exists — a real
+    # write-through would succeed here pre-fix; only a genuine dangling-symlink refusal stops it
+    state_file = checkout / ".review-gate-state.json"
+    os.symlink(str(target), str(state_file))
+
+    state.update_state("green", "42", "deadbeefcafe", str(state_file), str(tmp_path))
+
+    captured = capsys.readouterr()
+    assert "failed to create" in captured.err
+    assert not target.exists()
+    assert os.path.islink(state_file)
