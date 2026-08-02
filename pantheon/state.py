@@ -36,8 +36,10 @@ drives the extracted bash function: via ``python -m pantheon.state update ...``.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
+import tempfile
 
 from pantheon import execution, jqjson
 
@@ -138,9 +140,12 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
     reads the file directly (not through ``load_state``) and takes the identical "leave it alone,
     warn loudly" branch on any parse failure or non-object content.
 
-    Writes via a temp file in ``workdir`` + ``os.replace`` (atomic on POSIX, same write-then-move
-    discipline as bash's own ``jq ... > "$tmp_state" && mv "$tmp_state" "$state_file"``) — never a
-    direct in-place write that could leave a torn/partial file behind on a mid-write failure. A
+    Writes via a temp file created in ``state_file``'s OWN directory (never ``workdir`` — see
+    this function's own body for why) + ``os.replace`` (atomic on POSIX, same write-then-move
+    discipline as bash's own ``jq ... > "$tmp_state" && mv "$tmp_state" "$state_file"``, and
+    always same-filesystem by construction, so it never needs `mv`'s own cross-device fallback)
+    — never a direct in-place write that could leave a torn/partial file behind on a mid-write
+    failure. A
     write failure (permissions, disk full, malformed existing content, ...) is reported to stderr
     but never raised — mirrors bash's own posture: the comment has already posted by the time
     this runs, so a state-write failure is a loud warning, not a reason to report the whole gate
@@ -186,9 +191,27 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
         return
 
     state[str(pr_number)] = {"reviewed_sha": head_sha}
-    tmp_path = os.path.join(workdir, "state.json")
+
+    # The temp file is created NEXT TO state_file (its own directory), NOT inside `workdir` — a
+    # finding from this repo's own self-hosted gate on this port's own PR: `workdir` is typically
+    # a system temp directory (e.g. `tempfile.TemporaryDirectory()`, as `pantheon.cli` passes),
+    # which can be a different filesystem/mount than the target repo checkout (a Docker CI
+    # runner's tmpfs `/tmp` vs. a bind-mounted workspace, a `TMPDIR=/dev/shm` config, ...).
+    # `os.replace()`/`os.rename()` raise `OSError(EXDEV)` on a cross-device rename with NO
+    # fallback — unlike bash's `mv`, which transparently falls back to copy+unlink — so a
+    # `workdir`-based temp file could silently fail to ever update `state_file`, defeating
+    # follow-up mode (fail-safe to a full re-review, never data corruption, but silently, with
+    # only a stderr warning). Fixed structurally, not by replicating `mv`'s fallback: a temp file
+    # created in `state_file`'s OWN directory is, by construction, always on the SAME filesystem
+    # as `state_file`, so `os.replace()` can never cross a device boundary here at all — the same
+    # "closed by construction, not by enumerating fallbacks" posture this port already uses
+    # elsewhere (e.g. `pantheon.execution`'s `TRUSTED_GIT_DIRS`). `workdir` is still accepted (API
+    # and CLI-shim shape stability — see this module's own `python -m pantheon.state update`
+    # entry point) but is no longer where this temp file is actually written.
+    state_dir = os.path.dirname(os.path.abspath(state_file)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".review-gate-state-", suffix=".json.tmp", dir=state_dir)
     try:
-        with open(tmp_path, "w") as fh:
+        with os.fdopen(fd, "w") as fh:
             fh.write(jqjson.dumps(state, indent=2))
             fh.write("\n")
         os.replace(tmp_path, state_file)
@@ -197,6 +220,9 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
             f"pantheon: warning: comment posted but failed to update {state_file}: {e}",
             file=sys.stderr,
         )
+        # Best-effort cleanup; the warning above already reported the real failure.
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
 
 
 # ---------------------------------------------------------------------------------------------
