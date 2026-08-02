@@ -36,9 +36,11 @@ Copies the five personas, the verdict-decision script, and the GitHub Action wor
 your target repo (`.github/review-agents/`, `.github/workflows/review.yml`), so your repo's own
 CI checkout can see them without depending on review-pantheon existing on that runner. Prefer
 this over Way C if you want the gate's own files reviewable in your repo's history. Add
-`--claude --cursor --codex --gemini` to also generate in-editor/in-CLI projections of the
-counsel agents. Idempotent — see `install.sh`'s own header comment and the README's
-[Quick start](../README.md#quick-start).
+`--claude --cursor --codex --gemini` to also generate in-editor/in-CLI projections — for Claude
+Code that's the counsel agents, the four canonical skills (`gate`, `counsel`, `spec-driven`,
+`design-contract` — `.claude/skills/<name>/SKILL.md`), and `/counsel` + `/gate` commands; other
+tools get their own best-effort per-tool projections (see DESIGN.md). Idempotent — see
+`install.sh`'s own header comment and the README's [Quick start](../README.md#quick-start).
 
 You still run the CLI surface (`cli/review-gate`) from the review-pantheon checkout itself, not
 from the target repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
@@ -77,7 +79,7 @@ repo-level one:
 
 | Tool | User-level destination |
 |---|---|
-| **Claude Code** | `$HOME/.claude/agents/*.md` (personas verbatim) + `$HOME/.claude/commands/counsel.md` |
+| **Claude Code** | `$HOME/.claude/agents/*.md` (personas verbatim) + `$HOME/.claude/skills/{gate,counsel,spec-driven,design-contract}/SKILL.md` (skills verbatim) + `$HOME/.claude/commands/{counsel,gate}.md` |
 | **Cursor** | `$HOME/.cursor/agents/*.md` |
 | **Codex CLI** | `$HOME/.agents/skills/<name>/SKILL.md` |
 | **Gemini CLI** | `$HOME/.gemini/commands/*.toml` |

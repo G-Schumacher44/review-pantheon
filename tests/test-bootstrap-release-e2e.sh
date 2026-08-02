@@ -36,7 +36,7 @@ TARBALL_NAME="${NAME}.tar.gz"
 
 # ---------------------------------------------------------------------------
 # Build the fixture release tarball — same explicit manifest as release.yml's "Build versioned
-# tarball" step (cli/, agents/, bootstrap.sh, install.sh, REVIEW_RULES.example.md,
+# tarball" step (cli/, agents/, skills/, bootstrap.sh, install.sh, REVIEW_RULES.example.md,
 # gate.conf.example, LICENSE, README.md), staged under a top-level review-pantheon-<tag>/ dir.
 # ---------------------------------------------------------------------------
 section "Build fixture release tarball (release.yml's manifest, verbatim)"
@@ -46,6 +46,7 @@ STAGE="$STAGE_ROOT/$NAME"
 mkdir -p "$STAGE"
 cp -R "$ROOT/cli" "$STAGE/cli"
 cp -R "$ROOT/agents" "$STAGE/agents"
+cp -R "$ROOT/skills" "$STAGE/skills"
 cp "$ROOT/bootstrap.sh" "$STAGE/bootstrap.sh"
 cp "$ROOT/install.sh" "$STAGE/install.sh"
 mkdir -p "$STAGE/action"
