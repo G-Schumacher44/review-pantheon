@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -41,7 +43,9 @@ class _FakeProc:
     """A minimal stand-in for `subprocess.Popen` — captures the argv/kwargs it was constructed
     with, and lets a test script what `communicate()` does (return output, or raise
     `TimeoutExpired` once and then return leftover output on retry, mirroring the real
-    post-kill `communicate()` call `_run()` makes)."""
+    post-kill `communicate()` call `_run()` makes). `_run()` runs Popen in BINARY mode (no
+    `text=True` — see that function's own docstring for why), so `communicate()` must return
+    bytes here too, matching the real contract this fake stands in for."""
 
     def __init__(
         self,
@@ -54,9 +58,9 @@ class _FakeProc:
         self.argv = argv
         self.pid = 4242
         self.returncode = returncode
-        self._stdout = stdout
+        self._stdout = stdout.encode("utf-8")
         self._raise_timeout_once = raise_timeout_once
-        self._leftover_after_timeout = leftover_after_timeout
+        self._leftover_after_timeout = leftover_after_timeout.encode("utf-8")
         self.communicate_calls = 0
 
     def communicate(self, input=None, timeout=None):  # noqa: A002 - matches subprocess.Popen's own signature
@@ -303,6 +307,77 @@ def test_provider_env_path_is_always_filtered_never_ambient(monkeypatch, tmp_pat
     env = providers._provider_env()
     assert str(checkout) not in env["PATH"].split(os.pathsep)
     assert "/usr/bin" in env["PATH"].split(os.pathsep)
+
+
+# ---------------------------------------------------------------------------------------------
+# _FALLBACK_WRAPPER_CMD -- the module-shadowing fix (a Codex finding, third review wave: since
+# providers now run with the target repo's own checkout as their cwd, a hostile PR committing its
+# own pantheon/execution.py at the repo root could get THAT file imported instead of the real
+# installed one the moment the readonly tier's one allowed Bash prefix runs, defeating
+# run_readonly_wrapper()'s own argv validation from inside the module meant to enforce it).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_fallback_wrapper_cmd_uses_isolated_mode() -> None:
+    assert " -I -m pantheon.execution wrapper" in providers._FALLBACK_WRAPPER_CMD
+
+
+def test_isolated_mode_blocks_a_checkout_shadowed_execution_module(tmp_path) -> None:
+    # Live (non-mocked) repro: a hostile checkout with its own pantheon/execution.py, run from
+    # that checkout's own directory (mirrors _run()'s cwd=repo_root) with the REAL package
+    # resolvable only via PYTHONPATH (the dev-checkout shape) -- without -I this imports the
+    # impostor; with -I, PYTHONPATH is ignored too, so resolution fails closed (module not found)
+    # rather than silently running the impostor.
+    hostile = tmp_path / "hostile-checkout"
+    (hostile / "pantheon").mkdir(parents=True)
+    (hostile / "pantheon" / "__init__.py").write_text("")
+    (hostile / "pantheon" / "execution.py").write_text("print('IMPOSTOR-RAN')\n")
+
+    real_root = str(Path(__file__).resolve().parent.parent)
+
+    without_isolation = subprocess.run(
+        [sys.executable, "-m", "pantheon.execution", "wrapper", "status"],
+        cwd=str(hostile),
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": real_root},
+        capture_output=True,
+        text=True,
+    )
+    assert "IMPOSTOR-RAN" in without_isolation.stdout
+
+    with_isolation = subprocess.run(
+        [sys.executable, "-I", "-m", "pantheon.execution", "wrapper", "status"],
+        cwd=str(hostile),
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": real_root},
+        capture_output=True,
+        text=True,
+    )
+    assert "IMPOSTOR-RAN" not in with_isolation.stdout
+    assert with_isolation.returncode != 0
+
+
+# ---------------------------------------------------------------------------------------------
+# _run()'s binary-mode decoding -- a Codex finding (third review wave): strict text-mode
+# decoding raised an uncaught UnicodeDecodeError on non-UTF-8 provider output, escaping past both
+# ProviderError and GateError.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_run_decodes_invalid_utf8_defensively_instead_of_raising(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+
+    class _InvalidUtf8Proc(_FakeProc):
+        def communicate(self, input=None, timeout=None):  # noqa: A002
+            return b"before-invalid \xff\xfe after-invalid\n", None
+
+    def fake_popen(argv, **kwargs):
+        return _InvalidUtf8Proc(argv)
+
+    monkeypatch.setattr(providers.subprocess, "Popen", fake_popen)
+
+    # Must not raise UnicodeDecodeError -- the whole point of this fixture.
+    out = providers.provider_run("claude", "", prompt_file, "")
+    assert "before-invalid" in out
+    assert "after-invalid" in out
 
 
 # ---------------------------------------------------------------------------------------------

@@ -128,7 +128,15 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini", "cursor")
 # a file on disk) — this fallback instead points at that module's own CLI entry point
 # (`python -m pantheon.execution wrapper`), the same shape tests/test-git-readonly-wrapper.sh's
 # python mode already uses as its WRAPPER_CMD.
-_FALLBACK_WRAPPER_CMD = f"{sys.executable} -m pantheon.execution wrapper"
+#
+# `-I` (isolated mode) mirrors pantheon.cli's own `_WRAPPER_INVOCATION` — see that module's
+# docstring for the full rationale (a Codex finding: a hostile checkout's own same-named
+# `pantheon/execution.py`, importable because a provider now runs with the checkout as its cwd,
+# would otherwise shadow the real installed module for the ONE allowed Bash prefix under the
+# readonly tier, defeating the read-only wrapper's own argv validation from inside the module
+# meant to enforce it). `-I` disables the cwd-prepend/PYTHONPATH/user-site lookup that makes the
+# shadow possible.
+_FALLBACK_WRAPPER_CMD = f"{sys.executable} -I -m pantheon.execution wrapper"
 
 
 def default_allowed_tools() -> str:
@@ -309,14 +317,28 @@ def _run(
     timeout, or a failure to even start the process (the executable vanishing between
     :func:`_resolve_cli` and this call, say) — never lets a raw
     ``subprocess.CalledProcessError``/``OSError`` escape to a caller that only knows this module's
-    own exception type."""
+    own exception type.
+
+    Deliberately BINARY-mode (no ``text=True``/``encoding=``), not strict-UTF-8 text mode — a
+    Codex review finding on this port's own PR: a provider CLI, or any tool subprocess IT spawns,
+    can legitimately emit a non-UTF-8 byte (a binary tool's stray stderr output, a subtly
+    mis-encoded terminal escape, ...), and strict text-mode decoding raises an uncaught
+    ``UnicodeDecodeError`` from inside ``communicate()`` that neither this function nor its
+    callers (``_run_agent()``/``main()``, both of which only know :class:`ProviderError`/
+    :class:`GateError`) catch — the whole gate would exit with a bare traceback instead of the
+    documented UNVERIFIED fail-closed result. Captured as raw bytes and decoded defensively
+    (``errors="replace"``) instead, mirroring this port's own established pattern for exactly
+    this class of input (``pantheon.verdict.main()``'s ``open(raw_file, errors="replace")``) —
+    closed by construction (Python's strict decoder never runs on this path at all), not by
+    adding one more ``except UnicodeDecodeError`` to the pile."""
+    stdin_bytes = input_text.encode("utf-8", errors="replace") if input_text is not None else None
+
     try:
         proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE if input_text is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
             env=_provider_env(repo_root),
             cwd=cwd,
             shell=False,
@@ -326,18 +348,20 @@ def _run(
         raise ProviderError(f"failed to execute {argv[0]}: {e}") from e
 
     try:
-        stdout, _ = proc.communicate(input=input_text, timeout=timeout)
+        stdout_bytes, _ = proc.communicate(input=stdin_bytes, timeout=timeout)
     except subprocess.TimeoutExpired:
         _terminate_group(proc)
         try:
-            leftover, _ = proc.communicate(timeout=5)
+            leftover_bytes, _ = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            leftover = ""
-        raise ProviderError(f"{argv[0]} timed out after {timeout}s", output=leftover or "") from None
+            leftover_bytes = b""
+        leftover = (leftover_bytes or b"").decode("utf-8", errors="replace")
+        raise ProviderError(f"{argv[0]} timed out after {timeout}s", output=leftover) from None
 
+    stdout = (stdout_bytes or b"").decode("utf-8", errors="replace")
     if proc.returncode != 0:
-        raise ProviderError(f"{argv[0]} exited {proc.returncode}", output=stdout or "")
-    return stdout or ""
+        raise ProviderError(f"{argv[0]} exited {proc.returncode}", output=stdout)
+    return stdout
 
 
 def _claude(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:

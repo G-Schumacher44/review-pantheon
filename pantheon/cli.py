@@ -69,9 +69,26 @@ _DEFAULT_EXECUTION = "readonly"
 # The Python equivalent of a wrapper *script path* the generated prompt tells an agent to invoke
 # in place of raw `git` — pantheon.execution.run_readonly_wrapper is a function, not a standalone
 # executable, so this points at that module's own CLI entry point instead, the identical shape
-# tests/test-git-readonly-wrapper.sh's python mode and pantheon.providers' own fallback already
-# use for the same reason.
-_WRAPPER_INVOCATION = f"{sys.executable} -m pantheon.execution wrapper"
+# pantheon.providers' own fallback uses for the same reason.
+#
+# `-I` (isolated mode) is load-bearing, not a style preference — a Codex review finding on this
+# port's own PR: this string becomes the ONE allowed Bash prefix under the `readonly` execution
+# tier (`Bash(<this> *)`), and providers now run with the target repo's OWN checkout as their
+# cwd (see this module's own `_run_agent`/`providers.provider_run` — a fix from the SAME
+# disposition round that exposed this gap). Python's `-m` machinery inserts the current working
+# directory at the front of `sys.path` — a hostile PR checkout that commits its own
+# `pantheon/execution.py` (or a whole shadow `pantheon/` package) at its repo root would get
+# THAT file imported instead of the real, installed one the instant a prompt-injected agent
+# invokes this Bash prefix, defeating `run_readonly_wrapper()`'s own argv validation entirely —
+# the "read-only" tier's actual boundary — from inside the very module meant to enforce it.
+# `-I` closes this by construction: it disables the cwd-prepend (and PYTHONPATH, and user
+# site-packages), so only a properly INSTALLED `pantheon` package is ever importable here,
+# never a same-named file the checkout happens to contain. Verified live: a hostile
+# `pantheon/execution.py` at a checkout's root DOES get imported and run without `-I`; WITH
+# `-I`, resolution correctly fails closed (module not found) against an uninstalled dev
+# checkout, and correctly finds the REAL installed package (not the checkout's impostor) against
+# a real `pip install`.
+_WRAPPER_INVOCATION = f"{sys.executable} -I -m pantheon.execution wrapper"
 
 
 class GateError(Exception):
