@@ -48,12 +48,25 @@ from pantheon import jqjson
         ("3.140", "3.140"),
         ("-1.50", "-1.50"),
         ("123.4500", "123.4500"),
-        # Exponent-notation numbers — canonicalized (uppercase E, explicit + on the exponent),
-        # mantissa preserved exactly as given.
+        # Exponent-notation numbers — General Decimal Arithmetic's to-scientific-string algorithm
+        # (what jq's decNumber and Python's decimal.Decimal both implement — see
+        # _canonicalize_number_text's own docstring): scientific form when the exponent is
+        # positive or the adjusted exponent is < -6, plain decimal otherwise, with the mantissa
+        # RENORMALIZED (not simply preserved) when it does print in scientific form.
         ("1e2", "1E+2"),
         ("1.0e2", "1.0E+2"),
         ("1E10", "1E+10"),
         ("1.5E10", "1.5E+10"),
+        # Codex review finding on this port's own PR (jqjson.py:213): the earlier
+        # mantissa-preserved-verbatim canonicalizer got these wrong — real jq renormalizes the
+        # mantissa and/or switches to plain decimal notation for these exact shapes.
+        ("1e-01", "0.1"),
+        ("10e-1", "1.0"),
+        ("1.2300e+02", "123.00"),
+        ("10e2", "1.0E+3"),
+        ("1e-4", "0.0001"),
+        ("1e-5", "0.00001"),
+        ("2e-7", "2E-7"),
         # Overflow/underflow — jq's arbitrary-precision decimal handling never loses the literal.
         ("1e400", "1E+400"),
         ("-1e400", "-1E+400"),

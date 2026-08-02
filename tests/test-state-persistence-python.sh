@@ -110,6 +110,29 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Codex review finding on this port's own PR: a state file whose EXISTING content is malformed
+# (not the "fresh/absent" case above) must be left completely untouched by a green/yellow
+# update_state() call too — never silently replaced with a fresh {} + only the current PR's
+# entry, which would permanently destroy every other PR's previously recorded reviewed_sha.
+# Mirrors bash's own update_review_gate_state(): its single `jq '...' "$state_file" > "$tmp"`
+# exits nonzero on a malformed read, the `if` takes the else branch, nothing is written.
+# ---------------------------------------------------------------------------
+section "Malformed EXISTING state — a green/yellow update must NOT silently replace it"
+
+MALFORMED_UPDATE_STATE="$WORKDIR/state-malformed-update.json"
+printf 'not valid json at all { { {' > "$MALFORMED_UPDATE_STATE"
+malformed_before="$(cat "$MALFORMED_UPDATE_STATE")"
+
+py_update "green" "42" "deadbeefcafe" "$MALFORMED_UPDATE_STATE" >/dev/null 2>&1
+
+malformed_after="$(cat "$MALFORMED_UPDATE_STATE")"
+if [[ "$malformed_after" == "$malformed_before" ]]; then
+  pass "update_state(): a green outcome against a malformed EXISTING state file leaves it byte-identical (does not silently replace it with a fresh, empty state)"
+else
+  fail "update_state(): malformed existing state was overwritten (before: $malformed_before / after: $malformed_after) — recoverable state destroyed"
+fi
+
+# ---------------------------------------------------------------------------
 # Python-port-specific coverage: load_state()/reviewed_sha_for()/is_ancestor() — the
 # follow-up-mode read side, which the bash suite's extracted-function shape doesn't reach (bash's
 # equivalents are inline `jq` reads in cli/review-gate, not a separately named function).

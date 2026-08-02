@@ -124,12 +124,27 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
     EXACTLY as it was, so the next run reviews the full PR again, not just what changed since a
     run that never actually gated anything.
 
+    **Malformed EXISTING state must also be left untouched, never silently replaced** — a Codex
+    review finding on this port's own PR. This function deliberately does NOT call
+    :func:`load_state` (whose fail-closed-to-``{}`` behavior is correct for the READ side —
+    "no prior state" is a safe default for follow-up-mode detection) — reusing it here would mean
+    a state file corrupted by something other than this module (a disk error, a hand-edit, an
+    interrupted write from a much older version) silently gets overwritten with a FRESH ``{}``
+    plus only the current PR's entry, permanently destroying every other PR's previously recorded
+    ``reviewed_sha``. Mirrors bash's own ``update_review_gate_state()`` exactly instead: its
+    write is a single ``jq '...' "$state_file" > "$tmp_state"`` — if `jq`'s own read of
+    ``$state_file`` fails to parse, that command exits nonzero, the ``if`` takes bash's ``else``
+    branch, and NOTHING is written; the original (malformed) file is never touched. This function
+    reads the file directly (not through ``load_state``) and takes the identical "leave it alone,
+    warn loudly" branch on any parse failure or non-object content.
+
     Writes via a temp file in ``workdir`` + ``os.replace`` (atomic on POSIX, same write-then-move
     discipline as bash's own ``jq ... > "$tmp_state" && mv "$tmp_state" "$state_file"``) — never a
     direct in-place write that could leave a torn/partial file behind on a mid-write failure. A
-    write failure (permissions, disk full, ...) is reported to stderr but never raised — mirrors
-    bash's own posture: the comment has already posted by the time this runs, so a state-write
-    failure is a loud warning, not a reason to report the whole gate run as failed."""
+    write failure (permissions, disk full, malformed existing content, ...) is reported to stderr
+    but never raised — mirrors bash's own posture: the comment has already posted by the time
+    this runs, so a state-write failure is a loud warning, not a reason to report the whole gate
+    run as failed."""
     if overall not in ("green", "yellow"):
         print(
             f"pantheon: overall verdict is {overall} — leaving {state_file} untouched so the "
@@ -139,7 +154,37 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
         )
         return
 
-    state = load_state(state_file)
+    bootstrap_state_file(state_file)
+    try:
+        with open(state_file) as fh:
+            raw = fh.read()
+    except OSError as e:
+        print(
+            f"pantheon: warning: comment posted but failed to read {state_file} for update: {e}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        state = jqjson.loads(raw)
+    except jqjson.JqParseError as e:
+        print(
+            f"pantheon: warning: comment posted but failed to update {state_file} — its existing "
+            f"content is not valid JSON ({e}); leaving it untouched rather than overwriting it "
+            "with a fresh, empty state",
+            file=sys.stderr,
+        )
+        return
+
+    if not isinstance(state, dict):
+        print(
+            f"pantheon: warning: comment posted but failed to update {state_file} — its existing "
+            "content is not a JSON object; leaving it untouched rather than overwriting it with a "
+            "fresh, empty state",
+            file=sys.stderr,
+        )
+        return
+
     state[str(pr_number)] = {"reviewed_sha": head_sha}
     tmp_path = os.path.join(workdir, "state.json")
     try:

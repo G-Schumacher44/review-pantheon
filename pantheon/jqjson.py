@@ -53,8 +53,8 @@ a bare f-string/``str()``; every place a caller's bash counterpart captured a jq
 from __future__ import annotations
 
 import json
-import re
 import secrets
+from decimal import Decimal
 from typing import Any
 
 __all__ = ["JqParseError", "JqNaN", "loads", "dumps", "jq_text", "subst"]
@@ -134,29 +134,33 @@ class _RawBigNumber(str):
     __slots__ = ()
 
 
-_OVERFLOW_NUMBER_RE = re.compile(r"^(-?(?:0|[1-9]\d*)(?:\.\d+)?)([eE][+-]?\d+)$")
-
-
 def _canonicalize_number_text(text: str) -> str:
     """jq's own canonical print form for a number preserved as raw text (whether because its
     magnitude overflowed a double's representable range, or because a double simply can't
-    represent it exactly — see :func:`_parse_float`) — verified live against real jq for every
-    case this covers: exponent-notation text gets uppercase ``E`` and an explicit ``+`` on a
-    positive (or sign-absent) exponent, mantissa digits preserved exactly as given. A plain
-    integer/decimal with no exponent notation at all (no ``e``/``E`` in the source — e.g.
-    ``1.234567890123456789``, a literal with too many significant digits for a double, but no
-    magnitude problem) is returned UNCHANGED — jq preserves those completely verbatim, no
-    normalization at all — and this function is only ever called on text that already parsed as
-    a syntactically valid JSON number, so the only shape ever needing normalization is the
-    exponent-notation one."""
-    m = _OVERFLOW_NUMBER_RE.match(text)
-    if not m:
-        return text
-    mantissa, exponent = m.group(1), m.group(2)
-    exp_digits = exponent[1:]  # drop the leading e/E
-    if exp_digits[0] not in "+-":
-        exp_digits = "+" + exp_digits
-    return f"{mantissa}E{exp_digits}"
+    represent it exactly — see :func:`_parse_float`).
+
+    Routes through ``decimal.Decimal``'s own ``__str__`` — NOT a hand-rolled regex-based
+    canonicalizer (an earlier version of this function was exactly that: preserve the mantissa
+    verbatim, only reformat the exponent's case/sign). That earlier version was WRONG for a real
+    class of input, caught live by this repo's own self-hosted gate: jq's number type is the
+    General Decimal Arithmetic specification's decimal (``decNumber`` in C, the same spec
+    Python's ``decimal`` module implements), and that spec's "to-scientific-string" conversion
+    does NOT simply preserve the source mantissa — it renormalizes it, and it sometimes prints
+    PLAIN decimal notation instead of scientific at all, based on the number's ADJUSTED EXPONENT
+    (``exponent + len(coefficient_digits) - 1``): plain notation when the exponent is <=0 and the
+    adjusted exponent is >=-6, scientific otherwise. Verified live against real jq (jq-1.7.1) for
+    the exact cases that exposed the old regex-only approach's gap: ``1e-01`` prints ``0.1`` (not
+    ``1E-1``), ``10e-1`` prints ``1.0`` (not ``10E-1``), ``1.2300e+02`` prints ``123.00`` (not
+    ``1.2300E+2``), ``10e2`` prints ``1.0E+3`` (mantissa RENORMALIZED from "10" to "1.0", exponent
+    shifted from 2 to 3 — not "10E+2"), while ``1e2``/``1.0e2``/``1e20``/``1.5e3``/``2e-7`` still
+    print in scientific form as before. Python's ``decimal.Decimal(text)`` constructor preserves
+    ``text``'s exact value (no precision loss, no context-precision rounding — that only applies
+    to ARITHMETIC results, never to construction-from-string or to ``str()`` of the constructed
+    value), and its ``__str__`` implements this exact same General-Decimal-Arithmetic
+    to-scientific-string algorithm — confirmed to match every case above, byte for byte, so this
+    function is now a thin wrapper rather than a second, independently-maintained
+    reimplementation of a spec Python's stdlib already gets right."""
+    return str(Decimal(text))
 
 
 def _parse_constant(name: str) -> Any:
@@ -192,8 +196,8 @@ def _parse_float(text: str) -> Any:
     as a :class:`_RawBigNumber` instead of the lossy ``float()`` value, whenever ``float()``'s own
     canonical text form does NOT byte-for-byte match the (exponent-canonicalized) source text.
 
-    "Does not byte-for-byte match" is a TEXT comparison, not a decimal-VALUE comparison — the
-    earlier version of this function compared :class:`decimal.Decimal` values instead
+    "Does not byte-for-byte match" is a TEXT comparison, not a decimal-VALUE comparison — an
+    even earlier version of this function compared :class:`decimal.Decimal` VALUES instead
     (``Decimal(text) != Decimal(repr(value))``), which is exactly why the trailing-zero class
     above slipped through: ``Decimal("1.50") == Decimal("1.5")`` is ``True`` (equal as VALUES),
     even though jq's own printed TEXT for the two differs. Comparing
@@ -204,10 +208,11 @@ def _parse_float(text: str) -> Any:
     blind to. An ordinary literal whose canonical text already matches Python's own ``repr()``
     (e.g. ``0.1`` -> ``repr(0.1) == "0.1"``, ``100.0`` -> ``repr(100.0) == "100.0"``, both
     confirmed live against real jq's identical output) is completely unaffected: this only ever
-    fires for a literal where the two texts genuinely diverge."""
+    fires for a literal where the two texts genuinely diverge. No separate inf/-inf special case
+    is needed here (an earlier version had one): ``repr(float("1e400"))`` is the text ``"inf"``,
+    which never equals ``_canonicalize_number_text``'s always-finite output, so an overflowing
+    literal already falls into the general "texts diverge -> preserve" branch on its own."""
     value = float(text)
-    if value in (float("inf"), float("-inf")):
-        return _RawBigNumber(_canonicalize_number_text(text))
     canonical = _canonicalize_number_text(text)
     if canonical != repr(value):
         return _RawBigNumber(canonical)

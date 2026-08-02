@@ -99,18 +99,93 @@ def _agents_dir() -> Path:
 
 
 # ---------------------------------------------------------------------------------------------
-# Small process helpers. Deliberately distinct from pantheon.execution.run_git: the CLI's OWN
-# orchestration calls (fetch, rev-parse, diff --name-only, gh) need the ambient environment —
-# `git fetch` needs network/credential-helper config that can live outside the fixed system
-# directories pantheon.execution's hardened core restricts PATH to, and `gh` needs its own
-# ambient auth config — exactly mirroring cli/review-gate's own plain, unrestricted `git`/`gh`
-# calls for its OWN internal orchestration (the hardened wrapper in pantheon.execution exists
-# for the PERSONA-facing Bash tool surface only, never for review-gate's own git/gh usage).
+# Small process helpers — the CLI's OWN orchestration calls (fetch, rev-parse, diff --name-only,
+# gh pr view/comment). A Codex review finding on this port's own PR (P1): an earlier version of
+# these helpers resolved `git`/`gh` via the AMBIENT PATH (an implicit `subprocess.run(argv)`
+# with no explicit `env=`) — when the gate is launched from a hostile PR checkout whose own PATH
+# has been widened to include a repository-controlled directory (e.g. `$PWD/bin`, a pattern a
+# PR-committed shell rc file or a locally-sourced `.envrc` could plausibly arrange before this
+# CLI ever runs), that lookup can resolve to an attacker-supplied `git`/`gh` executable and run
+# arbitrary code before review even begins — also a direct violation of docs/PYTHON-PORT.md
+# section 5's "Constructed clean env, never inherited... every git/gh/provider-CLI invocation
+# goes through subprocess.run(argv, env=<explicit dict>, shell=False)" rule, which is written as
+# unconditional (not scoped to the persona-facing wrapper alone). Fixed the same way
+# pantheon.execution's own git-executable resolution already works: `git`/`gh` are resolved ONLY
+# from a fixed set of trusted system directories (never the ambient, checkout-widenable PATH —
+# see pantheon.execution.TRUSTED_GIT_DIRS's own comment for why "absolute" alone isn't "trusted"
+# either), and every subprocess call here gets an EXPLICITLY CONSTRUCTED env dict, not an
+# implicit inherit-when-omitted. Unlike pantheon.execution.run_git's own hardened core (used by
+# pantheon.basepin, which never touches the network), this env still needs to carry real auth/
+# transport state for `git fetch`/`gh pr view`/`gh pr comment` to work at all — GH_TOKEN and
+# friends for `gh`, SSH_AUTH_SOCK for an SSH-remote `git fetch` — so it's a deliberate ALLOWLIST
+# of auth-relevant keys copied from the ambient environment, not a blanket `env=os.environ`
+# passthrough (which is exactly the implicit-inherit shape the spec rule above forbids) and not
+# pantheon.execution's fully bare-bones set either (which has no path for `gh` auth at all).
 # ---------------------------------------------------------------------------------------------
+
+# The ONLY directories `git`/`gh` are ever resolved from for this module's own orchestration
+# calls — reuses pantheon.execution.TRUSTED_GIT_DIRS's exact rationale and directory list (never
+# the ambient PATH, absolute-but-untrusted or otherwise; see that tuple's own comment).
+_TRUSTED_BIN_DIRS: tuple[str, ...] = execution.TRUSTED_GIT_DIRS
+
+# Auth/transport-relevant environment keys carried through EXPLICITLY (never a bare `os.environ`
+# passthrough) so `gh`/`git fetch` still authenticate correctly: GH_TOKEN and siblings for `gh`
+# itself, SSH_AUTH_SOCK/SSH_AGENT_PID for an SSH-remote fetch, XDG_CONFIG_HOME/GH_CONFIG_DIR for
+# where `gh` reads its own stored credentials when no token env var is set.
+_CLI_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
+    "HOME",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GH_HOST",
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GIT_SSH_COMMAND",
+)
+
+_trusted_executable_cache: dict[str, str] = {}
+
+
+def _trusted_executable(name: str) -> str:
+    """Resolves `name` (``git`` or ``gh``) from :data:`_TRUSTED_BIN_DIRS` ONLY — never the
+    ambient PATH. Raises :class:`GateError` (fail-closed) if not found in any of them, the same
+    posture ``pantheon.execution._git_executable`` already uses for the persona-facing wrapper's
+    own git resolution."""
+    cached = _trusted_executable_cache.get(name)
+    if cached is not None:
+        return cached
+    for directory in _TRUSTED_BIN_DIRS:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            _trusted_executable_cache[name] = candidate
+            return candidate
+    _die(
+        f"'{name}' not found in any trusted directory ({', '.join(_TRUSTED_BIN_DIRS)}) — the "
+        "ambient PATH is never consulted for this lookup"
+    )
+    raise AssertionError("unreachable — _die always raises")  # pragma: no cover — mypy narrowing
+
+
+def _cli_env() -> dict[str, str]:
+    """The explicitly constructed environment for this module's own git/gh orchestration calls —
+    see this section's own header comment for the full rationale. Never returns ``os.environ``
+    or a copy of it; PATH is always pinned to :data:`_TRUSTED_BIN_DIRS`, and every other key is
+    copied one at a time from an explicit allowlist, never in bulk."""
+    env: dict[str, str] = {"PATH": os.pathsep.join(_TRUSTED_BIN_DIRS)}
+    for key in _CLI_ENV_PASSTHROUGH_KEYS:
+        value = os.environ.get(key)
+        if value is not None:
+            env[key] = value
+    return env
 
 
 def _run(argv: list[str], cwd: str | None = None, check: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=check)
+    trusted_argv = [_trusted_executable(argv[0]), *argv[1:]]
+    return subprocess.run(
+        trusted_argv, cwd=cwd, env=_cli_env(), shell=False, capture_output=True, text=True, check=check
+    )
 
 
 def _git(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
@@ -118,10 +193,11 @@ def _git(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess
 
 
 def _require_bin(name: str) -> None:
-    import shutil
-
-    if shutil.which(name) is None:
-        _die(f"'{name}' is required but not found on PATH")
+    for directory in _TRUSTED_BIN_DIRS:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return
+    _die(f"'{name}' is required but not found in any trusted directory ({', '.join(_TRUSTED_BIN_DIRS)})")
 
 
 # ---------------------------------------------------------------------------------------------
