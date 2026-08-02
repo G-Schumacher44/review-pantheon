@@ -801,6 +801,71 @@ fi
 
 rm -rf "$LAZY_ORIGIN" "$LAZY_CLONE_RAW" "$LAZY_CLONE_WRAP"
 
+# ---------------------------------------------------------------------------
+# Untrusted-checkout PATH-injection (Codex P1, python-mode only — the vector is specific to how
+# pantheon/execution.py resolves the `git` binary; the bash wrapper's `exec git ...` has no
+# equivalent TRUSTED_GIT_DIRS mechanism to test). Round 1 of this finding: a bare
+# `shutil.which("git")` resolves a RELATIVE PATH entry (e.g. `.`), letting a PR-committed `./git`
+# impostor run in place of the real binary. Round 2 (fresh evidence after round 1's fix): even an
+# ABSOLUTE PATH entry is not automatically trustworthy — `PATH=$PWD/bin:/usr/bin` with a
+# PR-committed `bin/git` executable names an absolute directory that is still INSIDE the
+# untrusted checkout. Fixed by never consulting PATH (ambient, relative, or absolute) for this
+# lookup at all — `_git_executable()` resolves ONLY from TRUSTED_GIT_DIRS, a fixed list of system
+# directories a PR's own tracked content can never write to.
+# ---------------------------------------------------------------------------
+if [[ "$IMPL" == "python" ]]; then
+  section "Untrusted-checkout PATH-injection (Codex P1 round 2 — an absolute-but-untrusted PATH entry)"
+
+  PATHINJ_REPO="$(mktemp -d)"
+  mkdir -p "$PATHINJ_REPO/bin"
+  git -C "$PATHINJ_REPO" init -q
+  git -C "$PATHINJ_REPO" config user.email "test@example.com"
+  git -C "$PATHINJ_REPO" config user.name "test"
+  echo "a" > "$PATHINJ_REPO/f.txt"
+  git -C "$PATHINJ_REPO" add -A
+  git -C "$PATHINJ_REPO" commit -q -m "first"
+
+  PATHINJ_MARKER="$(mktemp -u)"
+  rm -f "$PATHINJ_MARKER"
+  cat > "$PATHINJ_REPO/bin/git" <<EOF
+#!/bin/sh
+touch "$PATHINJ_MARKER"
+exit 99
+EOF
+  chmod +x "$PATHINJ_REPO/bin/git"
+
+  # Negative control: RAW PATH resolution (the exact mechanism a bare shutil.which("git") or a
+  # shell's own command lookup uses) DOES find the PR-committed impostor when its absolute
+  # directory is prepended to PATH — proving the fixture is live, and reproducing exactly what
+  # round 1's "reject relative, accept any absolute" fix remained vulnerable to.
+  rm -f "$PATHINJ_MARKER"
+  raw_which_out="$(cd "$PATHINJ_REPO" && PATH="$PATHINJ_REPO/bin:$PATH" command -v git)"
+  if [[ "$raw_which_out" == "$PATHINJ_REPO/bin/git" ]]; then
+    pass "negative control: raw PATH resolution (command -v git) DOES select the PR-committed impostor when its absolute dir is prepended to PATH — fixture is live"
+  else
+    fail "negative control FAILED: raw PATH resolution did not select the impostor (got '$raw_which_out') — this fixture is not exercising anything"
+  fi
+
+  # The wrapper itself must NOT execute the impostor (marker absent) and must still successfully
+  # run the real git (exit 0, real output) — TRUSTED_GIT_DIRS is consulted instead of PATH.
+  rm -f "$PATHINJ_MARKER"
+  pathinj_out="$(cd "$PATHINJ_REPO" && PATH="$PATHINJ_REPO/bin:$PATH" "${WRAPPER_CMD[@]}" status 2>&1)"
+  pathinj_status=$?
+  if [[ ! -f "$PATHINJ_MARKER" ]]; then
+    pass "wrapper did NOT execute the PATH-injected impostor (marker absent) even with its absolute dir prepended to PATH"
+  else
+    fail "wrapper EXECUTED the PATH-injected impostor (marker present) — TRUSTED_GIT_DIRS regression, the read-only boundary is bypassed"
+  fi
+  if [[ $pathinj_status -eq 0 ]] && ! grep -q '^pantheon-git-readonly:' <<<"$pathinj_out"; then
+    pass "wrapper still ran the REAL git successfully (exit 0) despite the PATH-injection attempt"
+  else
+    fail "wrapper did not run the real git successfully under PATH injection (status=$pathinj_status, output: $pathinj_out)"
+  fi
+
+  rm -f "$PATHINJ_MARKER"
+  rm -rf "$PATHINJ_REPO"
+fi
+
 echo
 echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

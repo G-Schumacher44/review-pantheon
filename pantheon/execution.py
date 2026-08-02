@@ -161,16 +161,37 @@ GLOBAL_OVERRIDES: tuple[str, ...] = (
     "-c", "maintenance.auto=false",
 )
 
+# TRUSTED_GIT_DIRS — the ONLY directories `git` is ever resolved from. NOT the ambient PATH, in
+# any form. Codex fresh-evidence P1 (round 2 on this same finding): even after restricting
+# lookup to ABSOLUTE PATH entries, PATH itself can still name a directory INSIDE the untrusted
+# checkout (e.g. `PATH=$PWD/bin:/usr/bin` with a PR-committed `bin/git` executable) — the
+# wrapper's cwd is the checked-out PR's own tree for every persona-facing invocation, so
+# "absolute" alone is not "trusted". Fixed by never consulting PATH (ambient or otherwise) for
+# this lookup at all: a fixed, hardcoded list of system directories a PR's own tracked content
+# can never write to, first-existing-and-executable wins. No config knob to widen this list —
+# docs/PYTHON-PORT.md does not spec one, and adding one would just relocate the same trust
+# decision to yet another attacker-reachable input (gate.conf is itself base-pinned for exactly
+# this reason elsewhere in this repo).
+TRUSTED_GIT_DIRS: tuple[str, ...] = (
+    "/usr/bin",
+    "/bin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+)
+
+_git_executable_cache: Optional[str] = None
+
 
 def _forced_env() -> dict[str, str]:
     """Builds the constructed-clean subprocess environment from scratch — see this module's
     docstring EXEC/WRITE-SURFACE MATRIX for the full row-by-row mapping. Never returns
-    ``os.environ`` or a copy of it; every key present is explicitly set here.
+    ``os.environ`` or a copy of it; every key present is explicitly set here. PATH is pinned to
+    TRUSTED_GIT_DIRS (never the ambient PATH) so a child process git itself spawns (there are
+    none on the readonly allowlist today, but this is the same "never inherit, always construct"
+    posture as every other key here) inherits nothing attacker-reachable either.
     """
     env: dict[str, str] = {}
-    path = os.environ.get("PATH")
-    if path:
-        env["PATH"] = path
+    env["PATH"] = os.pathsep.join(TRUSTED_GIT_DIRS)
     home = os.environ.get("HOME")
     if home:
         env["HOME"] = home
@@ -184,25 +205,27 @@ def _forced_env() -> dict[str, str]:
 
 
 def _git_executable() -> str:
-    """Resolves the real `git` binary from ONLY the absolute directories in PATH — never via a
-    bare `shutil.which("git")`, which happily returns a match from a RELATIVE PATH entry (`.`,
-    `""`, `bin`, ...). If the wrapper's cwd is the checked-out PR's own tree (as it is for every
-    persona-facing invocation) and the ambient PATH contains such an entry, a PR could commit its
-    own executable file named `git` and have it silently selected in place of the real binary —
-    the read-only boundary this whole module exists to enforce, bypassed before a single argument
-    is even validated. Codex P1 finding, closed by construction: only PATH entries that are
-    themselves absolute paths are ever searched; a relative or empty entry is skipped outright,
-    never falls back to an implicit "search the cwd" behavior.
+    """Resolves the real `git` binary from TRUSTED_GIT_DIRS ONLY — never from PATH, ambient or
+    otherwise (see that tuple's own comment for why "absolute" is not the same bar as "trusted").
+    Resolved once and memoized (module-level cache, populated lazily on first use rather than at
+    import time, so importing this module doesn't require git to be present) — every subsequent
+    call and every subprocess invocation in this module uses the SAME absolute path, not a fresh
+    lookup that could be raced or influenced between calls.
     """
-    path_env = os.environ.get("PATH", "")
-    for entry in path_env.split(os.pathsep):
-        if not entry or not os.path.isabs(entry):
-            continue
-        candidate = os.path.join(entry, "git")
+    global _git_executable_cache
+    if _git_executable_cache is not None:
+        return _git_executable_cache
+
+    for directory in TRUSTED_GIT_DIRS:
+        candidate = os.path.join(directory, "git")
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            _git_executable_cache = candidate
             return candidate
+
     raise WrapperRefused(
-        "git executable not found on PATH (relative and empty PATH entries are never searched)"
+        "git executable not found in any trusted directory ("
+        + ", ".join(TRUSTED_GIT_DIRS)
+        + ") — the ambient PATH is never consulted for this lookup"
     )
 
 
