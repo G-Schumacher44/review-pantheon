@@ -37,6 +37,7 @@ black-box shape).
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import subprocess
@@ -45,6 +46,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 from pantheon import basepin, execution, jqjson, providers, render, state, verdict
 
@@ -85,7 +87,7 @@ def _note(msg: str) -> None:
     print(f"pantheon: {msg}", file=sys.stderr)
 
 
-def _die(msg: str) -> None:
+def _die(msg: str) -> NoReturn:
     raise GateError(msg)
 
 
@@ -132,6 +134,16 @@ _TRUSTED_BIN_DIRS: tuple[str, ...] = execution.TRUSTED_GIT_DIRS
 # passthrough) so `gh`/`git fetch` still authenticate correctly: GH_TOKEN and siblings for `gh`
 # itself, SSH_AUTH_SOCK/SSH_AGENT_PID for an SSH-remote fetch, XDG_CONFIG_HOME/GH_CONFIG_DIR for
 # where `gh` reads its own stored credentials when no token env var is set.
+#
+# Deliberately EXCLUDES GIT_SSH_COMMAND — a Codex review finding on this port's own PR: git
+# documents this variable as the SSH command it runs, and — critically — that command is
+# interpreted BY THE SHELL, making it execution-capable, not merely configuration. Forwarding an
+# attacker-influenced value (a hostile launcher environment set ahead of this process) would let
+# `git fetch` execute arbitrary shell content before review even starts, defeating the whole
+# point of this allowlist being an allowlist rather than a blanket copy. A legitimate custom SSH
+# command (a non-standard key path, say) simply isn't forwarded to this CLI's own git fetch —
+# same trade-off `pantheon.execution`'s TRUSTED_GIT_DIRS already makes elsewhere in this port
+# (a narrower, safer default over convenience for an unusual local setup).
 _CLI_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "HOME",
     "GH_TOKEN",
@@ -142,7 +154,6 @@ _CLI_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "XDG_CONFIG_HOME",
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",
-    "GIT_SSH_COMMAND",
 )
 
 _trusted_executable_cache: dict[str, str] = {}
@@ -165,7 +176,6 @@ def _trusted_executable(name: str) -> str:
         f"'{name}' not found in any trusted directory ({', '.join(_TRUSTED_BIN_DIRS)}) — the "
         "ambient PATH is never consulted for this lookup"
     )
-    raise AssertionError("unreachable — _die always raises")  # pragma: no cover — mypy narrowing
 
 
 def _cli_env() -> dict[str, str]:
@@ -494,7 +504,15 @@ def _run_agent(
         )
 
     try:
-        raw_output = providers.provider_run(provider, model, prompt_file, allowed_tools, timeout)
+        # cwd=ctx.repo_root: a Codex review finding on this port's own PR — cli/review-gate cd's
+        # to $REPO_ROOT once, near the top, and never leaves it, so every provider IT launches
+        # inherits the repo root as its own cwd automatically; this port has no persistent
+        # process-wide cwd to rely on the same way, so it must pass ctx.repo_root through
+        # explicitly instead (pantheon.providers.provider_run's own repo_root= param — also used
+        # for its PATH-filtering, see that module's own docstring).
+        raw_output = providers.provider_run(
+            provider, model, prompt_file, allowed_tools, timeout, repo_root=ctx.repo_root
+        )
     except providers.ProviderError as e:
         _note(f"provider lane '{provider}' failed for {agent} ({e}) — UNVERIFIED")
         return render.AgentRenderData(
@@ -536,12 +554,47 @@ def _validate_agents(agents_list: str) -> list[str]:
     return names
 
 
+def _resolve_timeout() -> float:
+    """Reads and validates the ``REVIEW_GATE_TIMEOUT`` env var (default 600s, matching bash's own
+    ``AGENT_TIMEOUT_SECS="${REVIEW_GATE_TIMEOUT:-600}"``). A Codex review finding on this port's
+    own PR: a bare ``float(os.environ.get(...))`` raises an uncaught ``ValueError`` on a
+    non-numeric value, producing a traceback INSTEAD of any agent result or fail-closed comment —
+    ``main()`` only catches :class:`GateError`, so this failed loud in exactly the wrong way (a
+    crash, not this port's own fail-closed posture). Fails closed via :class:`GateError` instead
+    on anything that isn't a finite, positive number — a misconfigured timeout is a configuration
+    error the operator needs to see and fix, not a value to silently coerce to some guessed
+    default."""
+    raw = os.environ.get("REVIEW_GATE_TIMEOUT", "600")
+    try:
+        value = float(raw)
+    except ValueError:
+        _die(f"invalid REVIEW_GATE_TIMEOUT '{raw}' (must be a positive number of seconds)")
+    if not math.isfinite(value) or value <= 0:
+        _die(f"invalid REVIEW_GATE_TIMEOUT '{raw}' (must be a finite, positive number of seconds)")
+    return value
+
+
 def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
     """The full `gate`/`counsel` run — mirrors `cli/review-gate`'s body top to bottom.
     `forced_agents`, when given (the `counsel` subcommand), is the resolved `--agents` value
     `pantheon counsel` is sugar for: it wins over gate.conf exactly like an explicit `--agents`
     flag would, per docs/PYTHON-PORT.md section 2's "friendlier spelling of an --agents list,
     not a new enforcement mode" contract."""
+    # Tiered execution — an explicit --execution flag is operator-typed, resolved immediately,
+    # fail-fast, before ANYTHING else this function does (a Codex review finding on this port's
+    # own PR: an earlier version validated this AFTER the git/gh presence checks below, so an
+    # invalid --execution on a machine where gh happens to be unavailable reported only "gh not
+    # found" instead of the more relevant "unknown execution tier" — a real, checkable divergence
+    # from this function's own "resolved immediately" claim, even though pantheon.execution
+    # .validate_execution() is a pure function that needs no external binary at all and so has no
+    # reason to wait on anything). When absent, resolution is deferred to after BASE_SHA is known
+    # (see below).
+    execution_tier: str | None = None
+    if args.execution:
+        if not execution.validate_execution(args.execution):
+            _die(f"unknown execution tier '{args.execution}' (must be 'readonly' or 'trusted')")
+        execution_tier = args.execution
+
     _require_bin("git")
     _require_bin("gh")
 
@@ -560,15 +613,6 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
 
     if provider not in providers.KNOWN_PROVIDERS:
         _die(f"unknown provider lane '{provider}' (known: {', '.join(providers.KNOWN_PROVIDERS)})")
-
-    # Tiered execution — an explicit --execution flag is operator-typed, resolved immediately,
-    # fail-fast, before any gh/network call (mirrors cli/review-gate's early handling). When
-    # absent, resolution is deferred to after BASE_SHA is known (see below).
-    execution_tier: str | None = None
-    if args.execution:
-        if not execution.validate_execution(args.execution):
-            _die(f"unknown execution tier '{args.execution}' (must be 'readonly' or 'trusted')")
-        execution_tier = args.execution
 
     pr_number = args.pr
     if not re.fullmatch(r"[0-9]+", pr_number or ""):
@@ -594,12 +638,16 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
     if not isinstance(pr_json, dict):
         _die(f"gh pr view {pr_number} returned unexpected JSON shape — UNVERIFIED, posting nothing")
 
-    pr_title = pr_json.get("title") if isinstance(pr_json.get("title"), str) else ""
-    head_ref = pr_json.get("headRefName") if isinstance(pr_json.get("headRefName"), str) else ""
-    base_ref = pr_json.get("baseRefName") if isinstance(pr_json.get("baseRefName"), str) else ""
+    raw_title = pr_json.get("title")
+    pr_title = raw_title if isinstance(raw_title, str) else ""
+    raw_head_ref = pr_json.get("headRefName")
+    head_ref = raw_head_ref if isinstance(raw_head_ref, str) else ""
+    raw_base_ref = pr_json.get("baseRefName")
+    base_ref = raw_base_ref if isinstance(raw_base_ref, str) else ""
     if not base_ref:
         base_ref = conf.base_branch
-    head_sha = pr_json.get("headRefOid") if isinstance(pr_json.get("headRefOid"), str) else ""
+    raw_head_sha = pr_json.get("headRefOid")
+    head_sha = raw_head_sha if isinstance(raw_head_sha, str) else ""
     is_draft = pr_json.get("isDraft") is True
 
     if not _BRANCH_RE.match(head_ref or ""):
@@ -687,7 +735,7 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
             followup_note=followup_note,
         )
 
-        timeout = float(os.environ.get("REVIEW_GATE_TIMEOUT", "600"))
+        timeout = _resolve_timeout()
 
         agent_data: dict[str, render.AgentRenderData] = {}
         for agent in agents:

@@ -14,30 +14,61 @@ three consume ``allowed_tools`` at all (no readonly-tier tool-scoping mechanism 
 as of v1, same disclosed gap the bash lanes carry).
 
 **PATH resolution and the subprocess environment (hardened — a live self-hosted-gate finding on
-this port's own PR).** An earlier version of this module resolved each provider CLI via
-``shutil.which`` (the ambient PATH, unfiltered) and called ``subprocess.run`` with no explicit
-``env=`` at all — the identical vulnerability class ``pantheon.cli``'s own git/gh calls were
-found to have and fixed (see that module's docstring): a hostile PR checkout that widens PATH to
-include a repository-controlled directory (e.g. a tracked ``bin/`` a maintainer's shell rc or a
+this port's own PR, then extended twice more by a follow-up Codex review wave on the fix
+itself).** An earlier version of this module resolved each provider CLI via ``shutil.which``
+(the ambient PATH, unfiltered) and called ``subprocess.run`` with no explicit ``env=`` at all —
+the identical vulnerability class ``pantheon.cli``'s own git/gh calls were found to have and
+fixed (see that module's docstring): a hostile PR checkout that widens PATH to include a
+repository-controlled directory (e.g. a tracked ``bin/`` a maintainer's shell rc or a
 locally-sourced ``.envrc`` picks up before running the gate) could get an attacker-planted
 ``claude``/``codex``/``gemini``/``cursor-agent`` executed instead of the real CLI — arguably
 higher-value here than the git/gh vector, since under the ``trusted`` execution tier this is the
-process that goes on to get full Bash. Fixed the same way in spirit, adapted for this module's
-different constraint: unlike ``git``/``gh`` (near-universally installed via a system package
-manager, so a small fixed directory allowlist works), a provider CLI is installed through many
-different mechanisms (npm global, pipx, Homebrew, cargo, a user's own ``$HOME/.local/bin``, ...)
-with no single fixed set of paths to allowlist instead. :func:`_filtered_path` therefore filters
-the AMBIENT PATH structurally — dropping any entry that is relative, or that resolves inside the
-current working directory (the exact checkout-relative vector above) — rather than replacing it
-with a hardcoded directory list; every subprocess call in this module resolves the CLI from that
-filtered PATH and receives an EXPLICITLY CONSTRUCTED environment (:func:`_provider_env`) whose
-own ``PATH`` key is the same filtered value, never an implicit ``os.environ`` inherit. Every
-other ambient key still passes through (a provider CLI genuinely needs its own broad ambient
-auth/config — ``ANTHROPIC_API_KEY``, ``HOME``, a Claude Code OAuth token, locale settings, and
-more than this module could enumerate item-by-item the way ``pantheon.cli``'s git/gh allowlist
-does) — this is a deliberate, narrower fix than ``pantheon.cli``'s (closes the PATH-resolution
-vector specifically, not a full clean-room environment), matching what this module's own
-docstring already discloses about not being ``pantheon.execution``'s threat model.
+process that goes on to get full Bash. Closed in three rounds, each fixing a real gap the
+previous round's fresh evidence exposed:
+
+  1. :func:`_filtered_path` filters the AMBIENT PATH structurally — dropping any entry that is
+     relative, or that resolves inside a TRUSTED ROOT (see below) — rather than replacing it
+     with a hardcoded directory list (unlike ``git``/``gh``, near-universally installed via a
+     system package manager, a provider CLI is installed through many different mechanisms — npm
+     global, pipx, Homebrew, cargo, a user's own ``$HOME/.local/bin`` — with no single fixed set
+     of paths to allowlist instead).
+  2. Round 1 only excluded ``os.getcwd()`` — a Codex finding caught that this misses a
+     repository-controlled PATH entry when the gate is launched from a NESTED directory inside
+     the repo (e.g. ``/repo/src``, with a hostile ``/repo/bin`` on PATH: not beneath
+     ``os.getcwd()``, so round 1's filter let it through). Every entry point into this module now
+     accepts a ``repo_root`` parameter (``pantheon.cli`` passes its own resolved
+     ``git rev-parse --show-toplevel`` result) and :func:`_filtered_path` excludes BOTH the cwd
+     and the repo root, so a repo-controlled PATH entry is caught regardless of which directory
+     inside the repo the gate happened to be launched from.
+  3. :func:`_provider_env` originally began from a full ``dict(os.environ)`` copy (only PATH
+     overridden) — contrary to docs/PYTHON-PORT.md §5's clean-environment requirement, and a
+     Codex finding demonstrated the concrete exploit: an execution-bearing variable an attacker
+     can set ahead of the launcher process (``NODE_OPTIONS=--require=/repo/payload.js``,
+     ``PYTHONPATH``, ``LD_PRELOAD``, ...) would still reach a matching provider CLI even with
+     PATH filtered and ``shell=False``, since PATH-filtering only stops WHICH BINARY runs, not
+     what environment-driven code injection that binary's own runtime then loads. Fixed the same
+     way ``pantheon.cli``'s git/gh calls already are: :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` is
+     an explicit ALLOWLIST (locale/HOME/XDG dirs plus each lane's own documented or
+     conventionally-used auth surface), never a blanket copy — a provider CLI's own runtime still
+     needs SOME broad-ish auth/config surface (unlike git/gh's narrower allowlist), so this list
+     is more generous than ``pantheon.cli``'s, but it is still an explicit, reviewable list, not
+     "everything the launcher process happened to have set."
+
+Every subprocess call in this module resolves the CLI from :func:`_filtered_path` and receives
+the explicitly constructed environment from :func:`_provider_env` — never an implicit
+``os.environ`` inherit, matching what this module's own docstring already discloses about not
+being ``pantheon.execution``'s threat model (that module's fully bare-bones, git/gh-specific
+env is not reused here; this is a deliberately narrower, provider-shaped clean-environment
+construction).
+
+**Process-group timeout termination (a fourth Codex-wave finding).** ``subprocess.run(...,
+timeout=...)`` only terminates the DIRECT child process on a timeout — a provider CLI that itself
+spawns tool subprocesses (exactly what an LLM-driving CLI's own tool-execution loop does) can
+leave those descendants running past the timeout, still able to consume resources or touch the
+checkout. Mirrors ``cli/review-gate``'s own ``run_with_timeout`` fallback (TERM the whole process
+group, wait briefly, KILL if still alive): :func:`_run` starts each provider in its own session
+(``start_new_session=True``, POSIX — creates a new process group too) so :func:`_terminate_group`
+can signal the WHOLE group, not just the one PID ``subprocess.run`` would have reached.
 
 Fixture suites: none today — docs/PYTHON-PORT.md §9 notes this as a pre-existing coverage gap
 (no ``test-providers.sh`` exists for the bash lanes either), not one this port introduces or is
@@ -48,7 +79,9 @@ construction indirectly via ``--dry-run`` (which never calls a provider) and via
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import subprocess
 import sys
 
@@ -109,48 +142,118 @@ def _read_prompt(prompt_file: str) -> str:
         return fh.read()
 
 
-def _filtered_path() -> str:
-    """The ambient ``PATH``, with any entry that is relative, or that resolves inside the
-    current working directory, removed — see this module's own docstring for the vulnerability
-    this closes (a hostile PR checkout widening PATH to include a repository-controlled
-    directory). A relative entry is dropped outright (its meaning depends on the process's own
-    cwd, which is exactly the untrusted-checkout ambiguity this exists to avoid); an absolute
-    entry is dropped only when it resolves (``os.path.realpath``, following symlinks) to the
-    current working directory itself or somewhere underneath it. Every OTHER absolute PATH entry
-    — a system directory, a user's own tool-install directory, anything not inside this
-    checkout — is preserved unchanged, since provider CLIs are installed through too many
-    different mechanisms for a fixed directory allowlist (contrast
-    ``pantheon.cli``'s/``pantheon.execution``'s ``TRUSTED_GIT_DIRS``, appropriate for git/gh
-    specifically) to be practical here."""
-    cwd = os.path.realpath(os.getcwd())
+# Explicit allowlist for _provider_env() — see this module's own docstring, round 3, for why a
+# blanket `dict(os.environ)` copy was wrong (an execution-bearing variable an attacker can set
+# ahead of the launcher process — NODE_OPTIONS, PYTHONPATH, LD_PRELOAD, ... — would still reach a
+# matching provider CLI's own runtime even with PATH filtered and shell=False). More generous
+# than pantheon.cli's own git/gh allowlist, deliberately: a provider CLI's own runtime genuinely
+# needs a broader auth/config/locale surface than git/gh do, and only ``claude`` is
+# integration-tested — codex/gemini/cursor's env-var surfaces are best-effort, same disclosed gap
+# this module's own docstring already carries for their argv construction. Extend this list
+# explicitly when a real, documented need shows up; never fall back to a blanket copy to "just
+# make something work."
+_PROVIDER_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
+    # Process/locale basics every one of these CLIs needs to run and print sane output.
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    # Claude Code CLI — the only integration-tested lane. Auth surface documented in
+    # docs/SETUP.md's "Post-install checklist"/Way C auth table: CLAUDE_CODE_OAUTH_TOKEN or
+    # ANTHROPIC_API_KEY (exactly one). CLAUDE_CONFIG_DIR is the CLI's own conventional config-dir
+    # override. The Bedrock/Vertex vars are disclosed in docs/SETUP.md as "supported by
+    # anthropics/claude-code-action itself... NOT wired through THIS repo's composite action" —
+    # that disclosure is about the Action's `with:` inputs, not this CLI lane; a locally
+    # configured `claude` CLI using them still needs them forwarded to behave the same way it
+    # would run outside this gate.
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_PROFILE",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_PROJECT",
+    "CLOUD_ML_REGION",
+    # codex/gemini/cursor — best-effort lanes, no dedicated auth-surface doc in this repo; these
+    # are each CLI's own conventional API-key env var name.
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "CURSOR_API_KEY",
+)
+
+
+def _filtered_path(repo_root: str | None = None) -> str:
+    """The ambient ``PATH``, with any entry that is relative, or that resolves inside a TRUSTED
+    ROOT, removed — see this module's own docstring for the vulnerability this closes (a hostile
+    PR checkout widening PATH to include a repository-controlled directory) and for why this
+    excludes BOTH the current working directory AND ``repo_root`` (round 2's fix: excluding only
+    ``os.getcwd()`` misses a repo-controlled PATH entry when the gate is launched from a nested
+    directory inside the repo, e.g. ``/repo/src`` with a hostile ``/repo/bin`` on PATH — not
+    beneath ``os.getcwd()``, so it survived round 1's filter). ``repo_root`` is optional (this
+    module's own standalone CLI, or a caller that hasn't resolved a repo root yet, gets cwd-only
+    filtering — still strictly better than no filtering at all). A relative entry is dropped
+    outright (its meaning depends on the process's own cwd, which is exactly the
+    untrusted-checkout ambiguity this exists to avoid); an absolute entry is dropped only when it
+    resolves (``os.path.realpath``, following symlinks) to one of the trusted roots themselves or
+    somewhere underneath one. Every OTHER absolute PATH entry — a system directory, a user's own
+    tool-install directory, anything not inside a trusted root — is preserved unchanged, since
+    provider CLIs are installed through too many different mechanisms for a fixed directory
+    allowlist (contrast ``pantheon.cli``'s/``pantheon.execution``'s ``TRUSTED_GIT_DIRS``,
+    appropriate for git/gh specifically) to be practical here."""
+    roots = [os.path.realpath(os.getcwd())]
+    if repo_root:
+        real_repo_root = os.path.realpath(repo_root)
+        if real_repo_root not in roots:
+            roots.append(real_repo_root)
+
     kept: list[str] = []
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         if not entry or not os.path.isabs(entry):
             continue
         real_entry = os.path.realpath(entry)
-        if real_entry == cwd or real_entry.startswith(cwd + os.sep):
+        if any(real_entry == root or real_entry.startswith(root + os.sep) for root in roots):
             continue
         kept.append(entry)
     return os.pathsep.join(kept)
 
 
-def _provider_env() -> dict[str, str]:
+def _provider_env(repo_root: str | None = None) -> dict[str, str]:
     """Explicitly constructed subprocess environment for every provider-CLI call — never an
-    implicit ``os.environ`` passthrough (docs/PYTHON-PORT.md §5's "constructed clean env, never
-    inherited" rule, applied the way this module's own docstring explains: PATH is the filtered
-    value from :func:`_filtered_path`, closing the checkout-relative-PATH vector; every other
-    ambient key is still copied through, since a provider CLI's own auth/config surface is far
-    broader than this module can enumerate item-by-item)."""
-    env = dict(os.environ)
-    env["PATH"] = _filtered_path()
+    implicit ``os.environ`` passthrough, and never a blanket ``dict(os.environ)`` copy either
+    (docs/PYTHON-PORT.md §5's "constructed clean env, never inherited" rule — see this module's
+    own docstring, round 3, for the concrete exploit a blanket copy left open). ``PATH`` is the
+    filtered value from :func:`_filtered_path` (``repo_root``-aware); every other key is copied
+    one at a time from the explicit :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` allowlist, never in
+    bulk."""
+    env: dict[str, str] = {"PATH": _filtered_path(repo_root)}
+    for key in _PROVIDER_ENV_PASSTHROUGH_KEYS:
+        value = os.environ.get(key)
+        if value is not None:
+            env[key] = value
     return env
 
 
-def _resolve_cli(name: str) -> str | None:
-    """Resolves ``name`` from :func:`_filtered_path` — the checkout-filtered PATH, never the raw
-    ambient one. Returns ``None`` (never raises) when not found, so each lane's own "CLI not
-    found" :class:`ProviderError` message stays specific to that lane."""
-    for entry in _filtered_path().split(os.pathsep):
+def _resolve_cli(name: str, repo_root: str | None = None) -> str | None:
+    """Resolves ``name`` from :func:`_filtered_path` (``repo_root``-aware) — the checkout-filtered
+    PATH, never the raw ambient one. Returns ``None`` (never raises) when not found, so each
+    lane's own "CLI not found" :class:`ProviderError` message stays specific to that lane."""
+    for entry in _filtered_path(repo_root).split(os.pathsep):
         if not entry:
             continue
         candidate = os.path.join(entry, name)
@@ -159,15 +262,47 @@ def _resolve_cli(name: str) -> str | None:
     return None
 
 
+def _terminate_group(proc: subprocess.Popen) -> None:
+    """TERM the whole process GROUP first (graceful), then KILL it after a short grace period if
+    still alive — mirrors ``cli/review-gate``'s own ``run_with_timeout`` fallback (TERM, wait
+    ~5s, KILL) so a provider CLI's own spawned tool subprocesses are cleaned up too, not just the
+    single direct child a bare ``proc.kill()`` would reach. Requires the process to have been
+    started with ``start_new_session=True`` (see :func:`_run`), which makes its PID its own
+    process group leader's PID too. Every signal here is best-effort: a process that already
+    exited between our check and our signal is not an error (mirrors bash's own
+    ``2>/dev/null || true`` posture for the identical race)."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+
+
 def _run(
     argv: list[str],
     *,
     input_text: str | None = None,
     timeout: float | None = None,
+    cwd: str | None = None,
+    repo_root: str | None = None,
 ) -> str:
     """Runs ``argv`` (``argv[0]`` already resolved via :func:`_resolve_cli`, never a bare command
     name left for the child's own shell/exec lookup to re-resolve) with the explicitly
     constructed environment from :func:`_provider_env` — see this module's own docstring for why.
+    ``cwd`` mirrors ``cli/review-gate``'s own posture: that script ``cd``s to ``$REPO_ROOT`` once,
+    near the top, and never leaves it, so every provider it launches inherits the repo root as
+    its own cwd automatically; this port's callers are expected to pass ``ctx.repo_root``
+    explicitly instead (this module has no persistent process-wide cwd of its own to rely on).
+    Started with ``start_new_session=True`` (POSIX) so :func:`_terminate_group` can reach the
+    WHOLE process group on a timeout, not just this one PID (see this module's own docstring).
     Merges stdout+stderr into one text stream — mirrors bash's own
     ``raw_output="$(run_with_timeout ... provider_run "$MODEL" "$prompt_file" 2>&1)"`` capture in
     ``cli/review-gate``'s ``run_agent()``. Raises :class:`ProviderError` on a nonzero exit, a
@@ -176,35 +311,43 @@ def _run(
     ``subprocess.CalledProcessError``/``OSError`` escape to a caller that only knows this module's
     own exception type."""
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             argv,
-            input=input_text,
+            stdin=subprocess.PIPE if input_text is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=timeout,
-            env=_provider_env(),
+            env=_provider_env(repo_root),
+            cwd=cwd,
             shell=False,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as e:
-        output = e.output if isinstance(e.output, str) else (e.output or b"").decode("utf-8", errors="replace")
-        raise ProviderError(f"{argv[0]} timed out after {timeout}s", output=output) from e
     except OSError as e:
         raise ProviderError(f"failed to execute {argv[0]}: {e}") from e
 
-    if result.returncode != 0:
-        raise ProviderError(f"{argv[0]} exited {result.returncode}", output=result.stdout or "")
-    return result.stdout or ""
+    try:
+        stdout, _ = proc.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_group(proc)
+        try:
+            leftover, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            leftover = ""
+        raise ProviderError(f"{argv[0]} timed out after {timeout}s", output=leftover or "") from None
+
+    if proc.returncode != 0:
+        raise ProviderError(f"{argv[0]} exited {proc.returncode}", output=stdout or "")
+    return stdout or ""
 
 
-def _claude(model: str, prompt_file: str, allowed_tools: str, timeout: float | None) -> str:
+def _claude(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
     """Provider lane: Claude Code CLI. Default lane — the only one integration-tested (mirrors
     cli/providers/claude.sh). ``--permission-mode dontAsk`` (not "default"): Claude Code's own
     docs describe ``default`` mode as auto-approving reads only — everything else, including a
     tool call that DOES match ``--allowedTools``, still goes through a permission decision nothing
     can answer non-interactively outside a terminal; ``dontAsk`` is documented as the mode "for
     CI pipelines and scripts", auto-denying anything not pre-approved rather than hanging."""
-    claude_bin = _resolve_cli("claude")
+    claude_bin = _resolve_cli("claude", repo_root)
     if claude_bin is None:
         raise ProviderError("'claude' CLI not found on PATH")
 
@@ -213,13 +356,13 @@ def _claude(model: str, prompt_file: str, allowed_tools: str, timeout: float | N
     argv = [claude_bin, "-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
     if model:
         argv += ["--model", model]
-    return _run(argv, timeout=timeout)
+    return _run(argv, timeout=timeout, cwd=repo_root, repo_root=repo_root)
 
 
-def _codex(model: str, prompt_file: str, allowed_tools: str, timeout: float | None) -> str:
+def _codex(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
     """Provider lane: Codex CLI. Best-effort — mirrors cli/providers/codex.sh's ``codex exec -``
     invocation, prompt piped via stdin."""
-    codex_bin = _resolve_cli("codex")
+    codex_bin = _resolve_cli("codex", repo_root)
     if codex_bin is None:
         raise ProviderError("'codex' CLI not found on PATH")
 
@@ -228,13 +371,13 @@ def _codex(model: str, prompt_file: str, allowed_tools: str, timeout: float | No
     if model:
         argv += ["--model", model]
     argv.append("-")
-    return _run(argv, input_text=prompt, timeout=timeout)
+    return _run(argv, input_text=prompt, timeout=timeout, cwd=repo_root, repo_root=repo_root)
 
 
-def _gemini(model: str, prompt_file: str, allowed_tools: str, timeout: float | None) -> str:
+def _gemini(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
     """Provider lane: Gemini CLI. Best-effort — mirrors cli/providers/gemini.sh's ``gemini -p
     <prompt> [-m <model>]`` invocation."""
-    gemini_bin = _resolve_cli("gemini")
+    gemini_bin = _resolve_cli("gemini", repo_root)
     if gemini_bin is None:
         raise ProviderError("'gemini' CLI not found on PATH")
 
@@ -242,13 +385,13 @@ def _gemini(model: str, prompt_file: str, allowed_tools: str, timeout: float | N
     argv = [gemini_bin, "-p", prompt]
     if model:
         argv += ["-m", model]
-    return _run(argv, timeout=timeout)
+    return _run(argv, timeout=timeout, cwd=repo_root, repo_root=repo_root)
 
 
-def _cursor(model: str, prompt_file: str, allowed_tools: str, timeout: float | None) -> str:
+def _cursor(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
     """Provider lane: Cursor CLI (``cursor-agent``). Best-effort — mirrors
     cli/providers/cursor.sh's ``cursor-agent -p <prompt> [--model <model>]`` invocation."""
-    cursor_bin = _resolve_cli("cursor-agent")
+    cursor_bin = _resolve_cli("cursor-agent", repo_root)
     if cursor_bin is None:
         raise ProviderError("'cursor-agent' CLI not found on PATH")
 
@@ -256,7 +399,7 @@ def _cursor(model: str, prompt_file: str, allowed_tools: str, timeout: float | N
     argv = [cursor_bin, "-p", prompt]
     if model:
         argv += ["--model", model]
-    return _run(argv, timeout=timeout)
+    return _run(argv, timeout=timeout, cwd=repo_root, repo_root=repo_root)
 
 
 _DISPATCH = {"claude": _claude, "codex": _codex, "gemini": _gemini, "cursor": _cursor}
@@ -268,6 +411,7 @@ def provider_run(
     prompt_file: str,
     allowed_tools: str = "",
     timeout: float | None = None,
+    repo_root: str | None = None,
 ) -> str:
     """Dispatches to the named provider lane and returns its raw stdout (merged with stderr, see
     :func:`_run`). ``provider`` must be one of :data:`KNOWN_PROVIDERS` — an unrecognized name is
@@ -276,17 +420,20 @@ def provider_run(
     bash: validated once, fast, before any network call). ``allowed_tools`` is consumed only by
     the ``claude`` lane (readonly-tier tool scoping — see :func:`_claude`); the other three ignore
     it, matching docs/CLI.md's disclosed "no readonly-tier tool restriction at all" gap for those
-    lanes."""
+    lanes. ``repo_root``, when given (``pantheon.cli`` always passes its own resolved repo root),
+    is used BOTH as the launched provider's own ``cwd`` (mirroring ``cli/review-gate``'s own
+    ``cd "$REPO_ROOT"`` posture — see :func:`_run`) and as an additional trusted root excluded
+    from PATH resolution (see :func:`_filtered_path`)."""
     fn = _DISPATCH.get(provider)
     if fn is None:
         raise ProviderError(f"unknown provider lane '{provider}' (known: {', '.join(KNOWN_PROVIDERS)})")
-    return fn(model, prompt_file, allowed_tools, timeout)
+    return fn(model, prompt_file, allowed_tools, timeout, repo_root)
 
 
 # ---------------------------------------------------------------------------------------------
 # CLI — a thin black-box seam for ad hoc/manual verification (this module has no dedicated
 # fixture suite, see this module's own docstring for why):
-#   python -m pantheon.providers run <provider> <model> <prompt-file> [allowed-tools] [timeout]
+#   python -m pantheon.providers run <provider> <model> <prompt-file> [allowed-tools] [timeout] [repo-root]
 # Prints the raw output on success (exit 0); prints the ProviderError message to stderr and
 # exits 1 on failure.
 # ---------------------------------------------------------------------------------------------
@@ -296,7 +443,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) < 4 or argv[0] != "run":
         print(
-            "usage: python -m pantheon.providers run <provider> <model> <prompt-file> [allowed-tools] [timeout]",
+            "usage: python -m pantheon.providers run <provider> <model> <prompt-file> "
+            "[allowed-tools] [timeout] [repo-root]",
             file=sys.stderr,
         )
         return 2
@@ -304,9 +452,10 @@ def main(argv: list[str] | None = None) -> int:
     _, provider, model, prompt_file, *rest = argv
     allowed_tools = rest[0] if len(rest) > 0 else ""
     timeout = float(rest[1]) if len(rest) > 1 else None
+    repo_root = rest[2] if len(rest) > 2 else None
 
     try:
-        output = provider_run(provider, model, prompt_file, allowed_tools, timeout)
+        output = provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root)
     except ProviderError as e:
         print(str(e), file=sys.stderr)
         if e.output:

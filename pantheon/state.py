@@ -208,9 +208,19 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
     # elsewhere (e.g. `pantheon.execution`'s `TRUSTED_GIT_DIRS`). `workdir` is still accepted (API
     # and CLI-shim shape stability — see this module's own `python -m pantheon.state update`
     # entry point) but is no longer where this temp file is actually written.
-    state_dir = os.path.dirname(os.path.abspath(state_file)) or "."
-    fd, tmp_path = tempfile.mkstemp(prefix=".review-gate-state-", suffix=".json.tmp", dir=state_dir)
+    # tempfile.mkstemp() ITSELF (not just the subsequent write/replace) must be inside the guarded
+    # path — a Codex review finding on this port's own PR: an earlier version called mkstemp()
+    # BEFORE the try block, so a write-protected state_dir (the PR comment already posted, but
+    # the target repo's own directory happens not to be writable) raised an uncaught
+    # PermissionError here instead of the documented warning-only state-write failure — main()
+    # only catches GateError, so this escaped as a bare traceback, and a retry could then post a
+    # DUPLICATE comment (the unrecorded SHA makes the next run think nothing was ever reviewed).
+    # tmp_path stays None until mkstemp actually succeeds, so the cleanup branch below can tell
+    # "never created" (nothing to clean up) from "created, then something else failed."
+    tmp_path: str | None = None
     try:
+        state_dir = os.path.dirname(os.path.abspath(state_file)) or "."
+        fd, tmp_path = tempfile.mkstemp(prefix=".review-gate-state-", suffix=".json.tmp", dir=state_dir)
         with os.fdopen(fd, "w") as fh:
             fh.write(jqjson.dumps(state, indent=2))
             fh.write("\n")
@@ -221,8 +231,9 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
             file=sys.stderr,
         )
         # Best-effort cleanup; the warning above already reported the real failure.
-        with contextlib.suppress(OSError):
-            os.remove(tmp_path)
+        if tmp_path is not None:
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
 
 
 # ---------------------------------------------------------------------------------------------
