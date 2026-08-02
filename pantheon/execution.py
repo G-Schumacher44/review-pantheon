@@ -110,7 +110,6 @@ Slice 4.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from typing import Optional, Sequence
@@ -185,10 +184,26 @@ def _forced_env() -> dict[str, str]:
 
 
 def _git_executable() -> str:
-    found = shutil.which("git")
-    if not found:
-        raise WrapperRefused("git executable not found on PATH")
-    return found
+    """Resolves the real `git` binary from ONLY the absolute directories in PATH — never via a
+    bare `shutil.which("git")`, which happily returns a match from a RELATIVE PATH entry (`.`,
+    `""`, `bin`, ...). If the wrapper's cwd is the checked-out PR's own tree (as it is for every
+    persona-facing invocation) and the ambient PATH contains such an entry, a PR could commit its
+    own executable file named `git` and have it silently selected in place of the real binary —
+    the read-only boundary this whole module exists to enforce, bypassed before a single argument
+    is even validated. Codex P1 finding, closed by construction: only PATH entries that are
+    themselves absolute paths are ever searched; a relative or empty entry is skipped outright,
+    never falls back to an implicit "search the cwd" behavior.
+    """
+    path_env = os.environ.get("PATH", "")
+    for entry in path_env.split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        candidate = os.path.join(entry, "git")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    raise WrapperRefused(
+        "git executable not found on PATH (relative and empty PATH entries are never searched)"
+    )
 
 
 def run_git(

@@ -208,7 +208,18 @@ def base_pinned_read(
         target_result = execution.run_git(["show", f"{base_sha}:{prefix}"], cwd=repo_dir)
         if target_result.returncode != 0:
             return BasePinnedReadResult(status=ABSENT, error=f"symlink target unreadable for '{prefix}'")
-        target = target_result.stdout.decode("utf-8", errors="replace").rstrip("\n")
+        # surrogateescape, never "replace": a tracked symlink's target bytes are a real repo-tree
+        # PATH COMPONENT this function goes on to `git ls-tree`/`show` again (via cur/prefix in
+        # the next loop iteration) — losing bytes here (errors="replace" collapses any
+        # non-UTF-8 byte to U+FFFD) can silently resolve to a DIFFERENT, wrong path that happens
+        # to share the replacement character, rather than failing closed on the real one (Codex
+        # P2 finding). surrogateescape preserves every original byte losslessly in the resulting
+        # str (PEP 383) and round-trips byte-for-byte back through subprocess's own argv encoding
+        # (os.fsencode, which also defaults to surrogateescape on POSIX) when this target is
+        # later passed to run_git() as part of a path — no other call site in this module decodes
+        # a value that flows back into a subsequent git argv, so this is the only site that needs
+        # this.
+        target = target_result.stdout.decode("utf-8", errors="surrogateescape").rstrip("\n")
 
         if target.startswith("/"):
             msg = (
