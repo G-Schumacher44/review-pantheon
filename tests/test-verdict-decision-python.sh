@@ -282,6 +282,25 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# pantheon.jqjson.dumps's placeholder-splice pass (the _RawBigNumber overflow-preservation
+# mechanism) must still substitute correctly under ensure_ascii=True -- the exact mode
+# pantheon.verdict.main() uses to stay byte-identical to action/decide_verdict.py's own
+# un-overridden json.dumps default. Pre-fix, ensure_ascii=True ASCII-escaped the placeholder's
+# Private-Use-Area wrapper characters before the substitution pass ran, so the raw placeholder
+# text leaked into verdict_json instead of the numeral it stands in for.
+raw_file="$(mktemp)"
+printf '%s' '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":1e400}' > "$raw_file"
+py_decision="$(cd "$ROOT" && python3 -m pantheon.verdict artemis "$raw_file" 2>/dev/null)"
+rm -f "$raw_file"
+py_summary="$(jq -r '.verdict_json.summary' <<<"$py_decision" 2>/dev/null)"
+if [[ "$py_summary" == "1E+400" ]]; then
+  echo "PASS overflow-number-placeholder-substitutes-correctly-under-ensure-ascii-true (summary='$py_summary')"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL overflow-number-placeholder-substitutes-correctly-under-ensure-ascii-true: got '$py_summary', expected '1E+400'"
+  FAIL=$((FAIL + 1))
+fi
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

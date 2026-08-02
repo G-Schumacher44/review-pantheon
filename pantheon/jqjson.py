@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 __all__ = ["JqParseError", "JqNaN", "loads", "dumps", "jq_text", "subst"]
@@ -135,14 +136,18 @@ class _RawBigNumber(str):
 _OVERFLOW_NUMBER_RE = re.compile(r"^(-?(?:0|[1-9]\d*)(?:\.\d+)?)([eE][+-]?\d+)$")
 
 
-def _canonicalize_overflow_number(text: str) -> str:
-    """jq's own canonical print form for a number whose magnitude overflowed Python's IEEE
-    double during parsing — verified live against real jq for every case this covers: uppercase
-    ``E``, an explicit ``+`` on a positive (or sign-absent) exponent, mantissa digits preserved
-    exactly as given. A plain integer/decimal with no exponent notation at all (no ``e``/``E`` in
-    the source) is returned unchanged — jq preserves those verbatim too, and this function is
-    only ever called on text that already parsed as a syntactically valid JSON number, so the
-    only shape needing normalization is the exponent-notation one."""
+def _canonicalize_number_text(text: str) -> str:
+    """jq's own canonical print form for a number preserved as raw text (whether because its
+    magnitude overflowed a double's representable range, or because a double simply can't
+    represent it exactly — see :func:`_parse_float`) — verified live against real jq for every
+    case this covers: exponent-notation text gets uppercase ``E`` and an explicit ``+`` on a
+    positive (or sign-absent) exponent, mantissa digits preserved exactly as given. A plain
+    integer/decimal with no exponent notation at all (no ``e``/``E`` in the source — e.g.
+    ``1.234567890123456789``, a literal with too many significant digits for a double, but no
+    magnitude problem) is returned UNCHANGED — jq preserves those completely verbatim, no
+    normalization at all — and this function is only ever called on text that already parsed as
+    a syntactically valid JSON number, so the only shape ever needing normalization is the
+    exponent-notation one."""
     m = _OVERFLOW_NUMBER_RE.match(text)
     if not m:
         return text
@@ -166,13 +171,38 @@ def _parse_constant(name: str) -> Any:
 
 
 def _parse_float(text: str) -> Any:
-    """``json.loads``'s ``parse_float`` hook — ordinary in-range numbers behave exactly like the
-    default (``float(text)``); a magnitude that overflows a double's representable range (e.g.
-    ``1e400``) is preserved as a :class:`_RawBigNumber` instead of silently becoming
-    ``float('inf')`` (see that class's docstring)."""
+    """``json.loads``'s ``parse_float`` hook. jq's own number handling is arbitrary-precision
+    decimal (its ``decNumber``-based number type), not IEEE double — verified live against real
+    jq: a magnitude that overflows a double's representable range (``1e400`` -> Python's bare
+    ``float()`` silently gives ``+inf``) prints back as the still-finite, exact ``1E+400``; a
+    magnitude too SMALL to represent (``1e-400`` -> Python's bare ``float()`` silently
+    UNDERFLOWS to ``0.0``) prints back as the still-nonzero, exact ``1E-400``; and a literal with
+    more significant digits than a double can hold exactly (``1.234567890123456789``, 19
+    significant digits — a double has roughly 17) prints back completely unchanged, digit for
+    digit, where Python's own float round-trip would silently round it to
+    ``1.2345678901234567``. All three are the same underlying phenomenon — jq never lost fidelity
+    converting the literal to a fixed-precision binary float in the first place, because it never
+    converts at all — so all three get the identical fix: preserve the exact source text as a
+    :class:`_RawBigNumber` instead of the lossy ``float()`` value, whenever ``float()``'s own
+    value does NOT exactly reproduce the literal's true decimal value.
+
+    "Does not exactly reproduce" is checked via exact decimal arithmetic (the stdlib ``decimal``
+    module, which — unlike ``float`` — represents any finite decimal literal exactly): parse
+    ``text`` as a :class:`decimal.Decimal` (exact), parse ``repr(float(text))`` as a
+    :class:`decimal.Decimal` too (the exact decimal value of whatever double ``float(text)``
+    landed on, via Python's own shortest-round-trip ``repr()``), and preserve the raw text
+    whenever those two decimals differ. An ordinary, exactly-representable-enough literal (e.g.
+    ``0.1`` — not exactly representable in binary either, but round-trips through
+    ``float()``/``repr()`` back to the identical text "0.1", matching jq's own "0.1" output) is
+    completely unaffected: this only ever fires for the genuinely lossy cases above."""
     value = float(text)
     if value in (float("inf"), float("-inf")):
-        return _RawBigNumber(_canonicalize_overflow_number(text))
+        return _RawBigNumber(_canonicalize_number_text(text))
+    try:
+        if Decimal(text) != Decimal(repr(value)):
+            return _RawBigNumber(_canonicalize_number_text(text))
+    except InvalidOperation:  # pragma: no cover — text already matched JSON's number grammar
+        pass
     return value
 
 
@@ -319,10 +349,26 @@ def dumps(obj: Any, *, indent: int | None = None, ensure_ascii: bool = False) ->
     Shape parameters are deliberately limited to ``indent``/``ensure_ascii`` — the two knobs this
     port's actual call sites need (``pantheon.render``'s 2-space/raw-UTF-8 pretty machine tail,
     ``pantheon.verdict``'s compact single-line CLI decision output), not the full
-    ``json.dumps`` kwarg surface."""
+    ``json.dumps`` kwarg surface.
+
+    The placeholder-splice pass (see :func:`_prepare_for_dump`) searches for each token's OWN
+    properly-escaped quoted form — computed via a nested ``json.dumps(token, ensure_ascii=
+    ensure_ascii)`` call, not a hardcoded raw-quote pattern — because the two ``ensure_ascii``
+    modes escape the token's Private-Use-Area wrapper characters differently: under
+    ``ensure_ascii=False`` (``pantheon.render``'s default) they pass through raw; under
+    ``ensure_ascii=True`` (``pantheon.verdict``'s ``main()``, to stay byte-identical to
+    ``action/decide_verdict.py``'s own un-overridden ``json.dumps`` default) the SAME encoder
+    call that serializes the rest of the document ALSO backslash-escapes the placeholder's own
+    wrapper characters — a hardcoded raw-quote search pattern would then never match, leaking
+    the placeholder text itself into the output instead of the raw numeral it stands in for.
+    (Caught live — the repo's own self-hosted gate on this PR flagged this exact gap in
+    ``pantheon.verdict.main()``'s ``ensure_ascii=True`` path, immediately after this function's
+    ``ensure_ascii=False`` path — the only one exercised by ``pantheon.render``'s own tests up to
+    that point — was already verified working.)"""
     raw_registry: dict = {}
     prepared = _prepare_for_dump(obj, raw_registry)
     text = json.dumps(prepared, indent=indent, ensure_ascii=ensure_ascii, allow_nan=False)
     for token, raw in raw_registry.items():
-        text = text.replace(f'"{token}"', raw)
+        quoted_token = json.dumps(token, ensure_ascii=ensure_ascii)
+        text = text.replace(quoted_token, raw)
     return text

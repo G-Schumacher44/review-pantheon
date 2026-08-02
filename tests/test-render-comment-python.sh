@@ -427,6 +427,17 @@ ARTEMIS_FINDINGS='{"summary":"\n","findings":[]}'
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
 assert_byte_identical "trailing-newline-only-summary-falls-through-to-top"
 
+# Divergence 7 (pantheon.jqjson's parse-side boundary, _parse_float): jq's number handling is
+# arbitrary-precision decimal, not IEEE double -- a literal that UNDERFLOWS a double to 0.0
+# (1e-400) or simply has more significant digits than a double can hold exactly
+# (1.234567890123456789, verbatim in an unvalidated extra field) must both preserve their exact
+# source text in the machine tail, not silently round through a lossy float() conversion.
+reset_agent_env
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP=x
+ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"note","file":"a","line":1,"issue":"x","scenario":"y"}],"summary":"s","extra1":1e-400,"extra2":1.234567890123456789}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+assert_byte_identical "underflow-and-precision-loss-preserved-exactly-in-machine-tail"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
