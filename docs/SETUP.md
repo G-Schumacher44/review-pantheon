@@ -164,7 +164,10 @@ to `.github/workflows/review-gate.yml` in your repo and wire one secret — that
 whole install. `action.yml` at this repo's root is a composite GitHub Action; the `uses:
 G-Schumacher44/review-pantheon@v1` reference reads personas and the `pantheon` package's
 verdict-decision module (`pantheon.verdict`, port slice 5) from its own checkout, so nothing
-lands in your repo at all. See `DESIGN.md`'s ["Published
+lands in your repo at all. **The `@v1` tag lands with this repo's first release (see
+[RELEASING.md](../RELEASING.md)) — until then it 404s on a brand-new checkout; pin a commit SHA
+or a local checkout instead**, same caveat as `examples/review-gate.yml`'s own header comment.
+See `DESIGN.md`'s ["Published
 action"](../DESIGN.md#published-action) section for what's bundled, what's overridable
 (`personas_path`, `agents`, `rules_file`, `spec_file`, `model`, `execution`), and the sequential-vs-matrix
 tradeoff this surface makes.

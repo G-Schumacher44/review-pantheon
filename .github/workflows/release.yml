@@ -149,7 +149,7 @@ jobs:
           pip install --quiet pyyaml
           python3 -c "
           import yaml
-          for f in ('action/review.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
+          for f in ('action.yml', 'action/review.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
               with open(f) as fh:
                   yaml.safe_load(fh)
               print(f + ': OK')

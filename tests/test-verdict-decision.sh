@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # tests/test-verdict-decision.sh — cross-runner fixture test for the verdict decision rule.
 #
-# review-pantheon implements the verdict decision (extract trailing JSON, validate the
-# schema, map verdict->color, enforce the blocker invariant) twice: once in bash+jq
-# (cli/lib/verdict.sh, used by cli/review-gate) and once in Python (action/decide_verdict.py,
-# used by the GitHub Action). DESIGN.md accepts that split — the CLI shouldn't require Python
-# and the Action can't cleanly source bash — on the condition that both stay behaviorally
-# identical. This script is that check: every fixture below runs through BOTH
-# implementations and this script fails if either one disagrees with the expected result, or
-# if the two implementations disagree with each other.
+# review-pantheon's verdict decision (extract trailing JSON, validate the schema, map
+# verdict->color, enforce the blocker invariant) has ONE canonical implementation as of port
+# slice 5: `pantheon/verdict.py` (DESIGN.md's "Two runtimes, one rule"). The bash side
+# (cli/lib/verdict.sh, used by the deprecated cli/review-gate) is still its own hand-written
+# copy for this transition window — `action/decide_verdict.py` is NOT a second implementation
+# anymore, it's a thin, deprecated compat shim that forwards straight into
+# `pantheon.verdict.main()`. This script cross-checks the bash copy against that Python path
+# (still exercised through `action/decide_verdict.py`, the file the Action installs and runs)
+# and fails if either disagrees with the expected result, or the two disagree with each
+# other — the comparison DESIGN.md still requires until cli/lib/verdict.sh itself retires
+# (docs/PYTHON-PORT.md's Slice-5 status section).
 #
 # No test framework — plain bash, so `bash tests/test-verdict-decision.sh` is the whole
 # invocation (also wired into .github/workflows/ci.yml for this repo).

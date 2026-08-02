@@ -302,12 +302,13 @@ PR reference / flags: $ARGUMENTS
 
 Follow the procedure in the installed `gate` skill (`.claude/skills/gate/SKILL.md`) — dry-run
 first, reading the combined verdict correctly, follow-up mode, and the findings discipline — to
-run `review-gate` against the PR referenced above (ask which PR if none was given). Default to a
-`--dry-run` pass first unless the arguments explicitly request a live run.
+run `pantheon gate` (the current CLI; the deprecated `cli/review-gate`/`review-gate` compat shim
+still works this release, same flags) against the PR referenced above (ask which PR if none was
+given). Default to a `--dry-run` pass first unless the arguments explicitly request a live run.
 
 `/gate` installs the *procedure*, not the CLI itself — `install.sh --claude` never puts
-`review-gate` on `PATH`. Before running it, check `command -v review-gate`; if that fails, see the
-skill's "Locating `review-gate`" note rather than assuming the command doesn't exist.
+`pantheon` on `PATH`. Before running it, check `command -v pantheon`; if that fails, see the
+skill's "Locating `pantheon`" note rather than assuming the command doesn't exist.
 GATE_EOF
 
   install_file "$gate_tmp" "$dest_root/.claude/commands/gate.md"

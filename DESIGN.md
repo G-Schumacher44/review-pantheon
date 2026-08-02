@@ -583,7 +583,13 @@ pantheon/                  the current CLI (docs/PYTHON-PORT.md) — `pantheon g
                            both the CLI and the Action lanes. `pantheon.reviewgate_shim`
                            (`review-gate` console script) is a one-release deprecated compat
                            shim, not a second implementation.
-agents/                    five canonical personas (the single source of truth)
+agents/                    five canonical personas (the single source of truth), plus
+                           __init__.py — a packaging-only marker (no code, no re-exports) so
+                           setuptools ships this directory as `pantheon.agents` in the wheel
+                           (pyproject.toml's package-dir remap); invisible to every consumer
+                           that reads the *.md files directly (bash CLI, install.sh,
+                           bootstrap.sh, action.yml/action/review.yml) — see the file's own
+                           header comment
 skills/                    four canonical Claude Code skills (gate, counsel, spec-driven,
                            design-contract) — the single hand-maintained source, same shape as
                            agents/ under rule 4; install.sh --claude copies them verbatim into

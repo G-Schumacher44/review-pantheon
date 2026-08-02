@@ -154,6 +154,8 @@ run_with_timeout() {
 # ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
+note "DEPRECATED — this is a one-release compat shim; \`pantheon gate\` (docs/CLI.md) is now the CLI. Switch to \`pantheon gate\` now — this script is removed in the next release, per the one-runtime endgame (docs/PYTHON-PORT.md section 3)."
+
 PR_NUMBER=""
 OPT_PROVIDER=""
 OPT_AGENTS=""
