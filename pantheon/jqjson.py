@@ -369,9 +369,12 @@ def _make_unique_token(existing_strings: list) -> str:
     overwhelming-probability one — the candidate is checked against every string already in
     the tree and regenerated on the (already astronomically unlikely) chance of a collision,
     exactly like the finding demanded ("use a collision-proof encoding strategy rather than
-    assuming the placeholder cannot occur"). Still wrapped in Private-Use-Area code points
-    (U+E000) so ``json.dumps(..., ensure_ascii=False)`` never escapes it, keeping the later
-    string-replace pass's search pattern simple."""
+    assuming the placeholder cannot occur"). Plain ASCII (``jqjson-raw-<32 hex chars>``) — no
+    Private-Use-Area wrapping needed once collision-freedom is proven structurally rather than
+    assumed from an unguessable-but-still-collidable token space; :func:`dumps`'s own
+    placeholder-splice pass (below) handles the ``ensure_ascii=True``/``False`` quoting
+    difference by searching for each token's own properly re-encoded quoted form, not by relying
+    on any particular code-point range surviving both modes unescaped."""
     while True:
         candidate = f"jqjson-raw-{secrets.token_hex(16)}"
         if not any(candidate in s for s in existing_strings):
@@ -418,15 +421,13 @@ def dumps(obj: Any, *, indent: int | None = None, ensure_ascii: bool = False) ->
 
     The placeholder-splice pass (see :func:`_prepare_for_dump`) searches for each token's OWN
     properly-escaped quoted form — computed via a nested ``json.dumps(token, ensure_ascii=
-    ensure_ascii)`` call, not a hardcoded raw-quote pattern — because the two ``ensure_ascii``
-    modes escape the token's Private-Use-Area wrapper characters differently: under
-    ``ensure_ascii=False`` (``pantheon.render``'s default) they pass through raw; under
-    ``ensure_ascii=True`` (``pantheon.verdict``'s ``main()``, to stay byte-identical to
-    ``action/decide_verdict.py``'s own un-overridden ``json.dumps`` default) the SAME encoder
-    call that serializes the rest of the document ALSO backslash-escapes the placeholder's own
-    wrapper characters — a hardcoded raw-quote search pattern would then never match, leaking
-    the placeholder text itself into the output instead of the raw numeral it stands in for.
-    (Caught live — the repo's own self-hosted gate on this PR flagged this exact gap in
+    ensure_ascii)`` call, not a hardcoded raw-quote pattern — because ``_make_unique_token``'s
+    plain-ASCII token (``jqjson-raw-<32 hex chars>``) is quoted IDENTICALLY under both
+    ``ensure_ascii`` modes (nothing in it needs Unicode-escaping either way), but this module
+    still routes the search pattern through the real encoder call rather than hardcoding the raw
+    quoted text, so a future change to the token's own character set (should one ever need
+    non-ASCII content) can't silently reopen the class of gap this re-encoding step exists to
+    close. (Caught live — the repo's own self-hosted gate on this PR flagged this exact gap in
     ``pantheon.verdict.main()``'s ``ensure_ascii=True`` path, immediately after this function's
     ``ensure_ascii=False`` path — the only one exercised by ``pantheon.render``'s own tests up to
     that point — was already verified working.)"""
