@@ -218,6 +218,46 @@ def redact_repo_root(text: str, repo_root: str | None) -> str:
     return pattern.sub("<repo>", text)
 
 
+def _redact_repo_root_in_value(value: Any, repo_root: str | None) -> Any:
+    """Recursively applies :func:`redact_repo_root` to every STRING leaf (and every string KEY)
+    inside a parsed JSON value (dict/list, recursively, or a bare scalar) — the DATA-level
+    counterpart to that function's own text-level redaction, and the actual fix for a real
+    ordering bug (adversarial review, round 4, coordinator finding): redacting AFTER a value has
+    already been JSON-serialized (:func:`jqjson.dumps`, which escapes ``"``/``\\``/control
+    characters) can no longer match ``repo_root``'s own literal text the moment ``repo_root``
+    itself contains any JSON-escapable character — a literal ``"`` in a POSIX directory name, or
+    a ``\\`` (a real shape, not just theoretical: Git Bash on Windows checks repos out under
+    paths containing one). Escaping and redaction must never run out of order: redact the raw
+    DATA first, so serialization only ever has to escape the SAFE ``<repo>`` replacement text
+    (which has no special characters to begin with) — never redact text that serialization has
+    already transformed. Every call site in this module that used to redact POST-serialization
+    (:func:`_machine_tail_text`'s ``dumps()`` output; a finding's own ``file``/``issue``/
+    ``scenario``/``severity`` field, each independently stringified via
+    ``jqjson.jq_text``/``jqjson.dumps`` for a non-string value BEFORE reaching
+    :func:`sanitize_inline`'s own redaction) now redacts the value itself at THIS chokepoint
+    instead, immediately after parsing/extraction and before it is ever stringified — see
+    :func:`render_comment`'s and :func:`_machine_tail_text`'s own bodies for the call sites.
+    Dict KEYS are redacted too, not just values: the machine tail dumps whatever keys an agent's
+    JSON actually contains, including ones no display field ever reads by name, so an adversarial
+    or accidental key literally containing the repo root would otherwise reach the machine tail
+    unredacted even though every named value does not. Non-string leaves (numbers, bools, null,
+    jq's NAN/``_RawBigNumber`` sentinels) pass through unchanged — none of them can hold a
+    filesystem path. A no-op (returns ``value`` unchanged, no copy made) when ``repo_root`` is
+    falsy, matching :func:`redact_repo_root`'s own convention."""
+    if not repo_root:
+        return value
+    if isinstance(value, str):
+        return redact_repo_root(value, repo_root)
+    if isinstance(value, dict):
+        return {
+            (redact_repo_root(k, repo_root) if isinstance(k, str) else k): _redact_repo_root_in_value(v, repo_root)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_repo_root_in_value(v, repo_root) for v in value]
+    return value
+
+
 def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
     """Markdown/HTML-hostile-content-safe + single-line, for ANY model-controlled string this
     renderer interpolates — table cells, prose, AND values placed inside a backtick code span.
@@ -439,7 +479,7 @@ def _or_default(value: Any, default: str) -> Any:
     return value
 
 
-def _machine_tail_text(raw_text: str) -> str:
+def _machine_tail_text(raw_text: str, repo_root: str | None = None) -> str:
     """The machine tail's per-agent code-fence content — mirrors
     ``cli/lib/render_comment.sh``'s ``jq '.' <<<"$findings_json" 2>/dev/null ||
     printf '%s\\n' "$findings_json"`` exactly: pretty-print the PARSED value (2-space indent, raw
@@ -451,11 +491,29 @@ def _machine_tail_text(raw_text: str) -> str:
     ``\\{}`` default-value quirk for a totally unset env var). This is deliberately a DIFFERENT
     rule than the structured render helpers use (``_safe_findings`` et al., which narrow anything
     non-object/non-array to an empty/absent result): the machine tail's whole purpose is showing
-    what's actually there, parseable or not, exactly like bash's own fallback does."""
+    what's actually there, parseable or not, exactly like bash's own fallback does.
+
+    ``repo_root`` redaction happens INSIDE this function, at two different points depending on
+    which branch runs — never applied to this function's own OUTPUT by the caller, which is the
+    ordering bug this signature change fixes (adversarial review, round 4, coordinator finding).
+    The parse-succeeds branch redacts the PARSED VALUE (:func:`_redact_repo_root_in_value`)
+    BEFORE :func:`jqjson.dumps` serializes it — ``dumps`` JSON-escapes ``"``/``\\``/control
+    characters, so redacting its OUTPUT text against ``repo_root``'s own raw, unescaped form
+    silently stops matching (and therefore stops redacting) the instant ``repo_root`` contains
+    any JSON-escapable character itself — a literal ``"`` in a POSIX directory name, or a ``\\``
+    (a real path shape, not just theoretical: Git Bash on Windows checks repos out under paths
+    containing one). Redacting the DATA first means ``dumps`` only ever has to escape the SAFE
+    ``<repo>`` replacement text, which has no special characters to begin with — the two steps
+    can no longer desync regardless of what ``repo_root`` itself contains. The parse-FAILS
+    (raw-text-fallback) branch never goes through ``dumps`` at all, so there is no escaping step
+    for a post-hoc redaction to desync from — :func:`redact_repo_root` runs directly on
+    ``raw_text`` there, which is already the correct order (redact-the-only-representation, since
+    there both times ARE just one)."""
     try:
         parsed = jqjson.loads(raw_text)
     except jqjson.JqParseError:
-        return raw_text
+        return redact_repo_root(raw_text, repo_root)
+    parsed = _redact_repo_root_in_value(parsed, repo_root)
     return jqjson.dumps(parsed, indent=2, ensure_ascii=False)
 
 
@@ -534,6 +592,15 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
     for agent in agents:
         d = data_for(agent)
         findings_obj = d.findings_json if isinstance(d.findings_json, dict) else {}
+        # Redact repo_root on this DATA now, before anything below stringifies any of it —
+        # a finding's file/issue/scenario/severity/summary field can itself be a non-string
+        # JSON value (an adversarial or malformed payload), and jqjson.jq_text/dumps() on a
+        # non-string value JSON-escapes it; redacting AFTER that escaping runs is the same
+        # ordering bug _machine_tail_text's own docstring documents (repo_root containing a
+        # `"`/`\` no longer matches its own already-escaped form). Redacting the whole dict here
+        # — keys too — means every downstream jq_text/dumps/sanitize_inline call in this loop
+        # only ever escapes the safe `<repo>` replacement text, never a raw un-redacted path.
+        findings_obj = _redact_repo_root_in_value(findings_obj, repo_root)
         total_findings += len(_safe_findings(findings_obj))
 
         # Sanitize the raw verdict value FIRST, then wrap it in our own backticks — sanitizing an
@@ -551,6 +618,15 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
     for agent in agents:
         d = data_for(agent)
         findings_obj = d.findings_json if isinstance(d.findings_json, dict) else {}
+        # Redact repo_root on this DATA now, before anything below stringifies any of it —
+        # a finding's file/issue/scenario/severity/summary field can itself be a non-string
+        # JSON value (an adversarial or malformed payload), and jqjson.jq_text/dumps() on a
+        # non-string value JSON-escapes it; redacting AFTER that escaping runs is the same
+        # ordering bug _machine_tail_text's own docstring documents (repo_root containing a
+        # `"`/`\` no longer matches its own already-escaped form). Redacting the whole dict here
+        # — keys too — means every downstream jq_text/dumps/sanitize_inline call in this loop
+        # only ever escapes the safe `<repo>` replacement text, never a raw un-redacted path.
+        findings_obj = _redact_repo_root_in_value(findings_obj, repo_root)
         emoji = emoji_for_color(d.color)
 
         lines.append(f"**{agent}** @ `{short_sha}` — {emoji} {sanitize_inline(d.verdict, repo_root)}")
@@ -611,7 +687,12 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
         # populate it lazily from findings_json — by the time any AgentRenderData instance
         # exists, __post_init__ has always run and this is never actually None.
         assert d.findings_raw is not None
-        lines.append(redact_repo_root(_machine_tail_text(d.findings_raw), repo_root))
+        # repo_root redaction happens INSIDE _machine_tail_text now, not wrapped around its
+        # output here — see that function's own docstring for the ordering-bug fix this is (an
+        # adversarial-review, round-4 finding: redacting AFTER jqjson.dumps() escaped the text
+        # could desync from repo_root's own raw form the moment repo_root contained a JSON-
+        # escapable character).
+        lines.append(_machine_tail_text(d.findings_raw, repo_root))
         lines.append("```")
         lines.append("")
     lines.append("</details>")

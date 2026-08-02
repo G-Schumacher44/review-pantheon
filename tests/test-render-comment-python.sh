@@ -646,6 +646,57 @@ else
 fi
 unset PANTHEON_REPO_ROOT
 
+# --- Sub-case: an ORDERING bug — repo_root containing a JSON-escapable character (adversarial
+# review, round 4, coordinator finding). _machine_tail_text used to JSON-SERIALIZE the parsed
+# findings (jqjson.dumps, which escapes `"`/`\`/control chars) BEFORE redact_repo_root ever ran
+# on the result — so a repo_root containing a literal `"` or `\` no longer matched its OWN
+# already-escaped form in that serialized text, and leaked into the machine tail untouched. A
+# real path shape, not just theoretical: a POSIX directory name can legally contain a `"`, and
+# Git Bash on Windows checks repos out under paths containing a literal `\`. Fixed by redacting
+# the DATA (the parsed value, and separately the whole findings_obj dict used by the human-
+# readable path) BEFORE any jqjson.dumps/jq_text serialization step, everywhere in this module —
+# see pantheon.render._machine_tail_text's and _redact_repo_root_in_value's own docstrings. This
+# fixture's repo_root carries BOTH hazards at once (a `"` AND a `\`), and additionally plants the
+# leak in a JSON field ("machine_tail_only_field") no human-readable display code ever reads by
+# name — the ONLY way it can reach rendered output at all is via the machine tail's full-object
+# dump, isolating exactly the code path this fix touches.
+reset_agent_env
+FIXTURE_HOSTILE_ROOT='/Users/mal"icious\user/dev/review-pantheon'
+HOSTILE_ROOT_FILE="$(mktemp)"
+printf '%s' "$FIXTURE_HOSTILE_ROOT" > "$HOSTILE_ROOT_FILE"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="see summary"
+# Reads the hostile root from a FILE (not a shell-interpolated Python string literal) — the
+# fixture value's own `"`/`\` characters would otherwise be ambiguous to embed directly inside a
+# python3 -c "..." double-quoted argument from bash.
+ARTEMIS_FINDINGS="$(python3 -c "
+import json, sys
+root = open(sys.argv[1], encoding='utf-8').read()
+print(json.dumps({
+    'agent': 'artemis', 'verdict': 'FIX_FIRST', 'has_blocker': False,
+    'findings': [{'severity': 'should_fix', 'file': root + '/src/gate.sh', 'line': 1,
+                  'issue': 'ordering-bug leak: ' + root, 'scenario': 'y'}],
+    'summary': 'ordering-bug leak: ' + root,
+    'machine_tail_only_field': root,
+}))
+" "$HOSTILE_ROOT_FILE")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$FIXTURE_HOSTILE_ROOT"
+out="$(render "$HEAD_SHA" artemis)"
+# The exact JSON-escaped form (`"` -> `\"`, `\` -> `\\`) is what the OLD, pre-fix ordering
+# produced in the machine tail — checked explicitly, not just the raw form, since the raw form
+# alone wouldn't distinguish "redacted correctly" from "coincidentally never appeared escaped".
+ESCAPED_HOSTILE_ROOT="$(python3 -c "
+import json, sys
+root = open(sys.argv[1], encoding='utf-8').read()
+print(json.dumps(root)[1:-1])
+" "$HOSTILE_ROOT_FILE")"
+assert_not_contains "repo-root-redaction-ordering-bug" "human-readable section: the raw hostile repo root does not leak" "$out" "$FIXTURE_HOSTILE_ROOT"
+assert_not_contains "repo-root-redaction-ordering-bug" "machine tail: the raw hostile repo root does not leak" "$out" "$FIXTURE_HOSTILE_ROOT"
+assert_not_contains "repo-root-redaction-ordering-bug" "machine tail: the JSON-ESCAPED form of the hostile repo root does not leak either (the actual ordering bug shape)" "$out" "$ESCAPED_HOSTILE_ROOT"
+assert_contains "repo-root-redaction-ordering-bug" "the redaction placeholder appears in the machine-tail-only field's place" "$out" "\"machine_tail_only_field\": \"<repo>\""
+unset PANTHEON_REPO_ROOT
+rm -f "$HOSTILE_ROOT_FILE"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
