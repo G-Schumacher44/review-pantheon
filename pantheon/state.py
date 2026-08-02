@@ -81,7 +81,7 @@ def bootstrap_state_file(state_file: str) -> None:
     empty state file in the working tree). A no-op if the file already exists, regardless of its
     current content — this never overwrites an existing (possibly non-empty) state file."""
     if not os.path.exists(state_file):
-        with open(state_file, "w") as fh:
+        with open(state_file, "w", encoding="utf-8") as fh:
             fh.write("{}\n")
 
 
@@ -90,10 +90,16 @@ def load_state(state_file: str) -> dict:
     :func:`bootstrap_state_file`) so a caller never has to special-case "file doesn't exist yet".
     A missing-after-bootstrap read, or content that fails to parse via ``pantheon.jqjson``, or
     content that parses to something other than a JSON object, all fail closed to ``{}`` — the
-    same "no prior state" starting point a first-ever run already has, never a crash."""
+    same "no prior state" starting point a first-ever run already has, never a crash. Reads with
+    an explicit ``encoding="utf-8"``/``errors="replace"`` — never the platform/locale default
+    encoding (a Codex review finding on this port's own PR, originally caught on
+    ``pantheon.cli``'s own file writes/reads: under a non-UTF-8 locale, an implicit
+    platform-default decode can raise an uncaught ``UnicodeDecodeError`` that this function's
+    own ``except OSError`` wouldn't catch — ``errors="replace"`` closes that structurally,
+    matching this port's own established pattern for exactly this class of input)."""
     bootstrap_state_file(state_file)
     try:
-        with open(state_file) as fh:
+        with open(state_file, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
     except OSError:
         return {}
@@ -111,10 +117,12 @@ def load_state_or_raise(state_file: str) -> dict:
     remains correct (and is NOT replaced) for a genuinely absent/freshly-bootstrapped file, and
     for any caller (a display path, a diagnostic) that doesn't need to distinguish "no state
     yet" from "state exists but is corrupted"; this function is for the one caller
-    (``pantheon.cli``'s follow-up-mode detection) that does."""
+    (``pantheon.cli``'s follow-up-mode detection) that does. Same explicit
+    ``encoding="utf-8"``/``errors="replace"`` posture as :func:`load_state` — see that
+    function's own docstring for why."""
     bootstrap_state_file(state_file)
     try:
-        with open(state_file) as fh:
+        with open(state_file, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
     except OSError as e:
         raise StateFileMalformed(f"failed to read {state_file}: {e}") from e
@@ -203,7 +211,7 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
 
     bootstrap_state_file(state_file)
     try:
-        with open(state_file) as fh:
+        with open(state_file, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
     except OSError as e:
         print(
@@ -263,7 +271,7 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
     try:
         state_dir = os.path.dirname(os.path.abspath(state_file)) or "."
         fd, tmp_path = tempfile.mkstemp(prefix=".review-gate-state-", suffix=".json.tmp", dir=state_dir)
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(jqjson.dumps(state, indent=2))
             fh.write("\n")
         os.replace(tmp_path, state_file)

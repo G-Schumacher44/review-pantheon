@@ -199,7 +199,34 @@ _CLI_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "XDG_CONFIG_HOME",
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",
+    # Proxy transport vars -- a Codex review finding on this port's own PR: when GitHub is only
+    # reachable through an HTTP(S) proxy, dropping these makes `git fetch`/`gh pr view` fail
+    # before any review can run. Both cases (upper- and lower-case) are forwarded because git and
+    # most HTTP clients (including gh's underlying transport) honor either, inconsistently, and
+    # curl-family tooling conventionally prefers the lowercase form.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
 )
+
+# Forced to `/dev/null` (never merely omitted -- omitting HOME would break `gh`'s own config
+# lookup, which this allowlist deliberately still forwards) in every constructed env this module
+# builds -- a Codex review finding on this port's own PR: forwarding an attacker-influenced HOME
+# (a hostile launcher environment set ahead of this process) lets `git fetch` read that HOME's
+# `~/.gitconfig`, where a `core.sshCommand` entry is interpreted BY THE SHELL -- the exact
+# execution-capable class GIT_SSH_COMMAND's own exclusion above already guards against, reachable
+# through a second door. `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` pinned to `/dev/null` make git
+# read no global or system config at all, closing that door while HOME itself stays forwarded for
+# `gh`'s own credential lookup.
+_CLI_GIT_CONFIG_OVERRIDES: dict[str, str] = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+}
 
 _trusted_executable_cache: dict[str, str] = {}
 
@@ -233,6 +260,7 @@ def _cli_env() -> dict[str, str]:
         value = os.environ.get(key)
         if value is not None:
             env[key] = value
+    env.update(_CLI_GIT_CONFIG_OVERRIDES)
     return env
 
 
@@ -310,7 +338,7 @@ def _load_working_tree_gate_conf(repo_root: str) -> GateConfig:
     path = os.path.join(repo_root, "gate.conf")
     if not os.path.isfile(path):
         return cfg
-    with open(path, errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         parsed = _parse_conf_text(fh.read())
     cfg.provider = parsed.get("provider", cfg.provider)
     cfg.model = parsed.get("model", cfg.model)
@@ -351,7 +379,7 @@ def _strip_frontmatter(path: Path) -> str:
     runs for that line."""
     fence = 0
     out: list[str] = []
-    with open(path, errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for raw_line in fh:
             line = raw_line.rstrip("\n").rstrip("\r")
             if re.fullmatch(r"---[ \t]*", line):
@@ -514,7 +542,7 @@ def _build_prompt(ctx: GateContext, agent: str, workdir: str) -> str:
     lines.append("above, and nothing after it. No prose after the JSON.")
 
     prompt_path = os.path.join(workdir, f"{agent}.prompt.md")
-    with open(prompt_path, "w") as fh:
+    with open(prompt_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     return prompt_path
 
@@ -834,7 +862,7 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
             return 0
 
         comment_file = os.path.join(workdir, "comment.md")
-        with open(comment_file, "w") as fh:
+        with open(comment_file, "w", encoding="utf-8") as fh:
             fh.write(comment)
 
         post_result = _run(["gh", "pr", "comment", pr_number, "--body-file", comment_file])

@@ -163,7 +163,7 @@ def default_allowed_tools() -> str:
 
 
 def _read_prompt(prompt_file: str) -> str:
-    with open(prompt_file) as fh:
+    with open(prompt_file, encoding="utf-8", errors="replace") as fh:
         return fh.read()
 
 
