@@ -42,6 +42,14 @@ provider command it *would* run and the comment it *would* post, to stdout only.
 called, nothing is posted, no PR is ever recorded as reviewed. Run this before every first live
 gate on a PR you haven't seen the shape of yet.
 
+**Caveat: even `--dry-run` can leave a new untracked file.** `review-gate` bootstraps
+`.review-gate-state.json` to `{}` unconditionally on first run, before the dry-run branch is even
+reached — so the very first `--dry-run` against a repo that's never run the gate before leaves a
+fresh, empty state file in the working tree. A Way-A (`install.sh`) install already added it to
+`.gitignore`; running straight from a checkout or a Way-B (`bootstrap.sh`) install did not. If
+you're on one of those paths, check `git status` after a first dry-run and add the entry yourself
+before it gets swept into an unrelated `git add -A`.
+
 ## 2. Live run
 
 Drop `--dry-run`:
