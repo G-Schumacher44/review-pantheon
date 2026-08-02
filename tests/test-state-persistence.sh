@@ -163,7 +163,15 @@ else
     set -euo pipefail
     # shellcheck disable=SC1090
     source "$FUNCS_FILE"
-    # shellcheck disable=SC2329 # called indirectly by the sourced update_review_gate_state()
+    # Called indirectly by the sourced update_review_gate_state() (its own `note "..."` calls,
+    # not visible to shellcheck's static analysis of THIS file since the call site lives inside
+    # $FUNCS_FILE, sourced above) -- newer shellcheck (0.11.x, this repo's dev/local version)
+    # reports this as SC2329 ("never invoked"); CI's older shellcheck (0.9.0, Ubuntu's apt
+    # package) reports the identical false positive as SC2317 ("command appears to be
+    # unreachable") instead -- a real version-drift shape difference in which code the same
+    # underlying "no visible caller" heuristic assigns, not two different findings. Both
+    # disabled here, not silently satisfied by whichever version happens to run locally.
+    # shellcheck disable=SC2329,SC2317
     note() { echo "note: $*" >&2; }
     update_review_gate_state "green" "42" "deadbeefcafe" "$FAILCLOSED_STATE" "$WORKDIR"
   ) >/dev/null 2>&1 || FAILCLOSED_STATUS=$?
