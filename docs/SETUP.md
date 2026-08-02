@@ -1,27 +1,30 @@
 # Setup — install, first run, troubleshooting
 
 This is the CLI-first walkthrough: get `review-gate` installed, run it once against a real PR
-without spending a token, then run it for real. For the zero-footprint, Action-only lane (no
+without spending a token, then run it for real. For the zero-footprint, Action-only surface (no
 CLI, no files in your repo), see
 [Way C](#way-c--published-action-zero-repo-footprint-action-only) below. Binding contract:
-`DESIGN.md`. Doc index: [docs/README.md](README.md).
+`DESIGN.md`. Doc index: [docs/README.md](README.md). Full flag/`gate.conf` reference once
+you're past first run: [CLI.md](CLI.md).
 
 ## Prerequisites
 
 | Tool | Needed for | Notes |
 |---|---|---|
-| `bash` | Everything | 3.2+ (stock macOS) through 5.x (Linux). No bashisms newer than that. **Windows:** the CLI lane needs a POSIX shell — use WSL or Git Bash. The Action lane runs on GitHub's Linux runners and works from any OS with no local shell at all. |
+| `bash` | Everything | 3.2+ (stock macOS) through 5.x (Linux). No bashisms newer than that. **Windows:** the CLI surface needs a POSIX shell — use WSL or Git Bash. The Action surface runs on GitHub's Linux runners and works from any OS with no local shell at all. |
 | `git` | Everything | The CLI locates the target repo via `git rev-parse --show-toplevel` and fetches PR refs directly (`refs/pull/<n>/head`) — no local branch checkout needed. |
 | `jq` | Everything | Verdict extraction and validation (`cli/lib/verdict.sh`) is `jq`-based. |
 | `gh`, authenticated | Everything | `review-gate` shells out to `gh pr view` / `gh pr comment`. Run `gh auth status` first if unsure. |
-| `python3` | Action lane only | `action/decide_verdict.py` is the Action's verdict decider. The CLI lane doesn't need Python at all — its decider is `cli/lib/verdict.sh` (bash + `jq`). |
+| `python3` | Action surface only | `action/decide_verdict.py` is the Action's verdict decider. The CLI surface doesn't need Python at all — its decider is `cli/lib/verdict.sh` (bash + `jq`). |
 | `curl` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Only needed for the no-local-checkout install path — fetches the repo tarball from GitHub's codeload endpoint. Not needed for a local-checkout install, `install.sh`, or normal CLI/Action use. |
 | `tar` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Extracts the tarball `curl` fetches. Same scope as `curl` above — not needed otherwise. |
-| One provider CLI | Actually calling a model | `claude` (Claude Code CLI) is the default lane and the only one integration-tested. `codex`, `gemini`, `cursor-agent` are best-effort — see the README's [Provider lanes](../README.md#provider-lanes) table. `--dry-run` (below) needs none of these installed. |
+| One provider CLI | Actually calling a model | `claude` (Claude Code CLI) is the default lane and the only one integration-tested. `codex`, `gemini`, `cursor-agent` are best-effort — see DESIGN.md's ["Provider lanes"](../DESIGN.md#provider-lanes) section. `--dry-run` (below) needs none of these installed. |
+| Authenticated `claude` CLI | A live (non-`--dry-run`) run on the default provider lane | Check with `claude auth status` before your first live run — an unauthenticated CLI fails the provider call, which surfaces as `UNVERIFIED` per agent (see [Troubleshooting](#troubleshooting) below), not a clear "log in" message. `--dry-run` needs no authentication at all — it never calls a provider. |
 
 ## Three ways to install
 
 <details>
+<a name="way-a--vendored-install-installsh-files-land-in-your-repo"></a>
 <summary><strong>Way A — vendored install (<code>install.sh</code>): files land in your repo</strong></summary>
 
 ```bash
@@ -37,8 +40,19 @@ this over Way C if you want the gate's own files reviewable in your repo's histo
 counsel agents. Idempotent — see `install.sh`'s own header comment and the README's
 [Quick start](../README.md#quick-start).
 
-You still run the CLI lane (`cli/review-gate`) from the review-pantheon checkout itself, not
+You still run the CLI surface (`cli/review-gate`) from the review-pantheon checkout itself, not
 from the target repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
+
+**Post-install checklist:**
+
+1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN`.
+2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
+3. `.github/workflows/review.yml` ships pinned to a real, verified
+   `anthropics/claude-code-action` commit SHA (see that file's header comment for the release
+   and the source it was checked against) — if you re-pin it yourself, confirm the SHA still
+   matches a release you trust before relying on this gate.
+4. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
+5. Only after step 4 passes, consider making the check required.
 
 </details>
 
@@ -79,6 +93,7 @@ parameterized by destination root, not a duplicated code path.
 </details>
 
 <details>
+<a name="way-b--user-level-install-bootstrapsh-zero-repo-footprint"></a>
 <summary><strong>Way B — user-level install (<code>bootstrap.sh</code>): zero repo footprint</strong></summary>
 
 ```bash
@@ -91,8 +106,8 @@ Installs `review-gate`, its provider lanes, and the five personas into a prefix 
 (default `~/.review-pantheon`) — nothing is written into any target repo. Add the printed
 `export PATH=...` line to your shell rc yourself (`bootstrap.sh` won't edit it for you). From
 then on, `review-gate --pr <n>` works from inside any repo with a `gh`-authenticated remote,
-same as running it from an in-repo checkout. This is the CLI lane only — it doesn't install the
-GitHub Action; pair it with Way A or Way C in a given repo if you want both lanes.
+same as running it from an in-repo checkout. This is the CLI surface only — it doesn't install the
+GitHub Action; pair it with Way A or Way C in a given repo if you want both surfaces.
 
 Also works via `curl | bash` once this repo is public on GitHub:
 
@@ -120,6 +135,7 @@ mismatch rather than installing an unverified archive. See RELEASING.md for how 
 </details>
 
 <details open>
+<a name="way-c--published-action-zero-repo-footprint-action-only"></a>
 <summary><strong>Way C — published action: zero repo footprint, Action-only</strong></summary>
 
 Skip `install.sh` and `bootstrap.sh` entirely. Copy [`examples/review-gate.yml`](../examples/review-gate.yml)
@@ -129,7 +145,7 @@ G-Schumacher44/review-pantheon@v1` reference reads personas and the verdict-deci
 from its own checkout, so nothing lands in your repo at all. See `DESIGN.md`'s ["Published
 action"](../DESIGN.md#published-action) section for what's bundled, what's overridable
 (`personas_path`, `agents`, `rules_file`, `spec_file`, `model`, `execution`), and the sequential-vs-matrix
-tradeoff this lane makes.
+tradeoff this surface makes.
 
 `action.yml`'s auth surface is deliberately narrow — exactly two inputs, and it fails loud
 unless exactly one is set:
@@ -148,10 +164,15 @@ a passthrough for the cloud-provider ones. If you need pure cloud-provider auth 
 token at all), use Way A instead: `install.sh` vendors `action/review.yml` into your repo,
 which is then yours to edit — add the cloud-provider inputs to its `with:` block directly.
 
-Same post-install checklist as Way A otherwise: set `REVIEW_GATE_ENABLED=true`, open a test PR
-with a deliberately planted blocker, confirm red before trusting a green result.
+**Post-install checklist:**
 
-Still want the Action lane but prefer the files reviewable in your own repo's history (or don't
+1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY` — wire whichever one
+   into the stub's `with:` block; see the auth-surface table above).
+2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
+3. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
+4. Only after step 3 passes, consider making the check required.
+
+Still want the Action surface but prefer the files reviewable in your own repo's history (or don't
 want to depend on this repo being public)? That's Way A, not Way C — `install.sh` vendors
 `action/review.yml` instead of referencing this repo's `action.yml` directly.
 
@@ -185,10 +206,15 @@ repo.)
 7. Prints the exact comment it *would* post to the PR — headline, verdict table (each row reads
    `DRY_RUN`), and the full-findings block — to stdout, never to GitHub.
 
-Zero tokens spent (no provider is invoked), zero risk (nothing is posted, no state file is
-written — `.review-gate-state.json` is only updated after a successful `gh pr comment` **and**
-only when the overall result is green or yellow; an unverified or red result leaves it untouched
-so the next run retries the full PR instead of quietly treating a failed run as reviewed).
+Zero tokens spent (no provider is invoked), zero risk to the PR (nothing is posted, no PR is ever
+recorded as reviewed — `.review-gate-state.json`'s `reviewed_sha` entry is only written after a
+successful `gh pr comment` **and** only when the overall result is green or yellow; an unverified
+or red result leaves it untouched, so the next run retries from the last SUCCESSFULLY reviewed SHA
+— the full PR only if there was never one — instead of quietly treating a failed run as reviewed).
+One caveat: `review-gate` bootstraps `.review-gate-state.json` to `{}` on first run if the file
+doesn't exist yet, unconditionally, before the `--dry-run` check — so a dry run against a repo
+that's never run `review-gate` before does leave a fresh, empty state file in the working tree.
+Full detail: [CLI.md](CLI.md#the-state--follow-up-model).
 
 ## First live run
 
@@ -275,6 +301,18 @@ Note what does **not** cause UNVERIFIED: a verdict/findings mismatch (e.g. `verd
 to a `severity: blocker` finding). That's the blocker invariant instead — it forces the color to
 red, not unverified, because a well-formed object that contradicts itself is a known blocker, a
 stronger signal than "not gated."
+
+</details>
+
+<details>
+<summary>Provider CLI not authenticated — reads as UNVERIFIED, not a login prompt</summary>
+
+An unauthenticated `claude` CLI fails cause 4 above ("provider lane failure") — `claude -p ...`
+exits nonzero instead of printing a verdict, so every agent on that run reads `UNVERIFIED` rather
+than a distinct "please log in" message; `--dry-run` never hits this because it never calls the
+CLI. Run `claude auth status` before your first live run to catch this ahead of time; `claude
+auth login` if it isn't. The same applies per provider CLI on a non-default `--provider` lane
+(`codex`, `gemini`, `cursor-agent`) — check that CLI's own auth command instead.
 
 </details>
 

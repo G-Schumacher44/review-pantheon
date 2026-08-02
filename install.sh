@@ -12,14 +12,14 @@
 #
 # Does NOT install gate.conf — that file only matters to the CLI lane, and copying it into
 # every repo by default meant most installs got a config file they never look at. CLI-lane
-# users copy gate.conf.example themselves (README documents this under CLI usage).
+# users copy gate.conf.example themselves (docs/CLI.md documents this under gate.conf).
 #
 # --claude / --cursor / --codex / --gemini (combinable): install the counsel agents (and, for
 # Claude, all five personas) as in-editor/in-CLI commands so they're usable interactively during
 # planning and design, not just from the CI gate. agents/*.md stays the single canonical source
 # (DESIGN.md rule 4) — every file these flags write is GENERATED from it at install time, never
-# a hand-maintained duplicate. See README's "Provider lanes" section and DESIGN.md's "Generated
-# per-tool projections" subsection for the design.
+# a hand-maintained duplicate. See DESIGN.md's "Provider lanes" and "Generated per-tool
+# projections" sections for the design.
 #
 # --user (combined with one or more of the above): installs the SAME generated projections at
 # USER level ($HOME) instead of into a target repo, so the personas follow you across every
@@ -42,9 +42,9 @@ Usage: install.sh /abs/path/to/target-repo [--claude] [--cursor] [--codex] [--ge
 
   (no flags)   Gate-only install: personas + verdict script + GitHub Action (default, unchanged).
   --claude     Also install personas as Claude Code subagents + a /counsel command.
-  --cursor     Also generate Cursor subagents, .cursor/agents/*.md (best-effort — see README).
-  --codex      Also generate Codex Skills, .agents/skills/*/SKILL.md (best-effort — see README).
-  --gemini     Also generate Gemini CLI commands, .gemini/commands/*.toml (best-effort — see README).
+  --cursor     Also generate Cursor subagents, .cursor/agents/*.md (best-effort — see DESIGN.md).
+  --codex      Also generate Codex Skills, .agents/skills/*/SKILL.md (best-effort — see DESIGN.md).
+  --gemini     Also generate Gemini CLI commands, .gemini/commands/*.toml (best-effort — see DESIGN.md).
   --user       Install the per-tool agent projections at USER level ($HOME) instead of into a
                target repo — no target-repo argument, requires at least one of the flags above,
                and does NOT install the gate files (those are repo concepts).
@@ -457,8 +457,8 @@ Post-install checklist:
      trust a green result on a real PR.
   6. Only after step 5 passes, consider adding this workflow as a required status check.
   7. Using the CLI lane too? Copy gate.conf.example to gate.conf at your repo root and edit
-     it — it isn't installed automatically (see README's CLI usage section).
+     it — it isn't installed automatically (see docs/CLI.md's gate.conf section).
 
 Prefer zero repo footprint? Skip install.sh's gate files entirely and use the published
-action instead — see examples/review-gate.yml and README's "Option A — published action."
+action instead — see examples/review-gate.yml and docs/SETUP.md's "Way C — published action."
 EOF
