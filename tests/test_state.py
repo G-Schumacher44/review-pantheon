@@ -269,3 +269,164 @@ def test_update_state_warns_and_returns_on_a_dangling_symlink_never_raises_never
     assert "failed to create" in captured.err
     assert not target.exists()
     assert os.path.islink(state_file)
+
+
+# ---------------------------------------------------------------------------------------------
+# CRITICAL-3 fix (adversarial review): a state-write FAILURE for a green/yellow outcome must be
+# signaled to the caller (never just a stderr warning nobody checks) so pantheon.cli's run_gate()
+# can fail the whole run closed — matching real bash's own posture: cli/review-gate calls
+# update_review_gate_state as a bare top-level statement under `set -euo pipefail`, and that
+# function's own `mv "$tmp_state" "$state_file"` line is NOT inside an if-condition, so a failing
+# `mv` (this exact chmod-555 shape) aborts the WHOLE bash script nonzero right there — never a
+# silent "comment posted, exit 0 anyway" the way this function's own PRE-fix behavior was.
+# update_state() itself still never raises (see its own docstring); the fix is its boolean
+# return, which pantheon.cli.run_gate() now checks (see tests/test_cli_helpers.py's structural
+# check on that call site, and tests/test-state-persistence-python.sh's black-box
+# `python -m pantheon.state update` exit-code fixture for the CLI-shim half of the same proof).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_update_state_returns_false_on_an_unwritable_directory_for_a_green_verdict(tmp_path) -> None:
+    unwritable = _unwritable_dir(tmp_path)
+    state_file = unwritable / "state.json"
+
+    # Live pre-fix reproduction: before this fix, update_state() had no return value at all
+    # (implicitly None) — `ok is False` fails against `None`; after the fix, a write attempted
+    # for a green/yellow overall that then fails returns exactly False.
+    ok = state.update_state("green", "42", "deadbeefcafe", str(state_file), str(tmp_path))
+    assert ok is False
+
+
+def test_update_state_returns_false_on_an_unwritable_directory_for_a_yellow_verdict(tmp_path) -> None:
+    unwritable = _unwritable_dir(tmp_path)
+    state_file = unwritable / "state.json"
+    assert state.update_state("yellow", "42", "deadbeefcafe", str(state_file), str(tmp_path)) is False
+
+
+def test_update_state_returns_true_on_a_successful_write(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{}")
+    ok = state.update_state("green", "42", "deadbeefcafe", str(state_file), str(tmp_path))
+    assert ok is True
+    assert state.reviewed_sha_for(state.load_state(str(state_file)), "42") == "deadbeefcafe"
+
+
+def test_update_state_returns_true_when_no_write_is_attempted_for_red_or_unverified(tmp_path) -> None:
+    # A red/unverified overall never attempts a write at all (the existing, unchanged fail-closed
+    # follow-up-mode rule) — that's not a FAILURE this function needs to report, so it still
+    # returns True (nothing this call needed to do went wrong).
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{}")
+    assert state.update_state("red", "42", "deadbeefcafe", str(state_file), str(tmp_path)) is True
+    assert state.update_state("unverified", "42", "deadbeefcafe", str(state_file), str(tmp_path)) is True
+
+
+def test_update_state_cli_shim_exits_nonzero_on_a_failed_write(tmp_path) -> None:
+    # The black-box seam pantheon.cli's own subprocess-free callers don't use, but
+    # tests/test-state-persistence-python.sh's `python -m pantheon.state update` fixture does —
+    # covered here too as the fast, in-process proof of the same exit-code contract.
+    import pantheon.state as state_module
+
+    unwritable = _unwritable_dir(tmp_path)
+    state_file = unwritable / "state.json"
+
+    rc = state_module._update_cli(["green", "42", "deadbeefcafe", str(state_file), str(tmp_path)])
+    assert rc != 0
+
+
+def test_update_state_cli_shim_exits_zero_on_success(tmp_path) -> None:
+    import pantheon.state as state_module
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{}")
+
+    rc = state_module._update_cli(["green", "42", "deadbeefcafe", str(state_file), str(tmp_path)])
+    assert rc == 0
+
+
+# ---------------------------------------------------------------------------------------------
+# Empty-state-file self-heal (a medium finding from the same adversarial review): bash's own
+# `SEEN_SHA="$(jq -r ... "$STATE_FILE")"` on a genuinely EMPTY (or whitespace-only) file exits 0
+# with no output (real jq reads zero JSON documents from empty input — verified live:
+# `printf '' | jq -r '.["42"].reviewed_sha // empty'` exits 0), read as "no prior state," not a
+# parse error — while pantheon.jqjson.loads("") raises JqParseError (Python's json.loads("") is a
+# genuine syntax error), so pre-fix this hard-aborted both the read side
+# (load_state_or_raise -> StateFileMalformed) and, since update_state() never overwrites content
+# it judged malformed, could never self-repair on a later green/yellow run either.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_load_state_or_raise_self_heals_an_empty_file_to_empty_dict(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("")
+    assert state.load_state_or_raise(str(state_file)) == {}
+
+
+def test_load_state_or_raise_self_heals_a_whitespace_only_file_to_empty_dict(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("   \n\n  \t\n")
+    assert state.load_state_or_raise(str(state_file)) == {}
+
+
+def test_load_state_or_raise_still_raises_on_genuinely_malformed_non_empty_content(tmp_path) -> None:
+    # Regression guard: the self-heal above is narrowly scoped to EMPTY content — real jq (and
+    # this function) still hard-fail on genuine syntax errors / non-object content, matching
+    # bash's own set -e abort on those (see test_load_state_or_raise_raises_on_malformed_json /
+    # ..._on_non_object_content above, unchanged).
+    state_file = tmp_path / "state.json"
+    state_file.write_text("not valid json at all { { {")
+    with pytest.raises(state.StateFileMalformed, match="not valid JSON"):
+        state.load_state_or_raise(str(state_file))
+
+
+def test_update_state_self_heals_an_empty_existing_file(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("")
+
+    ok = state.update_state("green", "42", "deadbeefcafe", str(state_file), str(tmp_path))
+
+    assert ok is True
+    assert state.reviewed_sha_for(state.load_state(str(state_file)), "42") == "deadbeefcafe"
+
+
+def test_update_state_self_heals_a_whitespace_only_existing_file(tmp_path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("  \n")
+
+    ok = state.update_state("green", "42", "deadbeefcafe", str(state_file), str(tmp_path))
+
+    assert ok is True
+    assert state.reviewed_sha_for(state.load_state(str(state_file)), "42") == "deadbeefcafe"
+
+
+def test_update_state_still_refuses_genuinely_malformed_non_empty_existing_content(tmp_path, capsys) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("not valid json at all { { {")
+
+    ok = state.update_state("green", "42", "deadbeefcafe", str(state_file), str(tmp_path))
+
+    assert ok is False
+    assert state_file.read_text() == "not valid json at all { { {"
+    assert "not valid JSON" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("real_jq_input", ["", "   \n"])
+def test_empty_state_self_heal_matches_real_jq_live(real_jq_input: str) -> None:
+    # Live cross-check against the actual jq binary, when available — proves the self-heal isn't
+    # just an internal judgment call but genuinely matches real jq's own exit-0/no-output
+    # behavior on the identical input shape bash's own SEEN_SHA read depends on.
+    import shutil
+    import subprocess
+
+    jq_bin = shutil.which("jq")
+    if jq_bin is None:
+        pytest.skip("jq not installed in this environment — cannot cross-check live")
+
+    result = subprocess.run(
+        [jq_bin, "-r", '.["42"].reviewed_sha // empty'],
+        input=real_jq_input,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""

@@ -183,25 +183,48 @@ def test_nonzero_exit_raises_provider_error_with_output(monkeypatch, prompt_file
 
 
 # ---------------------------------------------------------------------------------------------
-# Provider process cwd + repo_root threading (a Codex finding: neither provider_run() nor _run()
-# supplied cwd, so a launched provider inherited whatever directory the gate process happened to
-# be running from instead of the repo root — cli/review-gate's own cd "$REPO_ROOT" posture).
+# Provider process cwd + repo_root/neutral_cwd threading. A Codex finding originally added
+# cwd=repo_root here (neither provider_run() nor _run() supplied any cwd, so a launched provider
+# inherited whatever directory the gate process happened to be running from instead of the repo
+# root — cli/review-gate's own cd "$REPO_ROOT" posture). A CRITICAL fix from a LATER adversarial
+# review reversed that specific choice: cwd=repo_root let a provider's own startup-time
+# config/MCP/hooks auto-discovery reach the PR's own checkout entirely outside --allowedTools's
+# reach (a fake-claude-binary PoC confirmed it would auto-load a PR-committed .mcp.json and fire a
+# PR-committed hook on an ALLOWED Read call) — see this module's own docstring for the full
+# finding. cwd is now neutral_cwd (a scratch directory pantheon.cli creates and owns); repo_root
+# is still threaded through, but only for PATH-filtering (_filtered_path) and readonly-wrapper
+# resolution, never as the launched process's own working directory.
 # ---------------------------------------------------------------------------------------------
 
 
-def test_provider_run_passes_repo_root_as_cwd(monkeypatch, prompt_file) -> None:
+def test_provider_run_uses_neutral_cwd_never_repo_root_as_the_launched_process_cwd(monkeypatch, prompt_file) -> None:
+    # The CRITICAL-1 fix, live-proved: even when repo_root IS given (as pantheon.cli always
+    # gives it, for PATH-filtering/wrapper resolution), the launched process's own cwd must be
+    # neutral_cwd, never repo_root — repo_root must never leak into the Popen cwd kwarg again.
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     captured = _install_fake_popen(monkeypatch)
 
-    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root")
-    assert captured["kwargs"]["cwd"] == "/some/repo/root"
+    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
+    assert captured["kwargs"]["cwd"] == "/some/scratch/dir"
+    assert captured["kwargs"]["cwd"] != "/some/repo/root"
 
 
-def test_provider_run_cwd_is_none_when_repo_root_not_given(monkeypatch, prompt_file) -> None:
+def test_provider_run_cwd_is_none_when_neither_repo_root_nor_neutral_cwd_given(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     captured = _install_fake_popen(monkeypatch)
 
     providers.provider_run("claude", "", prompt_file, "")
+    assert captured["kwargs"]["cwd"] is None
+
+
+def test_provider_run_cwd_is_none_when_only_repo_root_given_no_neutral_cwd(monkeypatch, prompt_file) -> None:
+    # Regression guard for the OLD (pre-CRITICAL-1) behavior: repo_root alone, with no
+    # neutral_cwd, must NOT fall back to using repo_root as cwd — that would silently reopen the
+    # exact vulnerability this fix closes for any caller that forgot to pass neutral_cwd.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root")
     assert captured["kwargs"]["cwd"] is None
 
 

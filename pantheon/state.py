@@ -186,7 +186,30 @@ def load_state_or_raise(state_file: str) -> dict:
     :func:`bootstrap_state_file` itself can't write a fresh ``{}`` into an unwritable directory —
     a Codex review finding on this port's own PR: this is a real "can't verify" outcome, not a
     bug in this function, so it gets the same fail-closed treatment as any other unreadable/
-    malformed state, not a bare traceback."""
+    malformed state, not a bare traceback.
+
+    **An EMPTY (or whitespace-only) existing file self-heals to ``{}`` instead of raising — a
+    medium finding from an adversarial review, matching bash's own behavior exactly: real jq on
+    genuinely empty input reads zero JSON documents and simply produces no output, exit 0 — NOT a
+    parse error — verified live (``printf '' | jq -r '.["42"].reviewed_sha // empty'`` exits 0
+    with no output; a real syntax error like ``printf 'not json' | jq ...`` exits 5). Bash's own
+    ``SEEN_SHA="$(jq -r ... "$STATE_FILE")"`` under ``set -euo pipefail`` therefore does NOT abort
+    on an empty state file (``$(...)`` on a command that exited 0 with empty stdout is just an
+    empty string, no abort) — it reads as "no prior SHA," full review proceeds, and the NEXT
+    green/yellow run's :func:`update_state` write (bash's own ``update_review_gate_state``, which
+    the empty-input write-side check just below :func:`update_state`'s own docstring proves
+    behaves identically) then populates the file normally. Pre-fix, this function routed an empty
+    file through ``jqjson.loads("")`` like any other content, which raises :class:`JqParseError`
+    (Python's ``json.loads("")`` is a genuine syntax error, unlike real jq's empty-input
+    handling) — so an empty ``.review-gate-state.json`` (a plausible real-world shape: a manual
+    ``touch``, an interrupted first write, a disk that truncated a partial write) hard-aborted
+    EVERY invocation forever, since :func:`update_state` correctly refuses to ever overwrite
+    malformed-looking existing content, meaning the file could never self-repair on its own. Only
+    GENUINELY malformed non-empty content (a syntax error, a JSON array instead of an object) is
+    still a real, intentional abort in both runtimes — real jq itself still exits 5 on those (see
+    this function's own live-verification note above); this self-heal is narrowly scoped to the
+    one input shape where jq's CLI-level "zero documents read" semantics and a strict
+    text-parser's "empty string is a syntax error" semantics genuinely diverge."""
     try:
         bootstrap_state_file(state_file)
     except OSError as e:
@@ -196,6 +219,8 @@ def load_state_or_raise(state_file: str) -> dict:
             raw = fh.read()
     except OSError as e:
         raise StateFileMalformed(f"failed to read {state_file}: {e}") from e
+    if raw.strip() == "":
+        return {}
     try:
         parsed = jqjson.loads(raw)
     except jqjson.JqParseError as e:
@@ -233,7 +258,7 @@ def is_ancestor(candidate_sha: str, ref: str, cwd: str | None = None) -> bool:
     return result.returncode == 0
 
 
-def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, workdir: str) -> None:
+def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, workdir: str) -> bool:
     """Mirrors ``cli/review-gate``'s ``update_review_gate_state()`` exactly — including its own
     header comment's rationale, restated here: this write happens ONLY for a green/yellow overall
     outcome. A carried finding (from an external reviewer's finding on a sibling system, treated
@@ -255,21 +280,58 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
     plus only the current PR's entry, permanently destroying every other PR's previously recorded
     ``reviewed_sha``. Mirrors bash's own ``update_review_gate_state()`` exactly instead: its
     write is a single ``jq '...' "$state_file" > "$tmp_state"`` — if `jq`'s own read of
-    ``$state_file`` fails to parse, that command exits nonzero, the ``if`` takes bash's ``else``
-    branch, and NOTHING is written; the original (malformed) file is never touched. This function
-    reads the file directly (not through ``load_state``) and takes the identical "leave it alone,
-    warn loudly" branch on any parse failure or non-object content.
+    ``$state_file`` fails to parse (a GENUINE syntax error — see the empty-file self-heal note
+    below for the one input shape that is NOT a parse failure in either runtime), that command
+    exits nonzero, the ``if`` takes bash's ``else`` branch, and NOTHING is written; the original
+    (malformed) file is never touched. This function reads the file directly (not through
+    ``load_state``) and takes the identical "leave it alone, warn loudly" branch on any genuine
+    parse failure or non-object content.
+
+    **An EMPTY (or whitespace-only) existing file self-heals — mirrors bash exactly, see
+    :func:`load_state_or_raise`'s own docstring for the live jq verification.** Real jq's write
+    query behaves identically on empty input to its read query: ``printf '' | jq --arg pr 42
+    --arg sha abc '.[$pr] = {"reviewed_sha": $sha}'`` exits 0 and produces
+    ``{"42":{"reviewed_sha":"abc"}}`` — jq auto-vivifies from an implicit ``null``/no-document
+    starting point, the SAME "no prior state" default this function's own ``{}`` fallback gives
+    an empty file below. Pre-fix, this function routed an empty existing file through
+    ``jqjson.loads("")`` like any other content (a genuine :class:`~pantheon.jqjson.JqParseError`
+    in Python, unlike real jq's empty-input handling), taking the warn-and-leave-untouched branch
+    forever — since this function never overwrites content it judged malformed, an empty state
+    file could never self-repair, diverging from bash's own graceful recovery on the identical
+    input shape.
+
+    **A write FAILURE for a green/yellow outcome — the write this function DID attempt — is now
+    fail-closed to the CALLER via this function's own boolean return, correcting a docstring claim
+    this function used to make that did not match bash's real behavior.** ``update_state()``
+    itself still never RAISES (its caller, ``pantheon.cli``'s ``run_gate()``, has already posted
+    the PR comment by the time this runs and needs to still complete cleanup regardless) — but a
+    CRITICAL finding from an adversarial review, live-reproduced pre-fix (``chmod 555`` the state
+    directory, a green verdict → this function warned to stderr and returned, and
+    ``run_gate()``'s own exit code was computed purely from ``overall``, landing on 0 — a SILENT
+    fail-open a caller had no way to detect), caught that this function's own docstring claimed
+    parity with bash here that it did NOT actually have: real ``cli/review-gate`` calls
+    ``update_review_gate_state "$OVERALL" ...`` as a bare top-level statement, not inside an
+    ``if``-condition, under the whole script's ``set -euo pipefail`` — and that function's own
+    ``mv "$tmp_state" "$state_file"`` line (unlike the ``jq ... > "$tmp_state"`` redirect that
+    precedes it, which IS an if-condition and so IS errexit-exempt) is a plain body statement: if
+    ``mv`` fails (the exact ``chmod 555`` shape above), ``errexit`` aborts the WHOLE SCRIPT right
+    there, nonzero exit, before the ``case "$OVERALL" in green|yellow) exit 0 ;; ... esac`` block
+    at the bottom is ever reached — bash's real posture is "the comment already posted, but a
+    state-write failure still fails the RUN," not "a loud warning is enough." This function's
+    return value — ``True`` when no write was needed (a red/unverified ``overall``) or the write
+    succeeded, ``False`` when a write was ATTEMPTED (green/yellow) and failed — is exactly the
+    signal ``run_gate()`` now checks to reproduce that same fail-closed outcome (a nonzero exit),
+    without this function itself needing to raise from deep inside a write path whose own caller
+    still has other cleanup to finish either way.
 
     Writes via a temp file created in ``state_file``'s OWN directory (never ``workdir`` — see
     this function's own body for why) + ``os.replace`` (atomic on POSIX, same write-then-move
     discipline as bash's own ``jq ... > "$tmp_state" && mv "$tmp_state" "$state_file"``, and
     always same-filesystem by construction, so it never needs `mv`'s own cross-device fallback)
     — never a direct in-place write that could leave a torn/partial file behind on a mid-write
-    failure. A
-    write failure (permissions, disk full, malformed existing content, ...) is reported to stderr
-    but never raised — mirrors bash's own posture: the comment has already posted by the time
-    this runs, so a state-write failure is a loud warning, not a reason to report the whole gate
-    run as failed."""
+    failure. A write failure (permissions, disk full, malformed existing content, ...) is always
+    reported to stderr too — the boolean return doesn't replace that, it lets a caller ALSO act on
+    it (see this docstring's own fail-closed-return paragraph above)."""
     if overall not in ("green", "yellow"):
         print(
             f"pantheon: overall verdict is {overall} — leaving {state_file} untouched so the "
@@ -277,7 +339,7 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
             "this head reviewed)",
             file=sys.stderr,
         )
-        return
+        return True
 
     try:
         bootstrap_state_file(state_file)
@@ -286,7 +348,7 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
             f"pantheon: warning: comment posted but failed to create {state_file} for update: {e}",
             file=sys.stderr,
         )
-        return
+        return False
     try:
         with open(state_file, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
@@ -295,27 +357,32 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
             f"pantheon: warning: comment posted but failed to read {state_file} for update: {e}",
             file=sys.stderr,
         )
-        return
+        return False
 
-    try:
-        state = jqjson.loads(raw)
-    except jqjson.JqParseError as e:
-        print(
-            f"pantheon: warning: comment posted but failed to update {state_file} — its existing "
-            f"content is not valid JSON ({e}); leaving it untouched rather than overwriting it "
-            "with a fresh, empty state",
-            file=sys.stderr,
-        )
-        return
+    if raw.strip() == "":
+        # Self-heal, matching bash's own write-side behavior on empty input — see this
+        # function's own docstring for the live jq verification.
+        state: dict = {}
+    else:
+        try:
+            state = jqjson.loads(raw)
+        except jqjson.JqParseError as e:
+            print(
+                f"pantheon: warning: comment posted but failed to update {state_file} — its "
+                f"existing content is not valid JSON ({e}); leaving it untouched rather than "
+                "overwriting it with a fresh, empty state",
+                file=sys.stderr,
+            )
+            return False
 
-    if not isinstance(state, dict):
-        print(
-            f"pantheon: warning: comment posted but failed to update {state_file} — its existing "
-            "content is not a JSON object; leaving it untouched rather than overwriting it with a "
-            "fresh, empty state",
-            file=sys.stderr,
-        )
-        return
+        if not isinstance(state, dict):
+            print(
+                f"pantheon: warning: comment posted but failed to update {state_file} — its "
+                "existing content is not a JSON object; leaving it untouched rather than "
+                "overwriting it with a fresh, empty state",
+                file=sys.stderr,
+            )
+            return False
 
     state[str(pr_number)] = {"reviewed_sha": head_sha}
 
@@ -361,6 +428,9 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
         if tmp_path is not None:
             with contextlib.suppress(OSError):
                 os.remove(tmp_path)
+        return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------------------------
@@ -379,8 +449,15 @@ def _update_cli(argv: list[str]) -> int:
         )
         return 2
     overall, pr_number, head_sha, state_file, workdir = argv
-    update_state(overall, pr_number, head_sha, state_file, workdir)
-    return 0
+    # CRITICAL fix (adversarial review): this exit code used to be unconditionally 0, regardless
+    # of whether update_state() actually succeeded — a black-box caller of this CLI shim (the
+    # same shape tests/test-state-persistence-python.sh drives) had no way to observe a failed
+    # write at all. Propagating update_state()'s own return here is what makes
+    # `python -m pantheon.state update` fail closed (nonzero) exactly when bash's real
+    # `update_review_gate_state` invocation would abort under `set -e` — see update_state()'s own
+    # docstring for the full rationale.
+    ok = update_state(overall, pr_number, head_sha, state_file, workdir)
+    return 0 if ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:

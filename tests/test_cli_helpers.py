@@ -18,7 +18,9 @@ from pathlib import Path
 
 import pantheon.cli as cli_module
 from pantheon.cli import (
+    BasePinnedGateConfig,
     GateConfig,
+    _load_base_pinned_gate_conf,
     _load_working_tree_gate_conf,
     _parse_conf_text,
     _strip_frontmatter,
@@ -71,46 +73,151 @@ def test_load_working_tree_gate_conf_defaults_when_absent(tmp_path) -> None:
 
 
 def test_load_working_tree_gate_conf_reads_present_keys(tmp_path) -> None:
-    (tmp_path / "gate.conf").write_text(
-        "provider=codex\nmodel=o3\nbase_branch=trunk\nrules_file=RULES.md\n"
-        "spec_file=SPEC.md\nagents=artemis apollo diogenes\n"
-    )
+    # CRITICAL fix (adversarial review): only model=/base_branch= are working-tree-sourced now —
+    # provider=/rules_file=/spec_file=/agents= moved to _load_base_pinned_gate_conf (see the
+    # dedicated section below), the same class-fix execution= already had.
+    (tmp_path / "gate.conf").write_text("model=o3\nbase_branch=trunk\n")
     cfg = _load_working_tree_gate_conf(str(tmp_path))
-    assert cfg.provider == "codex"
     assert cfg.model == "o3"
     assert cfg.base_branch == "trunk"
+
+
+def test_load_working_tree_gate_conf_partial_overrides_leave_the_rest_default(tmp_path) -> None:
+    (tmp_path / "gate.conf").write_text("model=o3\n")
+    cfg = _load_working_tree_gate_conf(str(tmp_path))
+    assert cfg.model == "o3"
+    assert cfg.base_branch == GateConfig().base_branch
+
+
+def test_load_working_tree_gate_conf_does_not_read_execution_key(tmp_path) -> None:
+    # execution= is deliberately NOT read from the working tree by this helper — it's
+    # base-pinned instead, via _load_base_pinned_gate_conf(). GateConfig has no `execution`
+    # field at all, so there's nothing for a working-tree gate.conf's execution= line to
+    # populate here even if present.
+    (tmp_path / "gate.conf").write_text("execution=trusted\nmodel=o3\n")
+    cfg = _load_working_tree_gate_conf(str(tmp_path))
+    assert not hasattr(cfg, "execution")
+    assert cfg.model == "o3"
+
+
+def test_load_working_tree_gate_conf_no_longer_carries_provider_rules_file_spec_file_agents() -> None:
+    # CRITICAL fix (adversarial review), the class-fix regression guard: GateConfig must not
+    # regrow the four keys that moved to base-pinned resolution — a caller reading
+    # cfg.provider/.rules_file/.spec_file/.agents off THIS dataclass again would silently be back
+    # on working-tree-sourced (PR-controlled) values for all four.
+    cfg = GateConfig()
+    for removed_field in ("provider", "rules_file", "spec_file", "agents"):
+        assert not hasattr(cfg, removed_field), (
+            f"GateConfig regrew a '{removed_field}' field — this key must resolve through "
+            "_load_base_pinned_gate_conf() only, never the working tree (see that function's own "
+            "docstring for the class this closes)"
+        )
+
+
+# ---------------------------------------------------------------------------------------------
+# _load_base_pinned_gate_conf() — CRITICAL fix (adversarial review): provider=/rules_file=/
+# spec_file=/agents= now resolve from the PR's BASE commit ONLY, the same mechanism execution=
+# already used — never the working tree, closing the class docs/CLI.md's own issue #13 disclosed
+# for provider= specifically and generalizing it to the other three keys. Mirrors
+# tests/test-execution-tier.sh's Part G fixtures for execution= (real git fixture repos, no
+# gh/network needed — this function's own git dependency is a local `git show`, not a PR fetch).
+# ---------------------------------------------------------------------------------------------
+
+
+def _git_fixture_repo(tmp_path, name: str, gate_conf_text: str | None) -> tuple[str, str]:
+    """Creates a real git repo at tmp_path/name with an OPTIONAL gate.conf committed at its
+    initial (base) commit, returns (repo_root, base_sha)."""
+    import subprocess as sp
+
+    repo = tmp_path / name
+    repo.mkdir()
+    if gate_conf_text is not None:
+        (repo / "gate.conf").write_text(gate_conf_text)
+    (repo / "README.md").write_text("fixture\n")
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    sp.run(["git", "add", "-A"], cwd=repo, check=True)
+    sp.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+    base_sha = sp.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    return str(repo), base_sha
+
+
+def test_load_base_pinned_gate_conf_defaults_when_gate_conf_absent_at_base(tmp_path) -> None:
+    repo_root, base_sha = _git_fixture_repo(tmp_path, "repo1", gate_conf_text=None)
+    cfg = _load_base_pinned_gate_conf(repo_root, base_sha)
+    assert cfg == BasePinnedGateConfig()
+
+
+def test_load_base_pinned_gate_conf_reads_present_keys_at_base(tmp_path) -> None:
+    repo_root, base_sha = _git_fixture_repo(
+        tmp_path,
+        "repo2",
+        "execution=trusted\nprovider=codex\nrules_file=RULES.md\nspec_file=SPEC.md\nagents=artemis apollo diogenes\n",
+    )
+    cfg = _load_base_pinned_gate_conf(repo_root, base_sha)
+    assert cfg.execution == "trusted"
+    assert cfg.provider == "codex"
     assert cfg.rules_file == "RULES.md"
     assert cfg.spec_file == "SPEC.md"
     assert cfg.agents == "artemis apollo diogenes"
 
 
-def test_load_working_tree_gate_conf_partial_overrides_leave_the_rest_default(tmp_path) -> None:
-    (tmp_path / "gate.conf").write_text("provider=gemini\n")
-    cfg = _load_working_tree_gate_conf(str(tmp_path))
-    assert cfg.provider == "gemini"
-    assert cfg.model == GateConfig().model
-    assert cfg.base_branch == GateConfig().base_branch
-    assert cfg.rules_file == GateConfig().rules_file
-    assert cfg.spec_file == GateConfig().spec_file
-    assert cfg.agents == GateConfig().agents
+def test_load_base_pinned_gate_conf_ignores_a_fork_prs_own_head_edits(tmp_path) -> None:
+    # The exact scenario execution='s own base-pinning already closed, now proven for the other
+    # four keys: a maintainer who runs `gh pr checkout <n>` before invoking this CLI would have
+    # the PR's own HEAD content checked out — a hostile PR's own gate.conf edit on its head must
+    # never leak through; only the BASE commit's content is ever trusted.
+    import subprocess as sp
 
+    repo_root, base_sha = _git_fixture_repo(
+        tmp_path, "repo3", "provider=claude\nrules_file=REVIEW_RULES.md\nagents=artemis apollo\n"
+    )
+    # Simulate the fork PR's own head editing gate.conf after base_sha was recorded.
+    (Path(repo_root) / "gate.conf").write_text(
+        "provider=attacker-planted-lane\nrules_file=nonexistent-so-rules-get-skipped.md\nagents=socrates\n"
+    )
+    sp.run(["git", "commit", "-q", "-am", "fork PR edits gate.conf"], cwd=repo_root, check=True)
 
-def test_load_working_tree_gate_conf_does_not_read_execution_key(tmp_path) -> None:
-    # execution= is deliberately NOT read from the working tree by this helper — it's
-    # base-pinned instead, via _resolve_execution_from_base(). GateConfig has no `execution`
-    # field at all, so there's nothing for a working-tree gate.conf's execution= line to
-    # populate here even if present.
-    (tmp_path / "gate.conf").write_text("execution=trusted\nprovider=claude\n")
-    cfg = _load_working_tree_gate_conf(str(tmp_path))
-    assert not hasattr(cfg, "execution")
+    cfg = _load_base_pinned_gate_conf(repo_root, base_sha)
     assert cfg.provider == "claude"
+    assert cfg.rules_file == "REVIEW_RULES.md"
+    assert cfg.agents == "artemis apollo"
+
+
+def test_load_base_pinned_gate_conf_honors_a_legitimately_base_committed_value(tmp_path) -> None:
+    # Base-pinning isn't "always the default" — it's "trust the base commit, not the PR's own
+    # edits." A genuinely committed-at-base non-default value must still be honored.
+    repo_root, base_sha = _git_fixture_repo(tmp_path, "repo4", "provider=gemini\nagents=socrates diogenes plato\n")
+    cfg = _load_base_pinned_gate_conf(repo_root, base_sha)
+    assert cfg.provider == "gemini"
+    assert cfg.agents == "socrates diogenes plato"
+
+
+def test_load_base_pinned_gate_conf_partial_overrides_leave_the_rest_default(tmp_path) -> None:
+    repo_root, base_sha = _git_fixture_repo(tmp_path, "repo5", "provider=cursor\n")
+    cfg = _load_base_pinned_gate_conf(repo_root, base_sha)
+    assert cfg.provider == "cursor"
+    assert cfg.execution == BasePinnedGateConfig().execution
+    assert cfg.rules_file == BasePinnedGateConfig().rules_file
+    assert cfg.spec_file == BasePinnedGateConfig().spec_file
+    assert cfg.agents == BasePinnedGateConfig().agents
+
+
+def test_load_base_pinned_gate_conf_round_trips_non_ascii_bytes(tmp_path) -> None:
+    repo_root, base_sha = _git_fixture_repo(tmp_path, "repo6", "rules_file=règles/日本語.md\n")
+    cfg = _load_base_pinned_gate_conf(repo_root, base_sha)
+    assert cfg.rules_file == "règles/日本語.md"
 
 
 # ---------------------------------------------------------------------------------------------
 # _wrapper_invocation() — the module-shadowing fix, round 3 (mirrors
 # tests/test_providers.py's identical coverage for pantheon.providers' own
 # default_allowed_tools()/_WRAPPER_SCRIPT_NAME — same mechanism, same rationale, both modules
-# fixed together since both compute this string independently).
+# fixed together since both compute this string independently). Now also carries a CRITICAL fix
+# (adversarial review): `--repo-root <repo_root>` baked into the returned string as a fixed
+# literal — see this function's own docstring for why (providers no longer launch with the repo
+# checkout as their own cwd, so the wrapper needs the real repo root told to it explicitly).
 # ---------------------------------------------------------------------------------------------
 
 
@@ -122,8 +229,8 @@ def test_wrapper_invocation_resolves_the_installed_console_script(monkeypatch, t
     fake_script.chmod(0o755)
     monkeypatch.setattr(cli_module.sys, "executable", str(fake_bin_dir / "python3"))
 
-    invocation = _wrapper_invocation()
-    assert invocation == f"{fake_script} wrapper"
+    invocation = _wrapper_invocation("/some/repo/root")
+    assert invocation == f"{fake_script} wrapper --repo-root /some/repo/root"
     assert " -m " not in invocation
     assert " -I " not in invocation
 
@@ -133,8 +240,8 @@ def test_wrapper_invocation_falls_back_loudly_when_console_script_missing(monkey
     empty_bin_dir.mkdir()
     monkeypatch.setattr(cli_module.sys, "executable", str(empty_bin_dir / "python3"))
 
-    invocation = _wrapper_invocation()
-    assert invocation == f"{empty_bin_dir / 'python3'} -m pantheon.execution wrapper"
+    invocation = _wrapper_invocation("/some/repo/root")
+    assert invocation == f"{empty_bin_dir / 'python3'} -m pantheon.execution wrapper --repo-root /some/repo/root"
     captured_stderr = capsys.readouterr().err
     assert cli_module._WRAPPER_SCRIPT_NAME in captured_stderr
     assert "not installed" in captured_stderr
@@ -275,13 +382,16 @@ def test_cli_env_git_config_overrides_close_the_core_sshcommand_injection_live(t
 
 def test_load_working_tree_gate_conf_round_trips_non_ascii_bytes_regardless_of_content(tmp_path) -> None:
     # gate.conf itself only has ASCII keys, but this proves the read path is UTF-8-explicit, not
-    # locale-dependent, by writing raw UTF-8 bytes for a value and reading them back correctly.
+    # locale-dependent, by writing raw UTF-8 bytes for a value (base_branch, one of the two keys
+    # still working-tree-sourced post-CRITICAL-fix — see GateConfig's own docstring) and reading
+    # them back correctly. rules_file's own non-ASCII round trip is covered separately, base-pinned,
+    # by test_load_base_pinned_gate_conf_round_trips_non_ascii_bytes above.
     repo_root = tmp_path
-    (repo_root / "gate.conf").write_bytes("rules_file=règles/日本語.md\n".encode())
+    (repo_root / "gate.conf").write_bytes("base_branch=règles/日本語\n".encode())
 
     cfg = _load_working_tree_gate_conf(str(repo_root))
 
-    assert cfg.rules_file == "règles/日本語.md"
+    assert cfg.base_branch == "règles/日本語"
 
 
 def test_strip_frontmatter_reads_non_ascii_persona_content_as_utf8(tmp_path) -> None:
@@ -292,6 +402,34 @@ def test_strip_frontmatter_reads_non_ascii_persona_content_as_utf8(tmp_path) -> 
 
     assert "Персона" in body
     assert "説明" in body
+
+
+# ---------------------------------------------------------------------------------------------
+# CRITICAL fix (adversarial review) — run_gate() must check state.update_state()'s own return
+# value and fail the run closed on a state-write failure, never discard it. Structural regression
+# guard (same "grep the source for the call shape" convention this repo already uses elsewhere,
+# e.g. tests/test-execution-tier.sh's Part C/G regression guards) — the live behavioral proof
+# lives in tests/test_state.py's chmod-555 fixtures on update_state()/its CLI shim directly (this
+# module's own run_gate() can't cheaply be driven end-to-end without a real gh/network fixture).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_run_gate_checks_update_state_return_value_before_computing_exit_code() -> None:
+    import inspect
+
+    source = inspect.getsource(cli_module.run_gate)
+    call_line = "state.update_state(overall, pr_number, head_sha, state_file, workdir)"
+    assert call_line in source, "run_gate()'s update_state() call site changed shape — update this guard"
+    # The call's result must be captured into a variable (not a bare, discarded statement) and
+    # that variable must be checked before this function's own final `return` — a bare
+    # `state.update_state(...)` statement with no assignment is exactly the pre-fix shape that
+    # silently discarded a write failure.
+    assert f"= {call_line}" in source, (
+        "run_gate() calls state.update_state() as a bare, discarded statement again — its return "
+        "value must be captured and checked (a state-write failure must fail the run closed, "
+        "matching bash's own abort-on-mv-failure behavior — see pantheon.state.update_state's "
+        "own docstring)"
+    )
 
 
 def test_build_prompt_writes_non_ascii_pr_title_as_utf8_bytes_on_disk(tmp_path, monkeypatch) -> None:

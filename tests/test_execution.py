@@ -384,6 +384,60 @@ def test_live_resolution_of_the_actually_installed_pantheon_git_readonly_script(
 # ---------------------------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------------------------
+# build_readonly_argv()'s '-'-prefix refusal — a medium finding from an adversarial review: this
+# file had ZERO direct unit coverage of the check that any argument starting with '-' (a flag, or
+# a caller-supplied bare '--') is refused for every readonly-tier subcommand — the load-bearing
+# defense the module's own docstring describes at length (EXEC/WRITE-SURFACE MATRIX's "Caller-
+# supplied `--` shifts a validated range into pathspec position" row, among others). Live
+# mutation-test proof: deleting the `if arg.startswith("-"):` branch in
+# pantheon.execution.build_readonly_argv leaves every OTHER existing suite green (15/15 at the
+# time this finding was reported) — this file is the only place that would have caught the
+# regression, and it didn't test this path at all before this fix.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_build_readonly_argv_refuses_a_dash_flag_on_log() -> None:
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["log", "--follow"])
+
+
+def test_build_readonly_argv_refuses_a_short_dash_flag_on_status() -> None:
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["status", "-s"])
+
+
+def test_build_readonly_argv_refuses_a_dash_flag_on_show() -> None:
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["show", "--format=%H"])
+
+
+def test_build_readonly_argv_refuses_a_bare_double_dash_anywhere() -> None:
+    # The '--' pathspec-separator boundary belongs to the wrapper alone (it appends its own
+    # trailing '--' after a validated diff range) — a caller-supplied one must never be accepted,
+    # on any subcommand, not just diff.
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["log", "--"])
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["status", "--"])
+
+
+def test_build_readonly_argv_refuses_a_dash_prefixed_diff_range_looking_argument() -> None:
+    # A '-'-prefixed argument must be refused even when it superficially looks like a valid diff
+    # range (contains '..') — the dash-prefix check runs BEFORE range validation, for every
+    # subcommand uniformly.
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["diff", "--stat=main..head"])
+
+
+def test_build_readonly_argv_accepts_a_plain_positional_argument_without_a_dash() -> None:
+    # Regression-direction guard: a genuinely plain (non-dash) argument must NOT be refused by
+    # this same check — proves the fixtures above are exercising the dash-prefix branch
+    # specifically, not some other, over-broad refusal.
+    assert execution.build_readonly_argv(["status"]) == ["status"]
+    assert execution.build_readonly_argv(["log", "main"]) == ["log", "main"]
+
+
 def test_forced_env_force_clears_the_python_family_defensively(monkeypatch) -> None:
     monkeypatch.setenv("PYTHONUSERBASE", "/hostile/checkout")
     monkeypatch.setenv("PYTHONPATH", "/hostile/checkout/evil")

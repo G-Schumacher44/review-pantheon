@@ -213,3 +213,103 @@ def test_dumps_forces_allow_nan_false_as_a_fail_loud_backstop() -> None:
 def test_dumps_nan_sentinel_serializes_as_null() -> None:
     text = jqjson.dumps({"x": jqjson.NAN})
     assert jqjson.loads(text)["x"] is None
+
+
+# ---------------------------------------------------------------------------------------------
+# _check_depth_limit() / loads() depth cap — CRITICAL-4, an adversarial-review finding: real jq
+# caps object/array nesting at 256 levels ("Exceeds depth limit for parsing", rc=5, verified live
+# against jq-1.7.1 below); pantheon.jqjson had no equivalent cap at all pre-fix, so a
+# pathologically deep display-type field in a verdict payload parsed clean here while real jq's
+# own bash pipeline would already have failed closed to UNVERIFIED on the identical input — a
+# genuine decision-color divergence (UNVERIFIED -> green). Live pre-fix reproduction: reverting
+# loads() to skip _check_depth_limit() makes test_loads_rejects_nesting_deeper_than_jqs_256_level_cap
+# below FAIL (the 300-deep payload parses clean instead of raising) — verified locally before
+# landing this fix.
+# ---------------------------------------------------------------------------------------------
+
+
+def _nested_array_json(depth: int) -> str:
+    return "[" * depth + "1" + "]" * depth
+
+
+def test_loads_rejects_nesting_deeper_than_jqs_256_level_cap() -> None:
+    # 300 levels — the adversarial reviewer's own reproduction depth, chosen to sit safely past
+    # jq's real 256-level cap without relying on an exact-boundary off-by-one.
+    with pytest.raises(jqjson.JqParseError, match="depth limit"):
+        jqjson.loads(_nested_array_json(300))
+
+
+def test_loads_accepts_nesting_at_exactly_jqs_256_level_cap() -> None:
+    # The cap must not be off-by-one in the OTHER direction either — exactly 256 levels is the
+    # deepest real jq still parses successfully (verified live below).
+    jqjson.loads(_nested_array_json(256))
+
+
+def test_loads_rejects_nesting_one_level_past_the_cap() -> None:
+    with pytest.raises(jqjson.JqParseError, match="depth limit"):
+        jqjson.loads(_nested_array_json(257))
+
+
+def test_loads_depth_scan_ignores_brace_characters_inside_string_literals() -> None:
+    # A string VALUE that merely contains many '{'/'[' characters as literal text must never
+    # count toward structural nesting depth — only real object/array nesting does.
+    payload = '{"x": "' + "{[" * 300 + '"}'
+    parsed = jqjson.loads(payload)  # must not raise
+    assert parsed["x"] == "{[" * 300
+
+
+def test_loads_depth_scan_handles_escaped_quotes_inside_strings() -> None:
+    # A string containing an escaped quote followed by many brackets must still be treated as
+    # string content, not accidentally exit the string early and start counting the brackets that
+    # follow as real structure.
+    payload = '{"x": "a\\"' + "[" * 300 + '"}'
+    parsed = jqjson.loads(payload)
+    assert parsed["x"] == 'a"' + "[" * 300
+
+
+def test_depth_limit_matches_real_jq_live() -> None:
+    # Live cross-check against the actual jq binary, when available — proves this module's cap
+    # isn't just an arbitrary internal constant but genuinely matches real jq's own rc=5 refusal
+    # on the identical input, the exact divergence this fix closes.
+    import shutil
+    import subprocess
+
+    jq_bin = shutil.which("jq")
+    if jq_bin is None:
+        pytest.skip("jq not installed in this environment — cannot cross-check live")
+
+    deep = _nested_array_json(300)
+    result = subprocess.run([jq_bin, "-c", "."], input=deep, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "depth limit" in result.stderr.lower()
+
+    with pytest.raises(jqjson.JqParseError, match="depth limit"):
+        jqjson.loads(deep)
+
+
+# ---------------------------------------------------------------------------------------------
+# dumps() single-pass placeholder splice — a medium finding from the same adversarial review,
+# live-reproduced pre-fix: 8000 overflow numbers in one payload took ~2.1s to serialize (an
+# earlier version called text.replace() once PER placeholder, each call rescanning the whole,
+# already-serialized text — O(N) full-text scans of an O(N)-length string, quadratic overall).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_dumps_handles_thousands_of_overflow_numbers_without_quadratic_blowup() -> None:
+    import time
+
+    huge = {f"k{i}": jqjson.loads(f'{{"x":1e{400 + (i % 50)}}}')["x"] for i in range(8000)}
+    start = time.perf_counter()
+    text = jqjson.dumps(huge)
+    elapsed = time.perf_counter() - start
+
+    # Generous ceiling: the pre-fix reproduction measured ~2.1s for this exact shape; the
+    # single-pass fix should complete in a small fraction of that. 1.0s leaves ample CI-noise
+    # margin while still being a real, meaningful regression guard against the O(N^2) shape
+    # returning.
+    assert elapsed < 1.0, f"dumps() took {elapsed:.2f}s for 8000 overflow numbers — quadratic regression?"
+
+    # Correctness, not just speed: every value must still round-trip.
+    reparsed = jqjson.loads(text)
+    assert reparsed["k0"] is not None
+    assert jqjson.jq_text(reparsed["k7999"]) == jqjson.jq_text(huge["k7999"])

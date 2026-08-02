@@ -75,6 +75,57 @@ Fixture suites: none today — docs/PYTHON-PORT.md §9 notes this as a pre-exist
 obligated to close. ``pantheon.cli``'s own black-box exams exercise the ``claude`` lane's argv
 construction indirectly via ``--dry-run`` (which never calls a provider) and via the
 ``PANTHEON_CLI``-parameterized suites where a real ``claude`` CLI happens to be resolvable.
+
+**Neutral launch cwd, never the PR checkout — the worst finding from an adversarial review
+(CRITICAL-1), closed with three layered fixes.** PATH-filtering, the env allowlist, and the
+process-group timeout above all assume the vulnerability enters through the SUBPROCESS'S OWN
+ARGV/ENV — but a provider CLI's OWN STARTUP auto-discovers repo-local configuration from its
+CURRENT WORKING DIRECTORY, entirely BEFORE any tool call and entirely OUTSIDE
+``--allowedTools``'s reach: a PR-committed ``.mcp.json`` (Claude Code auto-loads and SPAWNS every
+listed MCP server — arbitrary command execution, not a tool call this repo's own readonly-tier
+scoping ever sees), a PR-committed ``.claude/settings.json`` (hooks that fire on tool events —
+including on an ALLOWED ``Read``), or ``CLAUDE.md``/similar project-memory files (prompt content
+a PR fully controls, injected before this repo's own persona framing ever runs). Every one of
+these was reachable purely because this module launched the provider with ``cwd=repo_root`` — the
+PR's own checkout — live-reproduced by the reviewer with a fake ``claude`` binary that printed
+which MCP servers it would have spawned and confirmed a PR-committed hook would have fired on an
+allowed ``Read`` tool call. Fixed with defense in depth, all three layers, none alone sufficient:
+
+  1. **Neutral cwd.** Every provider now launches with ``cwd=neutral_cwd`` — a scratch directory
+     ``pantheon.cli`` creates and owns (never the repo checkout, never anywhere inside it) —
+     instead of ``cwd=repo_root``. A provider CLI's own startup-time config/MCP/hooks discovery
+     scans ITS OWN cwd (and, for some tools, ancestor directories of it); a neutral, repo-free
+     directory has nothing there to discover. The agent still reaches repo CONTENT exclusively
+     through the readonly git wrapper (now told the real repo root via an explicit
+     ``--repo-root`` flag baked into its own fixed Bash-tool prefix — see
+     ``pantheon.cli._wrapper_invocation``'s own docstring) and explicit ``Read``/``Grep``/``Glob``
+     calls against the repo root's own now-advertised absolute path (see
+     ``pantheon.cli._build_prompt``) — exactly the design's stated intent (the wrapper is the
+     ONLY sanctioned path back to the tree under ``readonly``), now actually true for the
+     provider's OWN startup-time behavior too, not just its later tool calls.
+  2. **``--bare`` on the claude lane (the only lane with a real, documented flag for this — see
+     :func:`_claude`'s own docstring).** Verified against Claude Code's current official headless
+     docs (code.claude.com/docs/en/headless): ``--bare`` "reduce[s] startup time by skipping
+     auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md" — the
+     exact five vectors this finding named, in ONE documented flag, layered on top of (never
+     instead of) the neutral-cwd fix above (belt-and-braces: even if a future code path
+     regressed the cwd back toward the checkout, ``--bare`` still refuses local discovery).
+     ``codex``/``gemini``/``cursor-agent`` have **no equivalent documented flag** as of this
+     writing (researched against each CLI's current official docs before writing this — not
+     assumed): this is a disclosed, honest residual exposure for those three best-effort lanes,
+     not silently treated as closed — see DESIGN.md's "Security posture" for the same disclosure
+     in the repo's own binding spec.
+  3. **``_PROVIDER_ENV_PASSTHROUGH_KEYS`` re-audited.** Every key on that list already carried a
+     specific, documented reason before this fix (see that data's own comment) — re-reviewed here
+     specifically for "does this key exist ONLY because it's convenient, or because a named lane's
+     documented auth/locale surface genuinely needs it": every key survived that re-read (each is
+     tied to a specific lane's documented env-var auth mechanism, a POSIX locale/temp-dir
+     convention every CLI here needs to run at all, or the proxy-transport fix a prior Codex wave
+     already justified) — no key was removed, because none was found that exists WITHOUT a
+     specific need, and removing a genuinely-needed auth key would just break that lane's real
+     credential flow without closing anything (an execution-bearing variable like
+     ``NODE_OPTIONS``/``LD_PRELOAD`` was never on this allowlist in the first place — that closure
+     already existed, per round 3 above).
 """
 
 from __future__ import annotations
@@ -138,7 +189,7 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini", "cursor")
 _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 
 
-def default_allowed_tools() -> str:
+def default_allowed_tools(repo_root: str | None = None) -> str:
     """The readonly-tier fallback ``--allowedTools`` value (see this module's own docstring for
     why this exists) — resolves :data:`_WRAPPER_SCRIPT_NAME`'s absolute path via
     ``pantheon.execution.resolve_console_script`` (checks both a venv's/system install's own
@@ -146,10 +197,20 @@ def default_allowed_tools() -> str:
     ``PATH`` lookup), falling back to the OLDER, unprotected ``python -m pantheon.execution
     wrapper`` form only when the console script genuinely isn't installed anywhere that function
     checks (a plain dev checkout — docs/PYTHON-PORT.md's own disclosed package-layout caveat for
-    this slice), with a loud stderr warning every time that fallback fires."""
+    this slice), with a loud stderr warning every time that fallback fires.
+
+    ``repo_root``, when given, is baked into the returned string as a fixed ``--repo-root``
+    literal — a CRITICAL fix (adversarial review), mirroring ``pantheon.cli``'s own
+    ``_wrapper_invocation()`` exactly (see that function's own docstring for the full rationale:
+    providers no longer launch with the repo checkout as their own cwd, so the wrapper needs the
+    real repo root told to it explicitly). Optional (default ``None``, omitting the flag
+    entirely) so this function's existing zero-argument call shape keeps working for genuinely
+    standalone use (this module's own ``python -m pantheon.providers run ...`` CLI, invoked with
+    no ``repo-root`` positional) — the one case where no repo root is actually known yet."""
     candidate = execution.resolve_console_script(_WRAPPER_SCRIPT_NAME)
+    repo_root_suffix = f" --repo-root {repo_root}" if repo_root else ""
     if candidate is not None:
-        return f"Read,Grep,Glob,Bash({candidate} wrapper *)"
+        return f"Read,Grep,Glob,Bash({candidate} wrapper{repo_root_suffix} *)"
     print(
         f"pantheon: warning: the '{_WRAPPER_SCRIPT_NAME}' console script is not installed "
         "(checked alongside sys.executable and the per-user scripts directory) — falling back "
@@ -158,7 +219,7 @@ def default_allowed_tools() -> str:
         "package closes. Run one of those to get the hardened path.",
         file=sys.stderr,
     )
-    fallback_cmd = f"{sys.executable} -m pantheon.execution wrapper"
+    fallback_cmd = f"{sys.executable} -m pantheon.execution wrapper{repo_root_suffix}"
     return f"Read,Grep,Glob,Bash({fallback_cmd} *)"
 
 
@@ -377,11 +438,11 @@ def _run(
     """Runs ``argv`` (``argv[0]`` already resolved via :func:`_resolve_cli`, never a bare command
     name left for the child's own shell/exec lookup to re-resolve) with the explicitly
     constructed environment from :func:`_provider_env` — see this module's own docstring for why.
-    ``cwd`` mirrors ``cli/review-gate``'s own posture: that script ``cd``s to ``$REPO_ROOT`` once,
-    near the top, and never leaves it, so every provider it launches inherits the repo root as
-    its own cwd automatically; this port's callers are expected to pass ``ctx.repo_root``
-    explicitly instead (this module has no persistent process-wide cwd of its own to rely on).
-    Started with ``start_new_session=True`` (POSIX) so :func:`_terminate_group` can reach the
+    ``cwd`` is a NEUTRAL scratch directory (``pantheon.cli``'s own, never the repo checkout —
+    a CRITICAL fix, adversarial review: launching a provider with the repo checkout as its own
+    cwd let its startup-time config/MCP/hooks auto-discovery reach PR-controlled content entirely
+    outside ``--allowedTools``'s reach — see this module's own docstring for the full finding and
+    fix). Started with ``start_new_session=True`` (POSIX) so :func:`_terminate_group` can reach the
     WHOLE process group on a timeout, not just this one PID (see this module's own docstring).
     Merges stdout+stderr into one text stream — mirrors bash's own
     ``raw_output="$(run_with_timeout ... provider_run "$MODEL" "$prompt_file" 2>&1)"`` capture in
@@ -436,28 +497,58 @@ def _run(
     return stdout
 
 
-def _claude(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
+def _claude(
+    model: str,
+    prompt_file: str,
+    allowed_tools: str,
+    timeout: float | None,
+    repo_root: str | None,
+    neutral_cwd: str | None,
+) -> str:
     """Provider lane: Claude Code CLI. Default lane — the only one integration-tested (mirrors
     cli/providers/claude.sh). ``--permission-mode dontAsk`` (not "default"): Claude Code's own
     docs describe ``default`` mode as auto-approving reads only — everything else, including a
     tool call that DOES match ``--allowedTools``, still goes through a permission decision nothing
     can answer non-interactively outside a terminal; ``dontAsk`` is documented as the mode "for
-    CI pipelines and scripts", auto-denying anything not pre-approved rather than hanging."""
+    CI pipelines and scripts", auto-denying anything not pre-approved rather than hanging.
+
+    ``--bare`` — a CRITICAL fix (adversarial review), verified against Claude Code's current
+    official headless-mode docs (code.claude.com/docs/en/headless) before adding, not assumed:
+    documented to "reduce startup time by skipping auto-discovery of hooks, skills, plugins, MCP
+    servers, auto memory, and CLAUDE.md" — closing, in one flag, every one of the config-discovery
+    vectors this module's own docstring names, layered on top of (never instead of) launching from
+    a neutral ``cwd`` (see :func:`_run`'s own docstring). The same doc discloses that bare mode
+    skips OAuth/system-keychain login (only sees credentials passed explicitly) — a non-issue
+    here, since :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` already forwards ``ANTHROPIC_API_KEY``/
+    ``CLAUDE_CODE_OAUTH_TOKEN`` as explicit env vars, exactly the credential-passing shape bare
+    mode is documented to still honor."""
     claude_bin = _resolve_cli("claude", repo_root)
     if claude_bin is None:
         raise ProviderError("'claude' CLI not found on PATH")
 
     prompt = _read_prompt(prompt_file)
-    tools = allowed_tools or default_allowed_tools()
-    argv = [claude_bin, "-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
+    tools = allowed_tools or default_allowed_tools(repo_root)
+    argv = [claude_bin, "--bare", "-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
     if model:
         argv += ["--model", model]
-    return _run(argv, timeout=timeout, cwd=repo_root, repo_root=repo_root)
+    return _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
 
 
-def _codex(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
+def _codex(
+    model: str,
+    prompt_file: str,
+    allowed_tools: str,
+    timeout: float | None,
+    repo_root: str | None,
+    neutral_cwd: str | None,
+) -> str:
     """Provider lane: Codex CLI. Best-effort — mirrors cli/providers/codex.sh's ``codex exec -``
-    invocation, prompt piped via stdin."""
+    invocation, prompt piped via stdin. No documented flag equivalent to the claude lane's
+    ``--bare`` exists for this CLI as of this writing (researched against Codex's own official
+    docs before landing this fix, not assumed) — this lane's own repo-local config/AGENTS.md
+    auto-discovery is a disclosed, honest residual exposure the neutral ``cwd`` below narrows
+    (nothing repo-local for it to discover in a scratch directory) but doesn't eliminate the way
+    an explicit flag would; see this module's own docstring and DESIGN.md's "Security posture"."""
     codex_bin = _resolve_cli("codex", repo_root)
     if codex_bin is None:
         raise ProviderError("'codex' CLI not found on PATH")
@@ -467,12 +558,22 @@ def _codex(model: str, prompt_file: str, allowed_tools: str, timeout: float | No
     if model:
         argv += ["--model", model]
     argv.append("-")
-    return _run(argv, input_text=prompt, timeout=timeout, cwd=repo_root, repo_root=repo_root)
+    return _run(argv, input_text=prompt, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
 
 
-def _gemini(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
+def _gemini(
+    model: str,
+    prompt_file: str,
+    allowed_tools: str,
+    timeout: float | None,
+    repo_root: str | None,
+    neutral_cwd: str | None,
+) -> str:
     """Provider lane: Gemini CLI. Best-effort — mirrors cli/providers/gemini.sh's ``gemini -p
-    <prompt> [-m <model>]`` invocation."""
+    <prompt> [-m <model>]`` invocation. No documented flag equivalent to the claude lane's
+    ``--bare`` exists for this CLI as of this writing (researched against Gemini CLI's own
+    official docs before landing this fix, not assumed) — same disclosed residual exposure as the
+    codex lane above, narrowed but not eliminated by the neutral ``cwd`` below."""
     gemini_bin = _resolve_cli("gemini", repo_root)
     if gemini_bin is None:
         raise ProviderError("'gemini' CLI not found on PATH")
@@ -481,12 +582,24 @@ def _gemini(model: str, prompt_file: str, allowed_tools: str, timeout: float | N
     argv = [gemini_bin, "-p", prompt]
     if model:
         argv += ["-m", model]
-    return _run(argv, timeout=timeout, cwd=repo_root, repo_root=repo_root)
+    return _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
 
 
-def _cursor(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
+def _cursor(
+    model: str,
+    prompt_file: str,
+    allowed_tools: str,
+    timeout: float | None,
+    repo_root: str | None,
+    neutral_cwd: str | None,
+) -> str:
     """Provider lane: Cursor CLI (``cursor-agent``). Best-effort — mirrors
-    cli/providers/cursor.sh's ``cursor-agent -p <prompt> [--model <model>]`` invocation."""
+    cli/providers/cursor.sh's ``cursor-agent -p <prompt> [--model <model>]`` invocation. No
+    documented flag equivalent to the claude lane's ``--bare`` exists for this CLI as of this
+    writing (its own official docs state it "honours the same `.cursor/rules/`, MCP servers... as
+    the desktop editor" with no disclosed opt-out — researched before landing this fix, not
+    assumed) — same disclosed residual exposure as the codex/gemini lanes above, narrowed but not
+    eliminated by the neutral ``cwd`` below."""
     cursor_bin = _resolve_cli("cursor-agent", repo_root)
     if cursor_bin is None:
         raise ProviderError("'cursor-agent' CLI not found on PATH")
@@ -495,7 +608,7 @@ def _cursor(model: str, prompt_file: str, allowed_tools: str, timeout: float | N
     argv = [cursor_bin, "-p", prompt]
     if model:
         argv += ["--model", model]
-    return _run(argv, timeout=timeout, cwd=repo_root, repo_root=repo_root)
+    return _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
 
 
 _DISPATCH = {"claude": _claude, "codex": _codex, "gemini": _gemini, "cursor": _cursor}
@@ -508,6 +621,7 @@ def provider_run(
     allowed_tools: str = "",
     timeout: float | None = None,
     repo_root: str | None = None,
+    neutral_cwd: str | None = None,
 ) -> str:
     """Dispatches to the named provider lane and returns its raw stdout (merged with stderr, see
     :func:`_run`). ``provider`` must be one of :data:`KNOWN_PROVIDERS` — an unrecognized name is
@@ -517,19 +631,30 @@ def provider_run(
     the ``claude`` lane (readonly-tier tool scoping — see :func:`_claude`); the other three ignore
     it, matching docs/CLI.md's disclosed "no readonly-tier tool restriction at all" gap for those
     lanes. ``repo_root``, when given (``pantheon.cli`` always passes its own resolved repo root),
-    is used BOTH as the launched provider's own ``cwd`` (mirroring ``cli/review-gate``'s own
-    ``cd "$REPO_ROOT"`` posture — see :func:`_run`) and as an additional trusted root excluded
-    from PATH resolution (see :func:`_filtered_path`)."""
+    is used as an additional trusted root excluded from PATH resolution (see
+    :func:`_filtered_path`) and threaded to the readonly-wrapper resolution helpers.
+
+    ``neutral_cwd``, when given (``pantheon.cli`` always passes a scratch directory it created
+    and owns), is the launched provider's own ``cwd`` — a CRITICAL fix (adversarial review): this
+    used to be ``repo_root`` (mirroring ``cli/review-gate``'s own ``cd "$REPO_ROOT"`` posture),
+    which let a provider's own startup-time config/MCP/hooks auto-discovery reach the PR's own
+    checkout before any tool call ever ran — see this module's own docstring for the full finding
+    and fix. Left ``None`` (the default), a caller gets the OLD behavior of inheriting this
+    process's own cwd unmodified — acceptable for genuinely standalone, operator-invoked use
+    (this module's own ``python -m pantheon.providers run ...`` CLI below, run at the operator's
+    own discretion, not as part of reviewing untrusted PR content) but never how
+    ``pantheon.cli``'s own gate run invokes this function."""
     fn = _DISPATCH.get(provider)
     if fn is None:
         raise ProviderError(f"unknown provider lane '{provider}' (known: {', '.join(KNOWN_PROVIDERS)})")
-    return fn(model, prompt_file, allowed_tools, timeout, repo_root)
+    return fn(model, prompt_file, allowed_tools, timeout, repo_root, neutral_cwd)
 
 
 # ---------------------------------------------------------------------------------------------
 # CLI — a thin black-box seam for ad hoc/manual verification (this module has no dedicated
 # fixture suite, see this module's own docstring for why):
-#   python -m pantheon.providers run <provider> <model> <prompt-file> [allowed-tools] [timeout] [repo-root]
+#   python -m pantheon.providers run <provider> <model> <prompt-file> [allowed-tools] [timeout] \
+#       [repo-root] [neutral-cwd]
 # Prints the raw output on success (exit 0); prints the ProviderError message to stderr and
 # exits 1 on failure.
 # ---------------------------------------------------------------------------------------------
@@ -540,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(argv) < 4 or argv[0] != "run":
         print(
             "usage: python -m pantheon.providers run <provider> <model> <prompt-file> "
-            "[allowed-tools] [timeout] [repo-root]",
+            "[allowed-tools] [timeout] [repo-root] [neutral-cwd]",
             file=sys.stderr,
         )
         return 2
@@ -549,9 +674,10 @@ def main(argv: list[str] | None = None) -> int:
     allowed_tools = rest[0] if len(rest) > 0 else ""
     timeout = float(rest[1]) if len(rest) > 1 else None
     repo_root = rest[2] if len(rest) > 2 else None
+    neutral_cwd = rest[3] if len(rest) > 3 else None
 
     try:
-        output = provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root)
+        output = provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root, neutral_cwd)
     except ProviderError as e:
         print(str(e), file=sys.stderr)
         if e.output:

@@ -230,6 +230,71 @@ fi
 
 rm -rf "$ANCESTRY_REPO"
 
+# ---------------------------------------------------------------------------
+# CRITICAL fix (adversarial review): a state-write FAILURE for a green verdict must fail this
+# CLI shim's own exit code closed (nonzero), never silently exit 0 — the pre-fix `_update_cli`
+# discarded update_state()'s outcome entirely and always returned 0. Live pre-fix reproduction:
+# reverting `_update_cli` to `update_state(...); return 0` (unconditional) makes the FIRST check
+# below FAIL (exits 0 despite the write having visibly failed) — verified locally before landing
+# this fix. Skipped when running as root (POSIX permission checks are bypassed for root, same
+# precondition tests/test_state.py's own chmod-555 fixtures guard against).
+# ---------------------------------------------------------------------------
+section "State-write failure fails closed (python -m pantheon.state update must exit nonzero)"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "SKIP: running as root — POSIX permission checks are bypassed, precondition unmet"
+else
+  FAILCLOSED_DIR="$(mktemp -d)"
+  FAILCLOSED_STATE="$FAILCLOSED_DIR/state.json"
+  echo '{}' > "$FAILCLOSED_STATE"
+  chmod 555 "$FAILCLOSED_DIR"
+
+  py_update "green" "42" "deadbeefcafe" "$FAILCLOSED_STATE" >/dev/null 2>&1
+  FAILCLOSED_STATUS=$?
+
+  chmod 755 "$FAILCLOSED_DIR"  # restore so cleanup below can actually remove it
+  rm -rf "$FAILCLOSED_DIR"
+
+  if [[ "$FAILCLOSED_STATUS" -ne 0 ]]; then
+    pass "python -m pantheon.state update: exits nonzero when the state directory is unwritable for a green verdict — fail-closed, matches bash's own abort-on-mv-failure behavior"
+  else
+    fail "python -m pantheon.state update: exited 0 despite a failed state write (state dir chmod 555) — this was the CRITICAL-3 gap: state-write failure was fail-OPEN"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Empty-state-file self-heal (medium finding, same review): real jq on genuinely empty input
+# exits 0 with no output — bash's own SEEN_SHA read and write-side jq call both treat an empty
+# state file as "no prior state," not a parse error (verified live below). Pre-fix, Python's
+# jqjson.loads("") raised JqParseError like any other malformed content, so an empty state file
+# could never self-repair (update_state() correctly refuses to overwrite content it judges
+# malformed).
+# ---------------------------------------------------------------------------
+section "Empty state file self-heals (matches bash's own jq-on-empty-input behavior)"
+
+EMPTY_STATE="$WORKDIR/state-empty.json"
+: > "$EMPTY_STATE"  # genuinely 0 bytes
+
+py_update "green" "42" "deadbeefcafe" "$EMPTY_STATE" >/dev/null 2>&1
+EMPTY_UPDATE_STATUS=$?
+empty_reviewed_sha="$(jq -r '.["42"].reviewed_sha // empty' "$EMPTY_STATE" 2>/dev/null)"
+
+if [[ "$EMPTY_UPDATE_STATUS" -eq 0 && "$empty_reviewed_sha" == "deadbeefcafe" ]]; then
+  pass "update_state(): a green outcome against a genuinely EMPTY existing state file self-heals (writes the new entry), matching bash's own jq-on-empty-input write behavior"
+else
+  fail "update_state(): did not self-heal an empty existing state file (status=$EMPTY_UPDATE_STATUS, reviewed_sha='$empty_reviewed_sha')"
+fi
+
+if command -v jq >/dev/null 2>&1; then
+  live_empty_read="$(printf '' | jq -r '.["42"].reviewed_sha // empty')"
+  live_empty_status=$?
+  if [[ "$live_empty_status" -eq 0 && -z "$live_empty_read" ]]; then
+    pass "live cross-check: real jq on empty input exits 0 with no output for the same SEEN_SHA-shaped query bash's own review-gate uses"
+  else
+    fail "live cross-check: real jq's empty-input behavior did not match what this fixture assumes (status=$live_empty_status, output='$live_empty_read')"
+  fi
+fi
+
 echo
 echo "state-persistence (python) fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

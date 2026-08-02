@@ -567,8 +567,27 @@ def resolve_console_script(name: str) -> str | None:
 
 
 def _wrapper_cli(argv: list[str]) -> int:
+    """Parses an OPTIONAL leading ``--repo-root <path>`` (a CRITICAL fix, adversarial review)
+    before handing the rest of ``argv`` to :func:`build_readonly_argv`'s own four-subcommand
+    validation — ``--repo-root`` is a WRAPPER-LEVEL option, never a git subcommand argument, so
+    it must be stripped here rather than reaching that validation (which refuses ANY
+    ``-``-prefixed token uniformly, including this one).
+
+    Why this exists: ``pantheon.cli``'s ``_wrapper_invocation()`` now bakes the caller's real
+    repo root into the wrapper invocation string it embeds as the ONE allowed Bash-tool prefix
+    (``Bash(<script> wrapper --repo-root <repo_root> *)``) — provider processes no longer launch
+    with the repo checkout as their own cwd (see ``pantheon.providers``' own docstring for the
+    config/MCP/hooks auto-discovery vector that closes), so :func:`os.getcwd` alone is no longer
+    a reliable way for THIS process to learn where the repo actually is when a Bash-tool child of
+    that provider invokes it. When ``--repo-root`` is given, it wins outright; when absent
+    (direct CLI/test use — ``tests/test-git-readonly-wrapper.sh``'s own invocation shape, which
+    predates and is unaffected by this fix), this falls back to :func:`os.getcwd`, unchanged."""
+    cwd = os.getcwd()
+    if len(argv) >= 2 and argv[0] == "--repo-root":
+        cwd = argv[1]
+        argv = argv[2:]
     try:
-        result = run_readonly_wrapper(argv, cwd=os.getcwd())
+        result = run_readonly_wrapper(argv, cwd=cwd)
     except WrapperRefused as exc:
         print(f"pantheon-git-readonly: {exc}", file=sys.stderr)
         return 1
@@ -582,7 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "wrapper":
         return _wrapper_cli(argv[1:])
     print(
-        "usage: python -m pantheon.execution wrapper <diff|show|log|status> [args...]",
+        "usage: python -m pantheon.execution wrapper [--repo-root <path>] <diff|show|log|status> [args...]",
         file=sys.stderr,
     )
     return 2
