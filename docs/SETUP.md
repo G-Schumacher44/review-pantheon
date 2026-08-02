@@ -7,6 +7,10 @@ CLI, no files in your repo), see
 `DESIGN.md`. Doc index: [docs/README.md](README.md). Full flag/`gate.conf` reference once
 you're past first run: [CLI.md](CLI.md).
 
+**v2 preview:** a Python CLI (`pantheon gate` / `pantheon counsel`) exists alongside the bash
+`review-gate` this guide walks through — see [docs/PYTHON-PORT.md](PYTHON-PORT.md). Bash stays
+canonical (this doc's install steps below are unchanged) until the port's Slice 5 switchover.
+
 ## Prerequisites
 
 | Tool | Needed for | Notes |
@@ -47,7 +51,9 @@ from the target repo — Way A's `install.sh` doesn't touch the CLI at all, only
 
 **Post-install checklist:**
 
-1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN`.
+1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN`. Mint one with `claude setup-token`
+   (interactive, requires a Claude Code subscription), then store it with
+   `gh secret set CLAUDE_CODE_OAUTH_TOKEN`.
 2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
 3. `.github/workflows/review.yml` ships pinned to a real, verified
    `anthropics/claude-code-action` commit SHA (see that file's header comment for the release
@@ -169,7 +175,9 @@ which is then yours to edit — add the cloud-provider inputs to its `with:` blo
 **Post-install checklist:**
 
 1. Set the repo secret `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY` — wire whichever one
-   into the stub's `with:` block; see the auth-surface table above).
+   into the stub's `with:` block; see the auth-surface table above). Mint the OAuth token with
+   `claude setup-token` (interactive, requires a Claude Code subscription), then store it with
+   `gh secret set CLAUDE_CODE_OAUTH_TOKEN`.
 2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
 3. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
 4. Only after step 3 passes, consider making the check required.

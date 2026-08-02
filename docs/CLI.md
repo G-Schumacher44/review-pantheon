@@ -7,6 +7,13 @@ security posture, the full read-provenance matrix), see [DESIGN.md](../DESIGN.md
 below is grounded in `cli/review-gate`'s own `--help` output and `cli/lib/*.sh` — if this doc and
 the code ever disagree, that's DESIGN.md rule 5's bug, not a judgment call.
 
+**v2 preview:** a Python CLI (`pantheon gate` / `pantheon counsel`, plus a `review-gate` compat
+shim) now exists alongside this bash `review-gate` — see
+[docs/PYTHON-PORT.md](PYTHON-PORT.md) for the port spec. Everything below still describes the
+**canonical** implementation; `pantheon` is byte-compatible with it (same flags, same `gate.conf`
+keys, same exit codes) but bash remains the source of truth until the port's Slice 5 switchover
+retires it.
+
 ## Command reference
 
 ```

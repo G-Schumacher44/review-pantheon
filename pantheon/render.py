@@ -40,13 +40,15 @@ cli/lib/render_comment.sh directly). Its black-box Python equivalent, per docs/P
 section 4, is tests/test-render-comment-python.sh, which drives this module the same way the
 original suite drives the sourced bash functions: via ``python3 -m pantheon.render``.
 """
+
 from __future__ import annotations
 
 import os
 import re
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from pantheon import jqjson
 
@@ -260,15 +262,11 @@ def _headline_lines(overall: str) -> tuple[str, str]:
     if overall == "green":
         phrase = "Clean pass"
         explain = (
-            "No blocker or review-note findings from any agent — this reads as safe to merge on "
-            "the gate's own signal."
+            "No blocker or review-note findings from any agent — this reads as safe to merge on the gate's own signal."
         )
     elif overall == "yellow":
         phrase = "Review notes"
-        explain = (
-            "Non-blocking findings below are worth a look, but nothing here is stopping the "
-            "merge."
-        )
+        explain = "Non-blocking findings below are worth a look, but nothing here is stopping the merge."
     elif overall == "red":
         phrase = "Blocked"
         explain = "A blocker finding was reported — this should not merge until it is resolved."
@@ -364,9 +362,8 @@ def overall_color(colors: Iterable[str]) -> str:
         elif color == "unverified":
             if overall != "red":
                 overall = "unverified"
-        elif color == "yellow":
-            if overall == "green":
-                overall = "yellow"
+        elif color == "yellow" and overall == "green":
+            overall = "yellow"
     return overall
 
 
@@ -426,7 +423,8 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
         # this); skipping subst lets a summary of exactly a trailing newline (e.g. "\n") wrongly
         # read as non-empty in Python where bash's $(...) would have already stripped it to ""
         # and fallen through to `d.top` (caught live in a later round, same PR).
-        summary = jqjson.subst(jqjson.jq_text(_or_default(findings_obj.get("summary") if isinstance(findings_obj, dict) else None, "")))
+        raw_summary = findings_obj.get("summary") if isinstance(findings_obj, dict) else None
+        summary = jqjson.subst(jqjson.jq_text(_or_default(raw_summary, "")))
         if not summary:
             summary = d.top
         if not summary:
@@ -468,6 +466,10 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
         lines.append(f"**{agent}**")
         lines.append("")
         lines.append("```json")
+        # d.findings_raw is typed Optional[str] only to let AgentRenderData.__post_init__
+        # populate it lazily from findings_json — by the time any AgentRenderData instance
+        # exists, __post_init__ has always run and this is never actually None.
+        assert d.findings_raw is not None
         lines.append(_machine_tail_text(d.findings_raw))
         lines.append("```")
         lines.append("")
@@ -475,8 +477,7 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict) -> str:
     lines.append("</details>")
     lines.append("")
     lines.append(
-        "_review-pantheon — fails closed: a missing or unparseable verdict reads as NOT GATED, "
-        "never as a pass._"
+        "_review-pantheon — fails closed: a missing or unparseable verdict reads as NOT GATED, never as a pass._"
     )
 
     return _escape_lone_surrogates("\n".join(lines) + "\n")
@@ -585,7 +586,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             max_len = int(rest[1]) if len(rest) == 2 else 90
         except ValueError:
-            print("usage: python3 -m pantheon.render truncate <text> [max_len] (max_len must be an integer)", file=sys.stderr)
+            print(
+                "usage: python3 -m pantheon.render truncate <text> [max_len] (max_len must be an integer)",
+                file=sys.stderr,
+            )
             return 2
         print(truncate(text, max_len))
         return 0
