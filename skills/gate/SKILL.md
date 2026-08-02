@@ -1,12 +1,15 @@
 ---
 name: gate
-description: Operate review-pantheon's review gate (Artemis + Apollo) from a Claude Code session — dry-run before spending tokens, run it live, read the combined verdict comment correctly, work with follow-up mode, and dispose findings. Use when asked to "run the gate," "gate this PR," "review-gate this," "what does this verdict mean," "is this PR gated," or "check the review status" for a review-pantheon-gated repo.
+description: Operate review-pantheon's review gate (Artemis + Apollo) from a Claude Code session — dry-run before spending tokens, run it live, read the combined verdict comment correctly, work with follow-up mode, and dispose findings. Use when asked to "run the gate," "gate this PR," "pantheon gate this," "review-gate this," "what does this verdict mean," "is this PR gated," or "check the review status" for a review-pantheon-gated repo.
 ---
 
 # Operating the gate
 
-review-pantheon's gate is `cli/review-gate` (or `review-gate` on `PATH` via a Way-B install) run
-against one PR. Full flag/`gate.conf` reference:
+review-pantheon's gate is `pantheon gate` (the current CLI, port slice 5 — installed via
+`pipx`/`pip`, or on `PATH` via a Way-B install) run against one PR. The deprecated
+`cli/review-gate`/`review-gate` compat shim still works this release — identical flags, same
+`gate.conf` keys, same exit codes — but is on notice for removal; everything below applies
+identically to it, substitute the binary name. Full flag/`gate.conf` reference:
 [docs/CLI.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/CLI.md). The
 verdict schema and combined-comment shape are the binding contract:
 [DESIGN.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/DESIGN.md#verdict-contract).
@@ -15,16 +18,18 @@ Links below point at review-pantheon's own GitHub repo, not a relative path — 
 copied into `.claude/skills/gate/` by `install.sh`, so a relative link would resolve against the
 installed location instead of the source repo.
 
-## Locating `review-gate`
+## Locating `pantheon`
 
 `install.sh --claude` installs this skill and the `/gate` command — it does NOT install the CLI
-itself. `review-gate` only ends up on `PATH` via a Way-B (`bootstrap.sh`) install. Before assuming
-it's missing:
+itself. `pantheon` only ends up on `PATH` via a real `pipx`/`pip install`, or via a Way-B
+(`bootstrap.sh`) install. Before assuming it's missing:
 
-1. `command -v review-gate` — a Way-B install puts it on `PATH`.
-2. Look for a sibling review-pantheon checkout (e.g. `../review-pantheon/cli/review-gate`) — a
-   Way-A install still runs the CLI from that checkout, not from the target repo.
-3. Check the default Way-B prefix directly: `~/.review-pantheon/cli/review-gate`.
+1. `command -v pantheon` — an installed package (or a Way-B install) puts it on `PATH`.
+2. Look for a sibling review-pantheon checkout with a venv (e.g.
+   `../review-pantheon` with `pip install -e .` run into its own venv) — a Way-A install still
+   runs the CLI from that checkout, not from the target repo.
+3. Check the default Way-B prefix directly: `~/.review-pantheon/venv/bin/pantheon` (or
+   `~/.review-pantheon/cli/review-gate` for the deprecated shim, also vendored there).
 4. None of those resolve? Tell the user the CLI surface isn't installed yet and point at
    [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/SETUP.md)'s
    three install ways — don't try to run a command that
@@ -33,7 +38,7 @@ it's missing:
 ## 1. Dry-run first — zero tokens
 
 ```
-review-gate --pr <number> --dry-run
+pantheon gate --pr <number> --dry-run
 ```
 
 Does everything real up to the point of spending a token: real `gh pr view`, real diff range,
@@ -42,7 +47,7 @@ provider command it *would* run and the comment it *would* post, to stdout only.
 called, nothing is posted, no PR is ever recorded as reviewed. Run this before every first live
 gate on a PR you haven't seen the shape of yet.
 
-**Caveat: even `--dry-run` can leave a new untracked file.** `review-gate` bootstraps
+**Caveat: even `--dry-run` can leave a new untracked file.** `pantheon gate` bootstraps
 `.review-gate-state.json` to `{}` unconditionally on first run, before the dry-run branch is even
 reached — so the very first `--dry-run` against a repo that's never run the gate before leaves a
 fresh, empty state file in the working tree. A Way-A (`install.sh`) install already added it to
@@ -55,7 +60,7 @@ before it gets swept into an unrelated `git add -A`.
 Drop `--dry-run`:
 
 ```
-review-gate --pr <number>
+pantheon gate --pr <number>
 ```
 
 Each configured agent's provider lane runs for real; one combined comment posts to the PR. Exit
@@ -81,7 +86,7 @@ after the verdict was computed.
 
 ## 4. Follow-up mode (CLI surface only)
 
-Re-running `review-gate --pr <number>` against a PR that already has a recorded `reviewed_sha` in
+Re-running `pantheon gate --pr <number>` against a PR that already has a recorded `reviewed_sha` in
 `.review-gate-state.json` reviews only `reviewed_sha..head` and tells the agent to read its own
 prior comment instead of re-auditing from scratch. The state only advances on a green or yellow
 outcome — a red or unverified run leaves it untouched, so the next attempt still retries from the
