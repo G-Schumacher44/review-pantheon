@@ -103,6 +103,16 @@ def sanitize_inline(s: Any) -> str:
 
       - Stringified via :func:`_jq_raw` first (jq-compatible scalar formatting — see that
         function's docstring), not a bare ``str()``.
+      - NUL (U+0000) dropped outright. Not a markdown/HTML concern like the rest of this
+        function — it's a bash-parity one: bash's ``$(...)`` command substitution cannot hold a
+        NUL byte and silently drops it (a documented bash limitation, not something
+        ``cli/lib/render_comment.sh``'s own code does explicitly), so a NUL smuggled into a
+        display field via a JSON ``\\u0000`` escape survives Python's render but is silently gone
+        from bash's — a real, verified byte-output divergence. Verified this is the ONLY C0
+        control character bash's pipeline drops: a fixture with ``\\u0001``/``\\u0007``/``\\u001b``
+        alongside a NUL showed every one of those three survive unchanged in bash's real output,
+        only the NUL vanished — so this is scoped to NUL specifically, not C0 controls broadly.
+        (Caught live — the repo's own self-hosted gate on this PR flagged this.)
       - Newlines collapsed to spaces (so a multi-line value can't fracture a table row/list item).
       - Pipes escaped (``\\|``), so a stray ``|`` can't fracture a markdown table row.
       - Backticks replaced with a straight quote — there is no backslash-escape for a backtick
@@ -111,8 +121,16 @@ def sanitize_inline(s: Any) -> str:
         tag in GitHub's comment renderer.
       - ``@`` replaced with the fullwidth lookalike ＠ (U+FF20), so a model's text can't page an
         arbitrary user/team via a real GitHub notification.
+
+    The machine tail (the nested "Raw verdict JSON" block, see this module's docstring) needs no
+    equivalent NUL handling: ``json.dumps`` always escapes control characters — including NUL —
+    as ``\\u0000``-style sequences regardless of ``ensure_ascii``, per the JSON spec, exactly like
+    jq's own non-``-r`` pretty-printer does for the bash machine tail. A raw NUL byte only ever
+    reaches bash's output via the ``-r`` (raw-string) mode this human-readable path uses; the
+    machine tail was never at risk.
     """
     s = _jq_raw(s)
+    s = s.replace("\x00", "")
     s = s.replace("\n", " ")
     s = s.replace("|", "\\|")
     s = s.replace("`", "'")
