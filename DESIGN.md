@@ -216,9 +216,13 @@ Per-tool support is tiered honestly, not uniformly:
 
 - **Claude Code (`--claude`)** — first-class. The persona files are already valid Claude Code
   subagent format (YAML frontmatter + body), so they're copied verbatim into
-  `.claude/agents/`. A generated `/counsel` command (`.claude/commands/counsel.md`) wraps
-  Socrates, Diogenes, and Plato into one invocation that runs Socrates first on an open
-  decision, the other two on a proposed shape, and synthesizes their verdicts.
+  `.claude/agents/`. Four canonical skills — `skills/{gate,counsel,spec-driven,design-contract}/SKILL.md`,
+  the single hand-maintained source, the same rule-4 shape applied to skills instead of personas —
+  are copied verbatim into `.claude/skills/<name>/SKILL.md`. A generated `/counsel` command
+  (`.claude/commands/counsel.md`) wraps Socrates, Diogenes, and Plato into one invocation that
+  runs Socrates first on an open decision, the other two on a proposed shape, and synthesizes
+  their verdicts; a generated `/gate` command (`.claude/commands/gate.md`) thin-invokes the
+  installed `gate` skill.
 - **Cursor, Codex, Gemini (`--cursor`/`--codex`/`--gemini`)** — best-effort, same posture the
   provider lanes already take with unverified CLIs: each tool's repo-level custom-command (or
   closest equivalent) convention was checked against that tool's own current official docs
@@ -232,7 +236,7 @@ Per-tool support is tiered honestly, not uniformly:
 
 | Tool | What's generated | Status |
 |---|---|---|
-| **Claude Code** (`--claude`) | All five personas copied verbatim into `.claude/agents/`, plus a generated `/counsel` command (`.claude/commands/counsel.md`) that runs Socrates first, then Diogenes + Plato, and synthesizes the verdicts. | **Verified, first-class.** The personas are already this format; `/counsel` follows the documented [slash-command](https://docs.claude.com/en/docs/claude-code/slash-commands) convention. |
+| **Claude Code** (`--claude`) | All five personas copied verbatim into `.claude/agents/`; the four canonical skills (`gate`, `counsel`, `spec-driven`, `design-contract`) copied verbatim into `.claude/skills/<name>/`; a generated `/counsel` command (`.claude/commands/counsel.md`) that runs Socrates first, then Diogenes + Plato, and synthesizes the verdicts; a generated `/gate` command (`.claude/commands/gate.md`) that thin-invokes the `gate` skill. | **Verified, first-class.** The personas are already this format; skills follow the documented [Skills](https://code.claude.com/docs/en/skills) `SKILL.md` convention (`.claude/skills/<name>/SKILL.md`, project or user scope); `/counsel` and `/gate` follow the documented [slash-command](https://docs.claude.com/en/docs/claude-code/slash-commands) convention. |
 | **Cursor** (`--cursor`) | All five personas as native subagents, `.cursor/agents/*.md` (frontmatter adapted to Cursor's schema). | **Verified against current official docs** ([cursor.com/docs/subagents](https://cursor.com/docs/subagents), Cursor 2.4+). Best-effort: not integration-tested against a live Cursor install in this repo's CI. |
 | **Codex CLI** (`--codex`) | All five personas as Codex Skills, `.agents/skills/<name>/SKILL.md`. | **Verified against current official docs** ([developers.openai.com/codex/skills](https://developers.openai.com/codex/skills)). Codex has no repo-level "custom command" convention, so Skills is used instead of inventing one. Best-effort: not integration-tested against a live Codex install. |
 | **Gemini CLI** (`--gemini`) | All five personas as custom commands, `.gemini/commands/<name>.toml`. | **Verified against official docs** ([custom-commands.md](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/custom-commands.md)). Best-effort: not integration-tested against a live Gemini CLI install. |
@@ -552,6 +556,10 @@ pass `bash -n` and shellcheck (already true via the repo-wide shellcheck job for
 
 ```
 agents/                    five canonical personas (the single source of truth)
+skills/                    four canonical Claude Code skills (gate, counsel, spec-driven,
+                           design-contract) — the single hand-maintained source, same shape as
+                           agents/ under rule 4; install.sh --claude copies them verbatim into
+                           .claude/skills/<name>/SKILL.md, never regenerated
 cli/review-gate            the runner: builds prompts, calls a provider lane, validates
                            verdicts, posts ONE combined PR comment (see "Combined PR comment"
                            below)
