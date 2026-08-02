@@ -180,6 +180,31 @@ does not meet that slice's exit bar, full stop.
   verdict decider — a missing, empty, unparseable, or type-mismatched signal degrades toward the
   safer failure in every module that produces one, the same rule
   [CONTRIBUTING.md](../CONTRIBUTING.md) already states for the bash implementation.
+- **JSON boundary: one module, catch-all posture, jq-output parity.** Every JSON parse and every
+  JSON serialize anywhere in this port goes through `pantheon/jqjson.py` — never a direct call to
+  Python's own `json.loads`/`json.dumps` from any other module. This is operator-decided policy,
+  not a style preference, learned the hard way on Slice 2: `pantheon/verdict.py` and
+  `pantheon/render.py` shipped three separate rounds of the same class of divergence — Python's
+  `json` module accepting the non-standard `NaN`/`Infinity`/`-Infinity` JSON-extension tokens and
+  keeping them as literal floats where jq coerces them; a lone UTF-16 surrogate that `json.loads`
+  accepts but real jq rejects at parse time; a >4300-digit integer raising a bare `ValueError` on
+  Python 3.11+ that `except json.JSONDecodeError` doesn't catch; a numeric literal like `1e400`
+  overflowing Python's IEEE double to `inf` where jq's arbitrary-precision number handling keeps
+  it exact — each found and patched as a one-off, one review round at a time, which never
+  converged. jq's real parse-success/parse-failure boundary is not shaped like Python's exception
+  hierarchy; enumerating that vocabulary is the anti-pattern this rule exists to stop repeating.
+  `pantheon.jqjson.loads` raises exactly one exception type (`JqParseError`) for ANY parse
+  failure, deliberately, and `pantheon.jqjson.dumps` forces `allow_nan=False` as a fail-loud
+  backstop. The module owns a second boundary too, found immediately after the first landed:
+  Python-VALUE-to-DISPLAY-TEXT — `pantheon.jqjson.jq_text` (jq `-r`'s raw-output stringification
+  of a parsed scalar, not Python's own `str()`/f-string interpolation) and `pantheon.jqjson.subst`
+  (bash's own `$(...)` command-substitution trailing-newline strip, a plain-bash semantic
+  applied wherever a caller's bash counterpart captured a jq extraction that way before an
+  emptiness check or final interpolation) — both bash-semantics shims live in this one module
+  alongside the parse/serialize half, not a second file. Every module below that touches JSON at
+  all names `pantheon.jqjson` as a dependency in its own entry; `tests/test-json-boundary.sh` is
+  the acceptance fixture — a mechanical (not reviewed-by-eye) assertion that no other module
+  reaches past either boundary.
 
 ## 6. Module layout
 
@@ -194,11 +219,21 @@ pantheon/cli.py          argparse entry point; `gate`/`counsel` subcommands; gat
                           test-setup-smoke.sh, test-bootstrap-release-e2e.sh, test-install.sh
                           (indirectly, via install.sh's own black-box shape).
 
+pantheon/jqjson.py        The one jq-compatible JSON parse/serialize boundary — see §5's "JSON
+                          boundary" bullet for why this exists as its own module. Every other
+                          module that parses or serializes JSON (verdict.py, render.py today;
+                          any future module that reads/writes JSON) depends on this one, never on
+                          Python's json module directly.
+                          Fixture suite: test-json-boundary.sh (a mechanical no-bare-json-call
+                          assertion, not a fixture-value suite like its siblings) plus regression
+                          fixtures folded into test-verdict-decision-python.sh and
+                          test-render-comment-python.sh (the two current consumers' own suites).
+
 pantheon/verdict.py       Trailing-JSON extraction (parse-anchored suffix scan), the five-agent
                           verdict vocabulary, type-strict validation of the invariant-read
                           surface, and the blocker invariant. Replaces: cli/lib/verdict.sh AND
                           action/decide_verdict.py — this is the module that fulfills §3's "one
-                          runtime, one rule."
+                          runtime, one rule." Depends on pantheon/jqjson.py for all JSON parsing.
                           Fixture suite: test-verdict-decision.sh (needs the black-box
                           equivalent per §4).
 
@@ -207,7 +242,7 @@ pantheon/render.py        The combined-PR-comment renderer: signal line, verdict
                           the deliberately-not-schema-validated fields get sanitized here, at
                           render time, same division of responsibility as today). Replaces:
                           cli/lib/render_comment.sh AND action/lib/combine_verdicts.sh's sourcing
-                          of it.
+                          of it. Depends on pantheon/jqjson.py for all JSON parsing/serializing.
                           Fixture suite: test-render-comment.sh (needs the black-box equivalent
                           per §4).
 
