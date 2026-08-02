@@ -517,6 +517,31 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
     issue/file/scenario contain the absolute repo root renders with every occurrence replaced by
     `<repo>`, including the machine tail, with a regression-direction guard proving the redaction
     is opt-in (via `PANTHEON_REPO_ROOT`) and doesn't fire when unset.
+  - **A live Codex review on this fix's own PR found THREE more instances of the same class —
+    code that implicitly assumed "the provider's cwd == the repo checkout" — after the first pass
+    above closed only the original exfiltration vector.** `pantheon.providers`' own module
+    docstring now carries the full enumeration ("The cwd contract, enumerated") every future
+    reader should consult instead of rediscovering these one review round at a time; summarized:
+    (1) claude's `--bare` flag also skips OAuth/system-keychain login (docs/SETUP.md's Way C,
+    `claude auth login`) — fixed by making `--bare` conditional on an explicit
+    `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` being present, never unconditional; (2) the
+    codex lane's own `codex exec` refuses to run at all outside a git repository — fixed with
+    `--skip-git-repo-check`, a real documented flag for exactly this, verified before adding;
+    (3) `execution=trusted` still launched the provider from the neutral scratch dir, breaking
+    the bare `git diff`/`git show`/`git log` commands `_build_prompt`'s own trusted-mode
+    instructions rely on — fixed by rooting the provider's cwd at `ctx.repo_root` itself under
+    that ONE tier (trusted mode is an explicit opt-in for content the operator already trusts,
+    never a fork PR, and already grants unrestricted Bash, so neutral-cwd protects nothing
+    additional there). The readonly-tier `--repo-root` wrapper-prefix interpolation was also
+    found unquoted (a checkout path containing whitespace would split into two argv tokens) —
+    fixed with `shlex.quote`. Verified in both directions, not just that these three regressions
+    are closed: `tests/test_providers.py`'s
+    `test_claude_cwd_stays_neutral_regardless_of_bare_flag_presence` and
+    `tests/test_cli_helpers.py`'s paired `test_run_agent_uses_neutral_cwd_under_readonly_execution`/
+    `test_run_agent_uses_repo_root_as_cwd_under_trusted_execution` both prove the readonly tier's
+    neutral-cwd protection is unaffected by these three fixes — a regression-fix that reopened the
+    original vulnerability would have been the real failure mode here, not just the three bugs
+    themselves.
 - **Every `gate.conf` key that shapes gate BEHAVIOR is base-pinned, not just `execution=` — an
   adversarial-review fix generalizing a class this repo's own docs/CLI.md had already disclosed
   as unfixed (issue #13, for `provider=` specifically).** `provider=`/`rules_file=`/`spec_file=`/
@@ -533,7 +558,15 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
   file is trusted as a judgment boundary — see the "Read → provenance matrix" table above for the
   current split. An explicit `--provider`/`--agents` CLI flag still wins, exactly like
   `--execution` already did over its own base-pinned default — this closes PR-controlled
-  CONFIGURATION, never an operator's own explicit, interactively-typed choice.
+  CONFIGURATION, never an operator's own explicit, interactively-typed choice. **The read itself
+  is routed through `pantheon.basepin.base_pinned_read` (symlink-safe), not a bare `git show` — a
+  P2 finding from a live Codex review on this fix's own PR**: a tracked SYMLINK at `gate.conf`
+  (a legitimate pattern — pointing at a shared `config/gate.conf`, say) would have a bare
+  `git show` return the link-target pathname text instead of content, silently reverting every
+  one of these five keys to its compiled-in default; this is a deliberate hardening beyond bash's
+  own historical gap here (bash's `execution=`-only read was never security-motivated to begin
+  with, just an oversight a single narrower key didn't happen to expose), matching the same
+  symlink-safety this repo's own rules/spec CONTENT reads already get (issue #6's class).
 - **`REVIEW_RULES.md`/`DESIGN.md` are now base-pinned on the vendored workflow (`action/review.yml`)
   too — an adversarial-review fix closing this surface's own disclosed exception, see "Surface
   differences" below.** This step's "Build prompt" step used to only PRESENCE-CHECK these two

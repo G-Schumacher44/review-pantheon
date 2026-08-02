@@ -287,18 +287,33 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
     ``load_state``) and takes the identical "leave it alone, warn loudly" branch on any genuine
     parse failure or non-object content.
 
-    **An EMPTY (or whitespace-only) existing file self-heals — mirrors bash exactly, see
-    :func:`load_state_or_raise`'s own docstring for the live jq verification.** Real jq's write
-    query behaves identically on empty input to its read query: ``printf '' | jq --arg pr 42
-    --arg sha abc '.[$pr] = {"reviewed_sha": $sha}'`` exits 0 and produces
-    ``{"42":{"reviewed_sha":"abc"}}`` — jq auto-vivifies from an implicit ``null``/no-document
-    starting point, the SAME "no prior state" default this function's own ``{}`` fallback gives
-    an empty file below. Pre-fix, this function routed an empty existing file through
-    ``jqjson.loads("")`` like any other content (a genuine :class:`~pantheon.jqjson.JqParseError`
-    in Python, unlike real jq's empty-input handling), taking the warn-and-leave-untouched branch
-    forever — since this function never overwrites content it judged malformed, an empty state
-    file could never self-repair, diverging from bash's own graceful recovery on the identical
-    input shape.
+    **An EMPTY (or whitespace-only) existing file is handled specially — but this is a bash
+    QUIRK this function replicates exactly, NOT a self-heal that records anything, corrected by a
+    live Codex finding on this PR's own review after an earlier version of this fix got it
+    wrong.** The distinction that matters: bash's write passes ``$state_file`` to jq as a
+    FILENAME ARGUMENT, never piped via stdin — ``jq --arg pr 42 --arg sha abc '.[$pr] =
+    {"reviewed_sha": $sha}' <empty-file>`` (verified live, an actual file, not ``printf '' |
+    jq ...``) reads ZERO JSON documents from that empty file and so runs the transform over
+    NOTHING, producing ZERO BYTES of output — not the auto-vivified ``{"42":{"reviewed_sha":
+    "abc"}}`` an earlier version of this docstring incorrectly claimed. That empty output gets
+    ``mv``'d over ``$state_file``: the file ends up EMPTY again, recording NOTHING, even though
+    the operation itself "succeeds" (exit 0). This function replicates that exactly — an empty
+    existing file stays empty, no entry is written, `True` is still returned (matching bash's own
+    exit-0 shape for this case) — rather than "improving" it into a working self-heal, per
+    docs/PYTHON-PORT.md's "byte-compatible... not a redesign" charter. This is UNRELATED to
+    :func:`load_state_or_raise`'s own READ-side self-heal (that one genuinely treats empty
+    content as "no prior state" and is correct as documented there) — the two sides simply both
+    happen to degrade to "empty" for the same underlying jq-empty-file-argument reason, not
+    because they share behavior by design. Before this correction, this function's own earliest
+    version routed an empty existing file through ``jqjson.loads("")`` like any other content (a
+    genuine :class:`~pantheon.jqjson.JqParseError` in Python, unlike real jq's empty-input
+    handling), printing a spurious "not valid JSON" warning bash never emits for this case (bash
+    prints nothing and exits 0 here, as this docstring's own live verification above shows) and
+    leaving the file untouched — the FILE outcome (stays empty) was accidentally close to
+    correct, but the phantom warning and the (pre-CRITICAL-3-fix) discarded return value were
+    not. A LATER intermediate version of this same fix over-corrected the other way — actually
+    WRITING a fresh entry for an empty existing file — which is the version the live Codex
+    finding above caught and this docstring now documents the correction of.
 
     **A write FAILURE for a green/yellow outcome — the write this function DID attempt — is now
     fail-closed to the CALLER via this function's own boolean return, correcting a docstring claim
@@ -360,29 +375,59 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
         return False
 
     if raw.strip() == "":
-        # Self-heal, matching bash's own write-side behavior on empty input — see this
-        # function's own docstring for the live jq verification.
-        state: dict = {}
-    else:
+        # A live Codex finding on this PR's own review: an EARLIER version of this branch
+        # treated empty existing content the same as an empty NEW file — "self-heal to {}, then
+        # record the new entry" — which does NOT match bash's own real behavior for this exact
+        # case, verified live and corrected here. bash's write is
+        # `jq --arg pr ... '.[$pr] = {...}' "$state_file" > "$tmp_state"` — critically,
+        # "$state_file" is a FILENAME ARGUMENT to jq, not piped via stdin, and that distinction
+        # matters here: `jq '<any filter>' <empty-file-as-argument>` reads ZERO JSON documents
+        # from that empty file and so runs the filter over NOTHING, producing ZERO BYTES of
+        # output — confirmed live (`: > f; jq '.x=1' f` prints nothing, exit 0) — which then
+        # gets `mv`'d over `$state_file`: the file ends up EMPTY again, recording NOTHING, even
+        # though the whole operation "succeeds" (exit 0). This is a real, if unintuitive, quirk
+        # of bash's own frozen implementation — this port's own charter is byte-compatible
+        # behavior parity (docs/PYTHON-PORT.md: "a language port of the same contract, not a
+        # redesign of it"), so it is replicated here exactly, not silently "improved" into
+        # actually recording the entry the way an earlier version of this fix did. The READ side
+        # (:func:`load_state_or_raise`) is NOT affected by this correction — bash's read query
+        # (`jq -r ... "$STATE_FILE"`, also a filename argument) independently produces the
+        # identical empty-output/exit-0 shape for a genuinely empty file, which is exactly what
+        # justifies treating it as "no prior state" there; the two sides simply happen to both
+        # degrade to "empty," for the same jq-semantics reason, not because they share behavior
+        # by design.
         try:
-            state = jqjson.loads(raw)
-        except jqjson.JqParseError as e:
+            state_dir = os.path.dirname(os.path.abspath(state_file)) or "."
+            fd, empty_tmp_path = tempfile.mkstemp(prefix=".review-gate-state-", suffix=".json.tmp", dir=state_dir)
+            os.close(fd)  # write NOTHING — matches jq's own empty-in/empty-out behavior exactly
+            os.replace(empty_tmp_path, state_file)
+        except OSError as e:
             print(
-                f"pantheon: warning: comment posted but failed to update {state_file} — its "
-                f"existing content is not valid JSON ({e}); leaving it untouched rather than "
-                "overwriting it with a fresh, empty state",
+                f"pantheon: warning: comment posted but failed to update {state_file}: {e}",
                 file=sys.stderr,
             )
             return False
+        return True
 
-        if not isinstance(state, dict):
-            print(
-                f"pantheon: warning: comment posted but failed to update {state_file} — its "
-                "existing content is not a JSON object; leaving it untouched rather than "
-                "overwriting it with a fresh, empty state",
-                file=sys.stderr,
-            )
-            return False
+    try:
+        state = jqjson.loads(raw)
+    except jqjson.JqParseError as e:
+        print(
+            f"pantheon: warning: comment posted but failed to update {state_file} — its "
+            f"existing content is not valid JSON ({e}); leaving it untouched rather than "
+            "overwriting it with a fresh, empty state",
+            file=sys.stderr,
+        )
+        return False
+
+    if not isinstance(state, dict):
+        print(
+            f"pantheon: warning: comment posted but failed to update {state_file} — its "
+            "existing content is not a JSON object; leaving it untouched rather than "
+            "overwriting it with a fresh, empty state",
+            file=sys.stderr,
+        )
+        return False
 
     state[str(pr_number)] = {"reviewed_sha": head_sha}
 

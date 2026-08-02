@@ -103,13 +103,20 @@ allowed ``Read`` tool call. Fixed with defense in depth, all three layers, none 
      ``pantheon.cli._build_prompt``) — exactly the design's stated intent (the wrapper is the
      ONLY sanctioned path back to the tree under ``readonly``), now actually true for the
      provider's OWN startup-time behavior too, not just its later tool calls.
-  2. **``--bare`` on the claude lane (the only lane with a real, documented flag for this — see
-     :func:`_claude`'s own docstring).** Verified against Claude Code's current official headless
-     docs (code.claude.com/docs/en/headless): ``--bare`` "reduce[s] startup time by skipping
+  2. **``--bare`` on the claude lane, CONDITIONALLY (the only lane with a real, documented flag
+     for this — see :func:`_claude`'s own docstring for the full conditional and why it isn't
+     unconditional).** Verified against Claude Code's current official headless docs
+     (code.claude.com/docs/en/headless): ``--bare`` "reduce[s] startup time by skipping
      auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md" — the
      exact five vectors this finding named, in ONE documented flag, layered on top of (never
-     instead of) the neutral-cwd fix above (belt-and-braces: even if a future code path
-     regressed the cwd back toward the checkout, ``--bare`` still refuses local discovery).
+     instead of) the neutral-cwd fix above. A live Codex review on this PR caught that an
+     unconditional ``--bare`` is a real usability regression, not a security one: the same
+     official doc discloses it ALSO skips OAuth/system-keychain login (the CLI lane's documented
+     primary auth path, docs/SETUP.md's Way C ``claude auth login`` — no env var at all), so
+     :func:`_claude` now passes it only when an explicit ``ANTHROPIC_API_KEY``/
+     ``CLAUDE_CODE_OAUTH_TOKEN`` is present, falling back to normal (keychain-capable) startup
+     otherwise — the neutral cwd itself stays unconditional either way, so this narrows an
+     ADDITIONAL hardening layer, not the primary fix.
      ``codex``/``gemini``/``cursor-agent`` have **no equivalent documented flag** as of this
      writing (researched against each CLI's current official docs before writing this — not
      assumed): this is a disclosed, honest residual exposure for those three best-effort lanes,
@@ -126,12 +133,69 @@ allowed ``Read`` tool call. Fixed with defense in depth, all three layers, none 
      credential flow without closing anything (an execution-bearing variable like
      ``NODE_OPTIONS``/``LD_PRELOAD`` was never on this allowlist in the first place — that closure
      already existed, per round 3 above).
+
+**The cwd contract, enumerated — every behavior anywhere in this port that used to implicitly
+assume "the provider's own process cwd == the repo checkout", decided explicitly, not
+rediscovered one Codex round at a time.** A live Codex review on the round that introduced the
+neutral cwd above found THREE more instances of this exact assumption (P1 on the claude lane's
+own auth, P1 on the codex lane's own repo-presence check, P1 on trusted-mode's own command
+rooting) after the first pass only closed the ORIGINAL exfiltration vector — this is the
+enumeration that review asked for, so the next reader sees the contract instead of re-deriving
+it finding by finding. Each entry: the behavior, whether it genuinely depends on cwd == checkout,
+and how it's resolved.
+
+  - **claude's startup-time config/MCP/hooks auto-discovery** — YES, the original vulnerability.
+    Resolved: neutral cwd, unconditional under the ``readonly`` tier (round 1 above).
+  - **claude's OAuth/system-keychain login** (``claude auth login``, docs/SETUP.md's Way C) — NO,
+    keychain auth is tied to the user account, not cwd; broken instead by ``--bare``'s OWN
+    documented side effect (skips stored-credential lookup), triggered as a consequence of this
+    fix, not a cwd dependency itself. Resolved: ``--bare`` is now conditional on an explicit
+    ``ANTHROPIC_API_KEY``/``CLAUDE_CODE_OAUTH_TOKEN`` being present (see :func:`_claude`) — absent
+    either, Claude Code's own normal (keychain-capable) startup runs instead.
+  - **codex's non-interactive "am I in a git repository" guard** — YES, `codex exec` refuses to
+    run at all outside a git repository. Resolved: ``--skip-git-repo-check``, unconditional,
+    since this lane always launches from the neutral cwd (see :func:`_codex`).
+  - **gemini/cursor-agent's own config auto-discovery** — disclosed, unverified; no documented
+    opt-out flag exists for either CLI as of this writing (checked, not assumed). Left as the
+    honest residual exposure round 2 above and DESIGN.md's "Security posture" already disclose —
+    narrowed (nothing repo-local in a neutral scratch dir to discover) but not eliminated.
+  - **Trusted-mode's own bare ``git diff``/``git show``/``git log`` instructions** — YES, those
+    are relative-to-cwd commands, not ``-C``-scoped. Resolved: trusted mode roots the provider's
+    cwd at ``ctx.repo_root`` itself, restoring the pre-fix behavior for this ONE tier only (see
+    ``pantheon.cli._run_agent``'s own ``provider_cwd`` selection) — safe because trusted mode is
+    an explicit opt-in for content the operator ALREADY trusts (never a fork PR — DESIGN.md's
+    "Security posture") and already grants full, unrestricted Bash, so neutral-cwd protects
+    nothing additional there in the first place.
+  - **readonly tier's Read/Grep/Glob tool calls against the checkout** — YES, those tools take a
+    path argument, not implicitly "the cwd". Resolved: the prompt's own Run-context block now
+    advertises the repo root's ABSOLUTE path explicitly (``pantheon.cli._build_prompt``), paired
+    with an instruction that findings must still cite repo-RELATIVE paths (belt-and-suspenders on
+    top of ``pantheon.render``'s own mechanical redaction, see that module's own docstring).
+  - **readonly tier's readonly-git-wrapper invocation** — YES, the wrapper used to resolve the
+    repo via :func:`os.getcwd`. Resolved: ``--repo-root <repo_root>``, shell-quoted
+    (:func:`shlex.quote`), baked into the fixed Bash-tool permission prefix itself (see
+    ``pantheon.cli._wrapper_invocation`` and ``pantheon.execution._wrapper_cli``).
+  - **``pantheon.cli``'s OWN gate.conf/rules/spec reads** (base-pinned or working-tree) — NO,
+    these run in the TRUSTED orchestrator process itself (``pantheon.cli``'s own ``_git``/
+    ``basepin`` calls), never inside a launched provider subprocess at all — repo_root/cwd are
+    already passed EXPLICITLY to every one of these calls, unaffected by this whole fix.
+  - **PATH resolution for the provider CLI binary itself** (``_filtered_path``/``_resolve_cli``)
+    — NO, computed in the TRUSTED orchestrator process before the child is ever spawned;
+    ``_filtered_path`` already excludes ``os.getcwd()``/``repo_root`` explicitly, independent of
+    whatever the CHILD's own eventual cwd turns out to be.
+
+Every entry above is now a deliberate, documented decision — either the repo root is passed
+EXPLICITLY (the wrapper, Read/Grep/Glob, codex's repo-check opt-out), the behavior is correctly
+rootless (PATH resolution, ``pantheon.cli``'s own config reads), or the gap is an honestly
+disclosed residual (gemini/cursor). None of these should need rediscovering by a future review
+the way three of them were on this one.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -203,12 +267,15 @@ def default_allowed_tools(repo_root: str | None = None) -> str:
     literal — a CRITICAL fix (adversarial review), mirroring ``pantheon.cli``'s own
     ``_wrapper_invocation()`` exactly (see that function's own docstring for the full rationale:
     providers no longer launch with the repo checkout as their own cwd, so the wrapper needs the
-    real repo root told to it explicitly). Optional (default ``None``, omitting the flag
-    entirely) so this function's existing zero-argument call shape keeps working for genuinely
-    standalone use (this module's own ``python -m pantheon.providers run ...`` CLI, invoked with
-    no ``repo-root`` positional) — the one case where no repo root is actually known yet."""
+    real repo root told to it explicitly), INCLUDING shell-quoting it (:func:`shlex.quote`) — a
+    P2 finding from a live Codex review on ``pantheon.cli``'s own copy of this same embedding,
+    fixed identically here so this fallback doesn't reopen the same whitespace-in-checkout-path
+    bug for standalone use. Optional (default ``None``, omitting the flag entirely) so this
+    function's existing zero-argument call shape keeps working for genuinely standalone use (this
+    module's own ``python -m pantheon.providers run ...`` CLI, invoked with no ``repo-root``
+    positional) — the one case where no repo root is actually known yet."""
     candidate = execution.resolve_console_script(_WRAPPER_SCRIPT_NAME)
-    repo_root_suffix = f" --repo-root {repo_root}" if repo_root else ""
+    repo_root_suffix = f" --repo-root {shlex.quote(repo_root)}" if repo_root else ""
     if candidate is not None:
         return f"Read,Grep,Glob,Bash({candidate} wrapper{repo_root_suffix} *)"
     print(
@@ -517,18 +584,38 @@ def _claude(
     documented to "reduce startup time by skipping auto-discovery of hooks, skills, plugins, MCP
     servers, auto memory, and CLAUDE.md" — closing, in one flag, every one of the config-discovery
     vectors this module's own docstring names, layered on top of (never instead of) launching from
-    a neutral ``cwd`` (see :func:`_run`'s own docstring). The same doc discloses that bare mode
-    skips OAuth/system-keychain login (only sees credentials passed explicitly) — a non-issue
-    here, since :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` already forwards ``ANTHROPIC_API_KEY``/
-    ``CLAUDE_CODE_OAUTH_TOKEN`` as explicit env vars, exactly the credential-passing shape bare
-    mode is documented to still honor."""
+    a neutral ``cwd`` (see :func:`_run`'s own docstring).
+
+    **Passed CONDITIONALLY, only when an explicit credential is present — a P1 finding from a
+    live Codex review on this PR, correcting an earlier version's own docstring claim that
+    forwarding ``ANTHROPIC_API_KEY``/``CLAUDE_CODE_OAUTH_TOKEN`` made this "a non-issue".** That
+    claim assumed a token env var is always set; it isn't for the CLI lane's documented primary
+    auth path (docs/SETUP.md's Way C — ``claude auth login``, which stores credentials in the
+    system keychain, no env var at all). The SAME official doc that documents ``--bare`` also
+    discloses it skips OAuth/system-keychain login entirely, "only sees credentials you pass
+    explicitly" — an unconditional ``--bare`` would silently turn the CLI lane's default,
+    documented, interactively-authenticated setup into UNVERIFIED for every run, a real
+    usability regression, not a security one. Resolved by checking for an explicit credential
+    (either of the two env vars this module's own :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` already
+    forwards) before adding the flag: present -> ``--bare`` (the hardened path, appropriate for
+    unattended/CI use, which is what an explicit token implies); absent -> omit it, falling back
+    to Claude Code's own normal startup (stored/keychain auth still works, matching this lane's
+    pre-fix behavior for that one case). This does NOT reopen CRITICAL-1's own vulnerability
+    either way: the neutral ``cwd`` (layer 1 of that fix, see :func:`_run`'s own docstring) is
+    unconditional regardless of ``--bare`` — nothing repo-local exists in the scratch directory
+    for a provider's own startup-time discovery to find, credential source aside — ``--bare`` is
+    genuinely redundant defense-in-depth on top of that, not the primary control, so making it
+    conditional narrows an ADDITIONAL hardening layer, not the fix itself."""
     claude_bin = _resolve_cli("claude", repo_root)
     if claude_bin is None:
         raise ProviderError("'claude' CLI not found on PATH")
 
     prompt = _read_prompt(prompt_file)
     tools = allowed_tools or default_allowed_tools(repo_root)
-    argv = [claude_bin, "--bare", "-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
+    argv = [claude_bin]
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        argv.append("--bare")
+    argv += ["-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
     if model:
         argv += ["--model", model]
     return _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
@@ -548,13 +635,24 @@ def _codex(
     docs before landing this fix, not assumed) — this lane's own repo-local config/AGENTS.md
     auto-discovery is a disclosed, honest residual exposure the neutral ``cwd`` below narrows
     (nothing repo-local for it to discover in a scratch directory) but doesn't eliminate the way
-    an explicit flag would; see this module's own docstring and DESIGN.md's "Security posture"."""
+    an explicit flag would; see this module's own docstring and DESIGN.md's "Security posture".
+
+    ``--skip-git-repo-check`` — a P1 finding from a live Codex review on this PR: `codex exec`
+    refuses to run at all outside a git repository unless this flag is passed (verified against
+    `codex exec --help` and Codex CLI's own current docs — "Not inside a trusted directory and
+    --skip-git-repo-check was not specified"). Since this lane now ALWAYS launches from the
+    neutral scratch ``cwd`` (CRITICAL-1's own fix, deliberately never a git repository — see this
+    module's own docstring), omitting this flag would silently break every codex-configured gate
+    run, landing on UNVERIFIED for every PR rather than actually reviewing anything. The flag
+    only bypasses codex's own non-interactive repository GUARD for this one invocation — it does
+    not widen its sandbox, grant additional trust, or change anything this module's own
+    PATH-filtering/env-allowlist/process-isolation controls."""
     codex_bin = _resolve_cli("codex", repo_root)
     if codex_bin is None:
         raise ProviderError("'codex' CLI not found on PATH")
 
     prompt = _read_prompt(prompt_file)
-    argv = [codex_bin, "exec"]
+    argv = [codex_bin, "exec", "--skip-git-repo-check"]
     if model:
         argv += ["--model", model]
     argv.append("-")

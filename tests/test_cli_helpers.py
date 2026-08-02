@@ -16,6 +16,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import pantheon.cli as cli_module
 from pantheon.cli import (
     BasePinnedGateConfig,
@@ -208,6 +210,149 @@ def test_load_base_pinned_gate_conf_round_trips_non_ascii_bytes(tmp_path) -> Non
     repo_root, base_sha = _git_fixture_repo(tmp_path, "repo6", "rules_file=règles/日本語.md\n")
     cfg = _load_base_pinned_gate_conf(repo_root, base_sha)
     assert cfg.rules_file == "règles/日本語.md"
+
+
+def test_load_base_pinned_gate_conf_resolves_a_symlinked_gate_conf(tmp_path) -> None:
+    # A P2 finding from a live Codex review on this PR: gate.conf's own read went through a bare
+    # `git show`, never pantheon.basepin's symlink-safe reader (unlike the rules/spec CONTENT
+    # this same function base-pins) -- a tracked SYMLINK at "gate.conf" (git stores one as a
+    # mode-120000 blob whose "content" IS the link-target string) would have `git show` return
+    # that pathname text instead of the target file's real content, so _parse_conf_text found no
+    # key=value lines and every base-pinned key silently reverted to its compiled-in default.
+    import subprocess as sp
+
+    repo = tmp_path / "repo-symlinked-gate-conf"
+    repo.mkdir()
+    (repo / "config").mkdir()
+    (repo / "config" / "gate.conf").write_text("provider=gemini\nagents=socrates diogenes plato\n")
+    (repo / "gate.conf").symlink_to("config/gate.conf")
+    (repo / "README.md").write_text("fixture\n")
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    sp.run(["git", "add", "-A"], cwd=repo, check=True)
+    sp.run(["git", "commit", "-q", "-m", "initial (gate.conf is a symlink)"], cwd=repo, check=True)
+    base_sha = sp.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    cfg = _load_base_pinned_gate_conf(str(repo), base_sha)
+
+    assert cfg.provider == "gemini", (
+        f"expected the symlinked gate.conf's real content to resolve (provider=gemini), got "
+        f"'{cfg.provider}' — a bare git show would have returned the link-target pathname "
+        "instead of content, silently reverting every key to its default"
+    )
+    assert cfg.agents == "socrates diogenes plato"
+
+
+def test_load_base_pinned_gate_conf_refuses_a_gate_conf_symlink_escaping_the_repo(tmp_path) -> None:
+    import subprocess as sp
+
+    repo = tmp_path / "repo-escaping-gate-conf-symlink"
+    repo.mkdir()
+    (repo / "gate.conf").symlink_to("../../../../../../etc/passwd")
+    (repo / "README.md").write_text("fixture\n")
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    sp.run(["git", "add", "-A"], cwd=repo, check=True)
+    sp.run(["git", "commit", "-q", "-m", "gate.conf symlink escapes the repo root"], cwd=repo, check=True)
+    base_sha = sp.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    with pytest.raises(cli_module.GateError, match="refused to resolve gate.conf"):
+        _load_base_pinned_gate_conf(str(repo), base_sha)
+
+
+# ---------------------------------------------------------------------------------------------
+# Provider launch cwd: readonly -> neutral scratch dir, trusted -> the repo checkout itself — a
+# P1 finding from a live Codex review on this PR, a real correctness regression: under
+# execution=trusted, _build_prompt tells the agent to run plain `git diff`/`git show`/`git log`
+# against the checkout, and trusted mode's whole DESIGN.md-documented purpose is running the
+# repo's OWN verification in place. Launching the provider from the neutral cwd under trusted
+# mode broke that — those bare commands would target a directory that isn't a git repo at all.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_run_agent_uses_neutral_cwd_under_readonly_execution(tmp_path, monkeypatch) -> None:
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "artemis.md").write_text("---\nname: artemis\n---\nBody.\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_agents_dir", lambda: agents_dir)
+    monkeypatch.setattr(cli_module, "_base_pinned_text", lambda ctx, path: (None, False))
+
+    captured: dict = {}
+
+    def fake_provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None):
+        captured["neutral_cwd"] = neutral_cwd
+        return '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"ok"}'
+
+    monkeypatch.setattr(cli_module.providers, "provider_run", fake_provider_run)
+
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    neutral = tmp_path / "neutral-scratch"
+    neutral.mkdir()
+    repo_root = str(tmp_path / "repo-checkout")
+
+    ctx = cli_module.GateContext(
+        repo_root=repo_root,
+        pr_number="42",
+        pr_title="x",
+        diff_range="a...b",
+        base_ref="main",
+        base_sha="deadbeef",
+        execution_tier="readonly",
+        rules_file="",
+        spec_file="",
+    )
+    cli_module._run_agent(
+        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash(x *)", 60.0, str(neutral)
+    )
+
+    assert captured["neutral_cwd"] == str(neutral)
+    assert captured["neutral_cwd"] != repo_root
+
+
+def test_run_agent_uses_repo_root_as_cwd_under_trusted_execution(tmp_path, monkeypatch) -> None:
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "artemis.md").write_text("---\nname: artemis\n---\nBody.\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_agents_dir", lambda: agents_dir)
+    monkeypatch.setattr(cli_module, "_base_pinned_text", lambda ctx, path: (None, False))
+
+    captured: dict = {}
+
+    def fake_provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None):
+        captured["neutral_cwd"] = neutral_cwd
+        return '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"ok"}'
+
+    monkeypatch.setattr(cli_module.providers, "provider_run", fake_provider_run)
+
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    neutral = tmp_path / "neutral-scratch"
+    neutral.mkdir()
+    repo_root = str(tmp_path / "repo-checkout")
+
+    ctx = cli_module.GateContext(
+        repo_root=repo_root,
+        pr_number="42",
+        pr_title="x",
+        diff_range="a...b",
+        base_ref="main",
+        base_sha="deadbeef",
+        execution_tier="trusted",
+        rules_file="",
+        spec_file="",
+    )
+    cli_module._run_agent(
+        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash", 60.0, str(neutral)
+    )
+
+    # Under trusted mode, the provider's own cwd must be the REAL checkout -- _build_prompt's own
+    # trusted-mode instructions tell the agent to run plain `git diff`/`git show`/`git log`
+    # against it, which would fail entirely against the neutral scratch dir (not a git repo).
+    assert captured["neutral_cwd"] == repo_root
+    assert captured["neutral_cwd"] != str(neutral)
 
 
 # ---------------------------------------------------------------------------------------------

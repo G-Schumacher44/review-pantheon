@@ -88,6 +88,8 @@ def _install_fake_popen(monkeypatch, **fake_proc_kwargs):
 
 def test_claude_argv_shape(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     captured = _install_fake_popen(monkeypatch, stdout='{"ok":true}')
 
     out = providers.provider_run("claude", "sonnet", prompt_file, "Read,Grep,Glob,Bash(/wrap *)")
@@ -109,6 +111,73 @@ def test_claude_argv_shape(monkeypatch, prompt_file) -> None:
     assert captured["kwargs"]["env"] is not None
     assert captured["kwargs"]["shell"] is False
     assert captured["kwargs"]["start_new_session"] is True
+
+
+# ---------------------------------------------------------------------------------------------
+# --bare's conditional presence — a P1 finding from a live Codex review on this PR: an earlier
+# version passed --bare unconditionally, which (per Claude Code's own official headless docs)
+# ALSO skips OAuth/system-keychain login — a real usability regression for the CLI lane's
+# documented primary auth path (docs/SETUP.md's Way C, `claude auth login`, no env var at all).
+# --bare must appear only when an explicit credential env var is present.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_claude_argv_includes_bare_when_explicit_api_key_present(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+    assert "--bare" in captured["argv"]
+
+
+def test_claude_argv_includes_bare_when_explicit_oauth_token_present(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test-456")
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+    assert "--bare" in captured["argv"]
+
+
+def test_claude_argv_omits_bare_when_no_explicit_credential_present(monkeypatch, prompt_file) -> None:
+    # The locally-authenticated-session case the Codex finding names: no explicit token env var
+    # (e.g. `claude auth login`'s stored keychain credential instead) -- --bare must be absent so
+    # Claude Code's own normal (keychain-capable) startup still works.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+    assert "--bare" not in captured["argv"]
+
+
+def test_claude_cwd_stays_neutral_regardless_of_bare_flag_presence(monkeypatch, prompt_file) -> None:
+    # "Prove both directions": making --bare conditional (the usability fix above) must NOT
+    # reopen CRITICAL-1's own vulnerability (a provider's startup-time config/MCP/hooks
+    # auto-discovery reaching the PR checkout). The neutral cwd is layer 1 of that fix and is
+    # UNCONDITIONAL -- it does not depend on whether --bare fires. Proven here by checking the
+    # actual Popen cwd kwarg (not just the argv) across both the with-credential and
+    # without-credential cases: in neither case does cwd ever become repo_root.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    captured_no_bare = _install_fake_popen(monkeypatch)
+    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
+    assert "--bare" not in captured_no_bare["argv"]
+    assert captured_no_bare["kwargs"]["cwd"] == "/some/scratch/dir"
+    assert captured_no_bare["kwargs"]["cwd"] != "/some/repo/root"
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+    captured_with_bare = _install_fake_popen(monkeypatch)
+    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
+    assert "--bare" in captured_with_bare["argv"]
+    assert captured_with_bare["kwargs"]["cwd"] == "/some/scratch/dir"
+    assert captured_with_bare["kwargs"]["cwd"] != "/some/repo/root"
 
 
 def test_claude_omits_model_flag_when_empty(monkeypatch, prompt_file) -> None:
@@ -135,10 +204,24 @@ def test_codex_pipes_prompt_via_stdin(monkeypatch, prompt_file) -> None:
     captured = _install_fake_popen(monkeypatch)
 
     providers.provider_run("codex", "o3", prompt_file, "")
-    assert captured["argv"] == ["/usr/bin/codex", "exec", "--model", "o3", "-"]
+    assert captured["argv"] == ["/usr/bin/codex", "exec", "--skip-git-repo-check", "--model", "o3", "-"]
     # stdin is piped (not inherited) whenever input_text is given — Popen's own stdin= kwarg,
     # not an `input=` kwarg (that belongs to communicate(), not Popen's constructor).
     assert captured["kwargs"]["stdin"] == subprocess.PIPE
+
+
+def test_codex_argv_always_includes_skip_git_repo_check(monkeypatch, prompt_file) -> None:
+    # A live Codex-review finding (P1) on this PR's own security round: `codex exec` refuses to
+    # run at all outside a git repository unless this flag is passed — and this lane now ALWAYS
+    # launches from a neutral, deliberately-not-a-git-repo scratch cwd (CRITICAL-1's own fix), so
+    # omitting this flag would silently turn every codex-configured gate run into UNVERIFIED.
+    # Checked with no model given too, to prove the flag isn't accidentally coupled to --model.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("codex"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("codex", "", prompt_file, "")
+    assert "--skip-git-repo-check" in captured["argv"]
+    assert captured["argv"].index("--skip-git-repo-check") == captured["argv"].index("exec") + 1
 
 
 def test_gemini_argv_shape(monkeypatch, prompt_file) -> None:

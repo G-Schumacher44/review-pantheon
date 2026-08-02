@@ -379,24 +379,69 @@ def test_load_state_or_raise_still_raises_on_genuinely_malformed_non_empty_conte
         state.load_state_or_raise(str(state_file))
 
 
-def test_update_state_self_heals_an_empty_existing_file(tmp_path) -> None:
+def test_update_state_on_an_empty_existing_file_matches_bashs_real_no_record_quirk(tmp_path) -> None:
+    # Corrected per a live Codex finding on this PR's own review: an EARLIER version of this fix
+    # made update_state() populate a fresh entry for a genuinely empty existing file -- which
+    # does NOT match bash's own real behavior. bash's write passes $state_file to jq as a
+    # FILENAME ARGUMENT (not piped via stdin); `jq '<any filter>' <empty-file>` reads zero JSON
+    # documents from an empty file argument and so produces ZERO BYTES of output regardless of
+    # the filter -- confirmed live below -- which then gets `mv`'d over $state_file: the file
+    # ends up EMPTY again, recording NOTHING, even though the operation "succeeds" (exit 0).
+    # This port replicates that exactly (docs/PYTHON-PORT.md's "byte-compatible... not a
+    # redesign" charter), not "improves" on it.
     state_file = tmp_path / "state.json"
     state_file.write_text("")
 
     ok = state.update_state("green", "42", "deadbeefcafe", str(state_file), str(tmp_path))
 
-    assert ok is True
-    assert state.reviewed_sha_for(state.load_state(str(state_file)), "42") == "deadbeefcafe"
+    assert ok is True  # the operation "succeeds" -- matches bash's own exit-0 shape
+    assert state_file.read_text() == ""  # but records NOTHING -- the file stays empty
+    assert state.reviewed_sha_for(state.load_state(str(state_file)), "42") is None
 
 
-def test_update_state_self_heals_a_whitespace_only_existing_file(tmp_path) -> None:
+def test_update_state_on_a_whitespace_only_existing_file_matches_bashs_real_no_record_quirk(tmp_path) -> None:
     state_file = tmp_path / "state.json"
     state_file.write_text("  \n")
 
     ok = state.update_state("green", "42", "deadbeefcafe", str(state_file), str(tmp_path))
 
     assert ok is True
-    assert state.reviewed_sha_for(state.load_state(str(state_file)), "42") == "deadbeefcafe"
+    assert state_file.read_text() == ""
+    assert state.reviewed_sha_for(state.load_state(str(state_file)), "42") is None
+
+
+def test_update_state_empty_file_write_matches_real_jq_live(tmp_path) -> None:
+    # Live cross-check against the actual jq binary, in the EXACT invocation shape bash's own
+    # update_review_gate_state() uses: the state file passed as a FILENAME ARGUMENT (never piped
+    # via stdin) -- confirmed live these are NOT interchangeable for this specific empty-input
+    # case (this is the distinction the Codex finding above turned on).
+    import shutil
+    import subprocess
+
+    jq_bin = shutil.which("jq")
+    if jq_bin is None:
+        pytest.skip("jq not installed in this environment — cannot cross-check live")
+
+    empty_file = tmp_path / "empty-state.json"
+    empty_file.write_text("")
+
+    result = subprocess.run(
+        [
+            jq_bin,
+            "--arg",
+            "pr",
+            "42",
+            "--arg",
+            "sha",
+            "deadbeefcafe",
+            '.[$pr] = {"reviewed_sha": $sha}',
+            str(empty_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""  # zero bytes of output for an empty FILE-argument input
 
 
 def test_update_state_still_refuses_genuinely_malformed_non_empty_existing_content(tmp_path, capsys) -> None:
@@ -410,11 +455,12 @@ def test_update_state_still_refuses_genuinely_malformed_non_empty_existing_conte
     assert "not valid JSON" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("real_jq_input", ["", "   \n"])
-def test_empty_state_self_heal_matches_real_jq_live(real_jq_input: str) -> None:
-    # Live cross-check against the actual jq binary, when available — proves the self-heal isn't
-    # just an internal judgment call but genuinely matches real jq's own exit-0/no-output
-    # behavior on the identical input shape bash's own SEEN_SHA read depends on.
+@pytest.mark.parametrize("real_jq_content", ["", "   \n"])
+def test_empty_state_read_self_heal_matches_real_jq_live(tmp_path, real_jq_content: str) -> None:
+    # Live cross-check against the actual jq binary, when available, in the EXACT invocation
+    # shape bash's own SEEN_SHA read uses: $STATE_FILE passed as a FILENAME ARGUMENT (never
+    # piped via stdin) — proves the read-side self-heal isn't just an internal judgment call but
+    # genuinely matches real jq's own exit-0/no-output behavior on this exact input shape.
     import shutil
     import subprocess
 
@@ -422,9 +468,11 @@ def test_empty_state_self_heal_matches_real_jq_live(real_jq_input: str) -> None:
     if jq_bin is None:
         pytest.skip("jq not installed in this environment — cannot cross-check live")
 
+    state_file = tmp_path / f"read-fixture-{len(real_jq_content)}.json"
+    state_file.write_text(real_jq_content)
+
     result = subprocess.run(
-        [jq_bin, "-r", '.["42"].reviewed_sha // empty'],
-        input=real_jq_input,
+        [jq_bin, "-r", "--arg", "pr", "42", ".[$pr].reviewed_sha // empty", str(state_file)],
         capture_output=True,
         text=True,
     )

@@ -44,6 +44,7 @@ import importlib.resources
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -128,10 +129,22 @@ def _wrapper_invocation(repo_root: str) -> str:
     cannot substitute a different ``--repo-root`` value even if it tried — the permission gate
     itself is the enforcement, not trust that the model typed the right thing.
     ``pantheon.execution``'s own wrapper CLI parses this flag before its four-subcommand argv
-    validation runs (see that module's ``_wrapper_cli``)."""
+    validation runs (see that module's ``_wrapper_cli``).
+
+    ``repo_root`` is shell-quoted (:func:`shlex.quote`) before being embedded — a P2 finding from
+    a live Codex review on this PR: an earlier version interpolated it unquoted, so a checkout
+    path containing whitespace (e.g. ``/tmp/my repo``) would have the agent's own Bash tool call
+    — which DOES go through a real shell — split it into two argv tokens (``/tmp/my`` and
+    ``repo``, the latter misread as the git subcommand), refusing every read-only git call for
+    that run. Quoting only the ONE fixed literal this function controls keeps the exact-prefix
+    permission match intact (the quoted form is what's baked into both the allowed-tools string
+    and the prompt instruction telling the agent what to type, so they always agree byte for
+    byte) while making the shell that actually executes the agent's reproduced command
+    reconstitute ``repo_root`` as a single token again."""
+    quoted_repo_root = shlex.quote(repo_root)
     candidate = execution.resolve_console_script(_WRAPPER_SCRIPT_NAME)
     if candidate is not None:
-        return f"{candidate} wrapper --repo-root {repo_root}"
+        return f"{candidate} wrapper --repo-root {quoted_repo_root}"
     _note(
         f"the '{_WRAPPER_SCRIPT_NAME}' console script is not installed (checked alongside "
         "sys.executable and the per-user scripts directory) — falling back to 'python -m "
@@ -139,7 +152,7 @@ def _wrapper_invocation(repo_root: str) -> str:
         "vector a real `pip install`/`pip install -e .` of this package closes. Run one of "
         "those to get the hardened path."
     )
-    return f"{sys.executable} -m pantheon.execution wrapper --repo-root {repo_root}"
+    return f"{sys.executable} -m pantheon.execution wrapper --repo-root {quoted_repo_root}"
 
 
 class GateError(Exception):
@@ -462,17 +475,30 @@ class BasePinnedGateConfig:
 
 
 def _load_base_pinned_gate_conf(repo_root: str, base_sha: str) -> BasePinnedGateConfig:
-    """Reads gate.conf from the PR's BASE commit ONLY (`git show <base_sha>:gate.conf`) — never
-    the working tree — for every key that shapes what the gate DOES (which provider CLI actually
-    executes, which files get trusted as the house-rules/spec judgment boundary, which agent
-    panel enforces the PR), not just what it's judged by. Mirrors cli/review-gate's own plain
-    `git -C "$REPO_ROOT" show "${BASE_SHA}:gate.conf" 2>/dev/null` exactly for the read itself —
-    NOT routed through pantheon.basepin's symlink-safe read (bash's own equivalent doesn't route
-    this particular read through pantheon-base-pin.sh either — this port doesn't silently harden
-    a read bash itself leaves as a bare `git show`, matching docs/PYTHON-PORT.md section 2's
-    "does not silently fix... as a side effect of the rewrite" framing). Falls back to each
-    field's own default when gate.conf is absent at base, or has no matching key at all — one
-    `git show` + one parse, shared across all five keys (never five separate `git show` calls).
+    """Reads gate.conf from the PR's BASE commit ONLY — never the working tree — for every key
+    that shapes what the gate DOES (which provider CLI actually executes, which files get
+    trusted as the house-rules/spec judgment boundary, which agent panel enforces the PR), not
+    just what it's judged by. Falls back to each field's own default when gate.conf is absent at
+    base, or has no matching key at all — one read + one parse, shared across all five keys.
+
+    **Routed through `pantheon.basepin.base_pinned_read` (symlink-safe) — a P2 finding from a
+    live Codex review on this PR, a deliberate hardening BEYOND bash's own historical gap, not a
+    parity port of it.** bash's own `cli/review-gate` reads `execution=` via a bare
+    `git -C "$REPO_ROOT" show "${BASE_SHA}:gate.conf" 2>/dev/null` (matching what an earlier
+    version of this function also did, for all five keys) — a bare `git show` on a TRACKED
+    SYMLINK (git stores one as a mode-120000 blob whose "content" IS the link-target string, e.g.
+    `config/gate.conf`) returns that pathname text, not the target file's real content;
+    `_parse_conf_text` finds no `key=value` lines in a bare pathname, so every key silently
+    reverts to its compiled-in default — a legitimate maintainer's own symlinked `gate.conf`
+    (pointing at a shared `config/gate.conf`, say) would have its real `provider=`/`rules_file=`/
+    `spec_file=`/`agents=`/`execution=` values silently DROPPED, undermining the very
+    base-pinning fix this function exists to be. Base-pinned rules/spec file CONTENT (see
+    `_base_pinned_text`) already routes through this same symlink-safe reader for exactly this
+    reason (issue #6's class — DESIGN.md's "Security posture") — gate.conf's own file identity is
+    a natural, low-risk extension of that same closure, not a parity concern: bash's matching gap
+    here was never security-motivated in the first place, just an oversight the original
+    `execution=`-only base-pinning fix didn't happen to hit (a single key, `execution=`, is far
+    less likely to be a maintainer's own symlink target than a whole `gate.conf`).
 
     **CRITICAL fix (adversarial review) — closes the CLASS, not just `execution=`.** This repo's
     OWN docs/CLI.md already disclosed one instance of this gap as issue #13 ("Tracked ...  not
@@ -511,10 +537,15 @@ def _load_base_pinned_gate_conf(repo_root: str, base_sha: str) -> BasePinnedGate
     operator's own explicit, interactively-typed choice, the same distinction `execution=`'s
     original fix already drew."""
     cfg = BasePinnedGateConfig()
-    result = _git(["show", f"{base_sha}:gate.conf"], cwd=repo_root)
-    if result.returncode != 0:
+    result = basepin.base_pinned_read(base_sha, "gate.conf", repo_root)
+    if result.status == basepin.REFUSED:
+        _die(
+            f"refused to resolve gate.conf at base {base_sha} — a symlink escaping the "
+            "repository, or a chain exceeding the depth bound — UNVERIFIED, posting nothing"
+        )
+    if result.status != basepin.OK:
         return cfg
-    parsed = _parse_conf_text(result.stdout)
+    parsed = _parse_conf_text((result.content or b"").decode("utf-8", errors="replace"))
     cfg.execution = parsed.get("execution", cfg.execution)
     cfg.provider = parsed.get("provider", cfg.provider)
     cfg.rules_file = parsed.get("rules_file", cfg.rules_file)
@@ -782,16 +813,43 @@ def _run_agent(
             findings_json={},
         )
 
+    # provider_cwd: readonly -> the neutral scratch dir; trusted -> ctx.repo_root itself — a P1
+    # finding from a live Codex review on this PR, a real correctness regression an earlier
+    # version of the neutral-cwd fix introduced: `execution=trusted` grants full, UNRESTRICTED
+    # Bash (no readonly wrapper in the loop at all — DESIGN.md's own "under trusted it's persona
+    # instruction only" disclosure) specifically so the agent can run the repo's OWN verification
+    # in place — `_build_prompt`'s own trusted-mode instructions tell it to run plain
+    # `git diff <range>`/`git show <ref>:path`/`git log`, and DESIGN.md's "Security posture"
+    # names trusted mode's whole purpose as own-repo/trusted-author use, never a fork PR. Launching
+    # the provider from the neutral scratch dir under trusted mode breaks that entirely: those
+    # bare git commands (and any relative-path edit/build command the agent's own unrestricted
+    # Bash runs) would target a directory that isn't a git repository at all, not the checkout —
+    # trusted mode would fail closed on every ordinary command, not because anything is unsafe,
+    # but because the working directory contract silently changed under it. The neutral-cwd fix's
+    # OWN threat model (a provider's startup-time config/MCP/hooks auto-discovery reaching
+    # attacker-controlled repo content — see pantheon.providers' own docstring) doesn't apply
+    # under trusted mode in the first place: that tier is an explicit, deliberate opt-in for
+    # content the operator ALREADY trusts (never a fork PR), and it already grants full
+    # unrestricted Bash — an agent under trusted mode could `cat .mcp.json`/inspect hooks itself
+    # via Bash regardless of cwd, so neutral-cwd protects nothing new there. readonly is where the
+    # vulnerability lives (Bash restricted to the wrapper, reviewing 100%-attacker-controlled fork
+    # content) and where neutral-cwd stays the enforced default.
+    provider_cwd = ctx.repo_root if ctx.execution_tier == "trusted" else neutral_cwd
+
     try:
-        # neutral_cwd, NOT ctx.repo_root, is the launched provider's own cwd — a CRITICAL fix
-        # (adversarial review): the PRE-fix version passed cwd=ctx.repo_root (mirroring
+        # provider_cwd, NOT unconditionally ctx.repo_root NOR unconditionally the neutral scratch
+        # dir, is the launched provider's own cwd — see this function's own comment above for the
+        # readonly/trusted split this resolves to, and pantheon.providers' own module docstring
+        # for the full neutral-cwd finding and fix this still applies under `readonly`. An earlier
+        # version of this call passed cwd=ctx.repo_root unconditionally (mirroring
         # cli/review-gate's own `cd "$REPO_ROOT"` posture), which let a provider's own
         # startup-time config/MCP/hooks auto-discovery reach the PR's own checkout entirely
-        # outside --allowedTools's reach — see pantheon.providers' own module docstring for the
-        # full finding and fix. ctx.repo_root is STILL passed (as repo_root=), but now used only
-        # for PATH-filtering (pantheon.providers._filtered_path) and readonly-wrapper resolution
-        # (--repo-root, baked into the fixed Bash-tool prefix — see pantheon.cli's own
-        # _wrapper_invocation) — never as the process's own working directory.
+        # outside --allowedTools's reach under readonly — closed by neutral_cwd there; trusted
+        # mode restores repo_root as the cwd instead, for the reasons above. ctx.repo_root is
+        # ALWAYS still passed too (as repo_root=), used for PATH-filtering
+        # (pantheon.providers._filtered_path) and readonly-wrapper resolution (--repo-root, baked
+        # into the fixed Bash-tool prefix — see pantheon.cli's own _wrapper_invocation)
+        # independent of which value provider_cwd resolves to.
         raw_output = providers.provider_run(
             provider,
             model,
@@ -799,7 +857,7 @@ def _run_agent(
             allowed_tools,
             timeout,
             repo_root=ctx.repo_root,
-            neutral_cwd=neutral_cwd,
+            neutral_cwd=provider_cwd,
         )
     except providers.ProviderError as e:
         _note(f"provider lane '{provider}' failed for {agent} ({e}) — UNVERIFIED")
