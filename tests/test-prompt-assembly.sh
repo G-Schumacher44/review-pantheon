@@ -1092,6 +1092,8 @@ if [[ -n "$review_yml_build_step_g" ]] \
 else
   fail "action/review.yml: 'Build prompt' step is missing the base-pinned RULES_CONTENT_PATH/SPEC_CONTENT_PATH wiring"
 fi
+# shellcheck disable=SC2016 # single-quoted on purpose — literal $GITHUB_WORKSPACE text search
+# inside review.yml's own embedded shell, not expanding it in this test's own shell.
 if grep -qE -- '-f "\$GITHUB_WORKSPACE/REVIEW_RULES\.md"' <<<"$review_yml_build_step_g" || grep -qE -- '-f "\$GITHUB_WORKSPACE/DESIGN\.md"' <<<"$review_yml_build_step_g"; then
   fail "action/review.yml: 'Build prompt' step still presence-checks REVIEW_RULES.md/DESIGN.md on \$GITHUB_WORKSPACE (fork-PR injection re-opened — content would still be read live from the working tree by the agent)"
 else
