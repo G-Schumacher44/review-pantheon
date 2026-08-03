@@ -77,62 +77,42 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # CRITICAL fix (adversarial review, round 8, live Artemis blocker on this PR's own
-      # self-hosted gate): CRITICAL-1's original fix (neutral cwd + conditional --bare) only
-      # ever covered the CLI (Python) lane — this workflow's own "Run review agent" step (below)
-      # still ran with cwd at the checked-out PR's own working tree, no neutral relocation
-      # available (a `uses: anthropics/claude-code-action` step can't take a working-directory
-      # override the way this workflow's own shell steps can). The identical config/MCP/hooks
-      # startup auto-discovery vector CRITICAL-1 closed on the CLI lane was fully open here — on
-      # the lane this repo actually recommends for fork-PR review, with the job's own
-      # github_token/CLAUDE_CODE_OAUTH_TOKEN in scope. Worst case: RCE on the runner via a
-      # PR-committed `.mcp.json` MCP server or `.claude/settings.json` hook, before this
-      # workflow's own `--allowedTools` scoping is ever consulted.
+      # CRITICAL finding + resolution history (adversarial review, round 8, live Artemis blocker
+      # on this PR's own self-hosted gate — then a round-9 P2 correction on the fix itself; keep
+      # this whole history, not just the final state, since a future maintainer re-deriving "why
+      # is there no scrub step here" needs the full path, not just the ending). See action.yml's
+      # own matching comment block for the identical writeup (kept in sync intentionally, same as
+      # every other security fix these two Action surfaces share) — summarized here:
       #
-      # THIS step is the mitigation — NOT --bare (a first version of this fix DID also pass
-      # --bare in claude_args, unconditionally; a live self-hosted-gate run on this same PR then
-      # failed both agents to UNVERIFIED with `##[error]--json-schema was provided but Claude did
-      # not return structured_output. Result subtype: success` — --bare is INCOMPATIBLE with
-      # --json-schema-driven structured output on this Action lane specifically, empirically, not
-      # theoretically; reverted rather than assumed fixable). The CLI (Python) lane's own --bare
-      # (pantheon/providers.py's _claude lane) is unaffected and stays as-is: that lane parses
-      # the agent's raw text output itself via pantheon.jqjson — it never asks Claude Code for
-      # --json-schema-validated structured_output the way claude-code-action does, so the two
-      # lanes are not interchangeable here. **Do not "harmonize" --bare onto this surface later**
-      # — it silently breaks verdict parsing (both agents read as UNVERIFIED, which fails the
-      # gate closed, so this particular failure mode is at least never a false ACCEPT — but it's
-      # still a functional break, not just a security no-op). See action.yml's own matching
-      # "Scrub Claude auto-discovery surface" step and its own claude_args comment for the
-      # identical writeup (kept in sync intentionally, same as every other security fix these two
-      # Action surfaces share).
+      # CRITICAL-1's original fix (neutral cwd + conditional --bare) only ever covered the CLI
+      # (Python) lane — this workflow's own "Run review agent" step (below) still ran with cwd at
+      # the checked-out PR's own working tree, no neutral relocation available. Round 8's first
+      # fix (a hand-rolled `rm -rf .mcp.json .claude CLAUDE.md` step here, plus unconditional
+      # --bare in claude_args) surfaced two live bugs: --bare broke --json-schema-driven
+      # structured output on this Action lane (reverted, see the claude_args step's own comment),
+      # and the `rm -rf` scrub was DESTRUCTIVE to a CONSUMING repo's own workspace — any repo that
+      # legitimately tracks `.claude/`/`CLAUDE.md`/`.mcp.json` and runs steps after this workflow
+      # in the same job would find those files permanently deleted, destroying adopter content as
+      # a side effect of reviewing a PR.
       #
-      # This step alone is the mitigation, scrubbing the actual auto-discovery files from the
-      # workspace before any agent runs — mechanism-independent of the CLI invocation, so it
-      # cannot interfere with --json-schema/structured_output the way a CLI flag can. Enumerated
-      # from Claude Code's own current docs (code.claude.com/docs/en/claude-directory, verified
-      # live before this fix): everything project-specific lives under `.claude/` (`settings.json`/
-      # `settings.local.json` — hooks are CONFIGURED inside these, no separate `hooks/`
-      # directory — `rules/`, `skills/`, `commands/`, `agents/`, `workflows/`,
-      # `agent-memory/`), plus two root-level files: `CLAUDE.md` (also checked at
-      # `.claude/CLAUDE.md`, both removed by removing the whole directory) and `.mcp.json`
-      # ("lives at the project root, not inside .claude/", per that same doc). None of
-      # these are needed for review: the agent reads the diff/rules/spec through
-      # base-pinned reads and the read-only git wrapper (see "Resolve gate scripts
-      # (base-pinned)"/"Resolve read-only git wrapper (base-pinned)" below), never the live
-      # working tree's own config. Runs immediately after checkout, before every other step
-      # (ordering matters — a scrub after an agent has already started is worthless) and fails
-      # the whole job CLOSED (not just best-effort `rm -rf`) if any path survives — no agent runs
-      # against a workspace this step can't vouch for.
-      - name: Scrub Claude auto-discovery surface from the workspace
-        run: |
-          set -euo pipefail
-          rm -rf -- .mcp.json .claude CLAUDE.md
-          for path in .mcp.json .claude CLAUDE.md; do
-            if [ -e "$path" ]; then
-              echo "::error::review-pantheon: failed to scrub $path from the workspace before invoking any agent — refusing to run (would leave the config/MCP/hooks auto-discovery exfiltration vector open)."
-              exit 1
-            fi
-          done
+      # Round 9's fix: REMOVED the scrub step entirely — `anthropics/claude-code-action`'s own
+      # source at this file's EXACT pinned SHA already has an UNCONDITIONAL, NATIVE mitigation for
+      # this identical vector (`src/entrypoints/run.ts`, same SHA, gated only on
+      # `isEntityContext(context) && context.isPR` — true for every PR-triggered run, not behind
+      # any input/config this workflow controls): `restoreConfigFromBase(restoreBase)`, which
+      # snapshots the PR's own sensitive-path content into `.claude-pr/` first, then restores
+      # `.claude`/`.mcp.json`/`.claude.json`/`.gitmodules`/`.ripgreprc`/`CLAUDE.md`/
+      # `CLAUDE.local.md`/`.husky` from the PR's BASE branch — BEFORE the CLI's own startup ever
+      # reads any of them. Confirmed FIRING in this repo's own live self-check run (the exact
+      # console line, verbatim): `Restoring .claude, .mcp.json, .claude.json, .gitmodules,
+      # .ripgreprc, CLAUDE.md, CLAUDE.local.md, .husky from origin/dev (PR head is untrusted)`.
+      #
+      # Net result: no code of THIS repo's own mutates the consuming workspace for this vector at
+      # all. **Do not re-add a scrub step here** — redundant with an already-shipped native
+      # protection, and if implemented destructively again, would reopen the exact
+      # adopter-data-loss bug round 9 closed. If the claude-code-action pin above is ever bumped,
+      # re-verify `restoreConfigFromBase`'s call site still exists and is still unconditional for
+      # PR events before assuming this protection still holds.
 
       # PR metadata is attacker-controlled on forks (DESIGN.md's "Security posture") — the same
       # posture as action.yml's own dedicated validation step and the CLI lane's HEAD_SHA/
@@ -772,16 +752,17 @@ jobs:
           # waits for input. See cli/lib/execution.sh's header comment for the fuller writeup (a
           # real Apollo finding, from this PR's own self-review of action.yml, which has the
           # identical gap this same fix closes here).
-          # NO --bare here, deliberately (adversarial review, round 8 — see the "Scrub Claude
-          # auto-discovery surface" step above for the full writeup and the live failure that
-          # reverted it). A first version of this fix DID pass --bare unconditionally here; a
-          # live self-hosted-gate run then failed both agents to UNVERIFIED with `--json-schema
-          # was provided but Claude did not return structured_output` — --bare is empirically
-          # incompatible with --json-schema-driven structured output on THIS Action lane. The
-          # scrub step above is this lane's own mitigation instead — mechanism-independent of the
-          # CLI invocation, so it can't interfere with --json-schema the way a flag can. DO NOT
-          # add --bare back here without first proving structured_output survives it in a live
-          # run — no assumption.
+          # NO --bare here, deliberately (adversarial review, round 8 — see the CRITICAL
+          # finding/resolution history comment above the "Checkout" step for the full writeup,
+          # including WHY this lane's CRITICAL-1 config/MCP/hooks vector needs no CLI flag or
+          # workspace mutation of its own — claude-code-action's own pinned source already
+          # restores the sensitive paths from the PR's base branch, unconditionally, before this
+          # step's own invocation ever runs). A first version of THIS fix DID pass --bare
+          # unconditionally here; a live self-hosted-gate run then failed both agents to
+          # UNVERIFIED with `--json-schema was provided but Claude did not return
+          # structured_output` — --bare is empirically incompatible with --json-schema-driven
+          # structured output on THIS Action lane. DO NOT add --bare back here without first
+          # proving structured_output survives it in a live run — no assumption.
           claude_args: |
             --allowedTools "Read,Grep,Glob,Bash(${{ steps.resolve-git-wrapper.outputs.wrapper_path }} *)"
             --permission-mode dontAsk

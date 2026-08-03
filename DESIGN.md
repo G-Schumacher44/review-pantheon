@@ -586,45 +586,66 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
     own `github_token`/`CLAUDE_CODE_OAUTH_TOKEN` in scope — worst case, RCE on the CI runner with
     those credentials. Strictly more severe than the CLI-lane case every layer above closes, since
     that lane is the least-recommended, most-manual entry point (docs/SETUP.md's own Way
-    ordering). Closed with two independent layers on both surfaces, since neutral-cwd relocation
-    isn't an option here:
-    1. `--bare`, UNCONDITIONAL (not the CLI lane's own conditional flag) — both surfaces' auth is
-       ALWAYS an explicit credential (`claude_code_oauth_token`/`anthropic_api_key` on
-       `action.yml`, the `CLAUDE_CODE_OAUTH_TOKEN` secret on `action/review.yml`), never the CLI
-       lane's own optional interactive keychain session, so the caveat that makes the CLI lane's
-       flag conditional does not apply. Verified against Claude Code's current official headless
-       docs before adding, not assumed: skips auto-discovery of hooks, skills, plugins, MCP
-       servers, auto memory, and CLAUDE.md, exactly the vector above. `claude_args` (both
-       surfaces' existing mechanism for `--allowedTools`/`--permission-mode`/`--json-schema`)
-       passes flags straight through to the underlying `claude` CLI invocation — verified against
-       claude-code-action's own current docs before relying on it, not assumed.
-    2. A dedicated "Scrub Claude auto-discovery surface from the workspace" step on both
-       surfaces, running before any agent invocation — defense-in-depth for a `--bare` bug/
-       edge-case/future regression, since there is no cwd-relocation backup the way the CLI lane
-       has. Enumerated from Claude Code's own current docs (its "Explore the `.claude` directory"
-       page, checked live before this fix, not assumed): everything project-specific lives under
-       `.claude/` (`settings.json`/`settings.local.json` — hooks are configured INSIDE these,
-       there is no separate `hooks/` directory — `rules/`, `skills/`, `commands/`, `agents/`,
-       `workflows/`, `agent-memory/`), plus two root-level files: `CLAUDE.md` (also checked at
-       `.claude/CLAUDE.md`, both removed by removing the whole directory) and `.mcp.json` ("lives
-       at the project root, not inside `.claude/`", per that same doc). None of these are needed
-       for review — every agent reads the diff/rules/spec through base-pinned reads and the
-       read-only git wrapper, never the live working tree's own config — so removing them costs
-       nothing. Fails the whole run CLOSED (not best-effort `rm -rf`) if any path survives.
+    ordering). This fix went through TWO live rounds before landing — kept here in full, not just
+    the final state, since a future maintainer re-deriving "why is there no scrub step" needs the
+    path, not just the ending:
+    - **Round 8's first attempt** added `--bare` UNCONDITIONALLY to both surfaces' `claude_args`
+      (the CLI lane's own flag is conditional only to preserve a local interactive keychain
+      session — both Action surfaces' auth is ALWAYS an explicit credential, so that caveat
+      doesn't apply) PLUS a hand-rolled "Scrub Claude auto-discovery surface from the workspace"
+      step (`rm -rf .mcp.json .claude CLAUDE.md`) on both surfaces, running before any agent
+      invocation. Two live bugs surfaced, in order:
+      1. `--bare` broke `--json-schema`-driven `structured_output` on this Action lane
+         specifically — a live self-hosted-gate run failed both agents to UNVERIFIED with
+         `--json-schema was provided but Claude did not return structured_output`. Reverted; the
+         CLI (Python) lane's own `--bare` is unaffected (it never asks Claude Code for
+         `--json-schema`-validated `structured_output` — that lane parses raw text output itself
+         via `pantheon.jqjson`), so the two lanes were never interchangeable here.
+      2. **The scrub step was DESTRUCTIVE to a CONSUMING repo's own workspace — a P2 finding
+         correctly flagged as more serious than its badge.** A repo that legitimately tracks
+         `.claude/`/`CLAUDE.md`/`.mcp.json` and runs build/test/deploy steps AFTER this
+         action/workflow in the SAME job would find those files permanently deleted —
+         destroying adopter content as a side effect of reviewing a PR, the exact opposite of
+         this action's own "nothing is copied into the target repo" zero-footprint promise.
+    - **Round 9's fix: removed the scrub step entirely, closing the vector with ZERO workspace
+      mutation of this repo's own.** Investigating `anthropics/claude-code-action`'s own source
+      at the EXACT pinned SHA both surfaces already trust (`be7b93b1907a4abad570368f3c74b6fe
+      3807510b`) found it already ships an UNCONDITIONAL, NATIVE mitigation for this identical
+      vector — `src/entrypoints/run.ts`, gated only on `isEntityContext(context) &&
+      context.isPR` (true for every PR-triggered run, not behind any input/config this repo
+      controls):
+      ```
+      // On PRs, .claude/ and .mcp.json in the checkout are attacker-controlled.
+      // Restore them from the base branch before the CLI reads them.
+      ...
+      restoreConfigFromBase(restoreBase);
+      ```
+      `restoreConfigFromBase` (`src/github/operations/restore-config.ts`, same SHA) snapshots
+      the PR's own sensitive-path content into `.claude-pr/` first (so a review agent can still
+      inspect what changed, without ever executing it), then deletes the working-tree versions,
+      fetches the PR's base branch, and `git checkout`s each of `.claude`, `.mcp.json`,
+      `.claude.json`, `.gitmodules`, `.ripgreprc`, `CLAUDE.md`, `CLAUDE.local.md`, `.husky` from
+      that trusted ref — BEFORE the CLI's own startup ever reads any of them. Confirmed FIRING
+      in this repo's own live self-check run (the exact console line, verbatim): `Restoring
+      .claude, .mcp.json, .claude.json, .gitmodules, .ripgreprc, CLAUDE.md, CLAUDE.local.md,
+      .husky from origin/dev (PR head is untrusted)`. This is the identical class of protection
+      round 8's own scrub step tried to hand-roll, already shipped natively — the safest fix is
+      the one that requires no mutating code of this repo's own at all.
 
-    Fixtures (`tests/test-action-refs.sh`): `--bare` is present exactly once in `action.yml`'s
-    shared `CLAUDE_ARGS` construction and once in `action/review.yml`'s `claude_args`; the scrub
-    step exists on both surfaces AND runs (by line position) before the first `claude-code-action`
-    invocation on each; the scrub MECHANISM itself is exercised live against a fixture workspace
-    containing marker `.mcp.json`/`.claude/settings.json` (with a hook)/`CLAUDE.md` files, proving
-    the actual shell logic both surfaces now run removes every one of them. Honest limit of what's
-    locally reproducible, stated plainly rather than glossed over: this proves the scrub step's
-    own logic works and that Claude Code cannot find these files after it runs (they're gone) — it
-    does not, and cannot, live-verify a real `claude-code-action` run's own `--bare` behavior
-    against a real GitHub Actions runner (this repo's own CI can't do that until the repo is
-    public — see "Published action" section); that half rests on Claude Code's own official docs,
-    checked live before relying on them, the same evidentiary bar the CLI lane's own `--bare` fix
-    already used.
+    Fixtures (`tests/test-action-refs.sh`): `--bare` asserted ABSENT on both surfaces (a
+    regression guard against a future "harmonize the flags" change silently re-breaking verdict
+    parsing); NO step named "Scrub Claude auto-discovery surface" exists on either surface, and
+    — checked more broadly than just that one step name — neither file contains any LIVE
+    (non-comment) recursive `rm` targeting `.mcp.json`/`.claude`/`CLAUDE.md` anywhere at all (the
+    actual invariant that matters: adopter content must never be deleted by this repo's own
+    code), mutation-tested live (re-added a destructive step, confirmed the check catches it)
+    before relying on it. Honest limit of what's locally reproducible, stated plainly: this repo
+    cannot live-verify `claude-code-action`'s own `restoreConfigFromBase` behavior against a real
+    GitHub Actions runner from its own CI (can't integration-test the published action until this
+    repo is public — see "Published action" section); that rests on the pinned source itself
+    (quoted above, at the exact commit both surfaces trust) AND this repo's own live self-check
+    run's console output, the same evidentiary bar every other flag/mechanism claim in this
+    section already holds to.
 - **Every `gate.conf` key that shapes gate BEHAVIOR is base-pinned, not just `execution=` — an
   adversarial-review fix generalizing a class this repo's own docs/CLI.md had already disclosed
   as unfixed (issue #13, for `provider=` specifically).** `provider=`/`rules_file=`/`spec_file=`/
@@ -712,7 +733,7 @@ identical tools. Differences are intentional, not oversights:
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
 | Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Base-SHA-pinned into `$RUNNER_TEMP` (closed by an adversarial-review fix — this surface's inline "Build prompt" step is still a third, hand-synced copy of the prompt-build logic, see "Layout" below, but it now resolves rules/spec CONTENT the same way its "Resolve gate scripts (base-pinned)" step already resolves the persona/pantheon-verdict trio, instead of presence-checking `$GITHUB_WORKSPACE` and letting the agent read live PR-head content). This closes what was the one remaining open item in issue #6's provenance sweep on this surface — see "Security posture" above for the fix and its own PoC. |
 | Persona / verdict-decider provenance | N/A — always `$PANTHEON_ROOT/agents` and `cli/lib/verdict.sh`, this repo's own installed copy; the target repo never supplies these on the CLI surface. | Base-pinned on both GitHub Action surfaces, same as the CLI's non-issue: the published `action.yml` reads `$ACTION_PATH/agents` and `$ACTION_PATH/action/decide_verdict.py` by default (this repo's own trusted checkout), base-pinned into `$RUNNER_TEMP` when `personas_path` opts into reading from the target repo instead; `action/review.yml` (a **different** file from this table's column) base-pins both into `$RUNNER_TEMP` via its own "Resolve gate scripts (base-pinned)" step (issue #6 — closed in this PR; previously read straight from `$GITHUB_WORKSPACE`, the PR's own checkout, same class as the read-only git wrapper fix above). |
-| Provider startup config-discovery protection | Neutral cwd (a scratch directory `pantheon.cli` owns, never the checkout) — three layers, see "Security posture" above. `--bare` is CONDITIONAL (an explicit `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` env credential is present), since the CLI lane's documented primary auth path is a LOCAL interactive `claude auth login` keychain session with no token env var at all — an unconditional `--bare` would silently break that. | No cwd relocation available (a `uses:` step can't take a working-directory override) — two DIFFERENT layers instead, on BOTH Action surfaces (`action.yml` and `action/review.yml`, kept in sync): `--bare` UNCONDITIONAL (auth here is always an explicit credential, so the CLI lane's keychain caveat doesn't apply) plus a dedicated pre-invocation scrub step removing `.mcp.json`/`.claude/`/`CLAUDE.md` from the workspace, failing the run closed if any survives. Adversarial-review, round 8 — see "Security posture" above, "Both Action surfaces close the identical vector too", for the full writeup; this was the largest scope gap in that fix's whole history (every earlier round covered the CLI lane only). |
+| Provider startup config-discovery protection | Neutral cwd (a scratch directory `pantheon.cli` owns, never the checkout) — three layers, see "Security posture" above. `--bare` is CONDITIONAL (an explicit `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` env credential is present), since the CLI lane's documented primary auth path is a LOCAL interactive `claude auth login` keychain session with no token env var at all — an unconditional `--bare` would silently break that. | No cwd relocation available (a `uses:` step can't take a working-directory override), and NO `--bare` either (empirically breaks `--json-schema`/`structured_output` on this Action lane — confirmed via a live self-hosted-gate failure, see "Security posture" above). Closes the vector with ZERO workspace mutation of this repo's own instead: `anthropics/claude-code-action`'s own pinned source (`src/entrypoints/run.ts`, the exact SHA both surfaces trust) already restores `.claude`/`.mcp.json`/`CLAUDE.md`/etc. from the PR's base branch, unconditionally, before the CLI's own startup ever reads them — confirmed firing live in this repo's own self-check log. Adversarial-review, round 8 (the finding) then round 9 (a correction on round 8's own first fix, a hand-rolled `rm -rf` scrub step that turned out to be destructive to a consuming repo's own tracked content) — see "Security posture" above, "Both Action surfaces close the identical vector too", for the full writeup; this was the largest scope gap in that fix's whole history (every earlier round covered the CLI lane only). |
 
 ## Published action
 
