@@ -4,11 +4,11 @@
 # Usage: install.sh /abs/path/to/target-repo [--claude] [--cursor] [--codex] [--gemini]
 #
 # With no flags: gate-only install (unchanged from prior behavior) — copies the review
-# personas, the verdict-decision script, and the GitHub Action into the target repo so its own
-# CI checkout can see them (the CLI runner reads agents/*.md and cli/lib/verdict.sh from this
-# repo directly; the Action runs inside the target repo's checkout and needs its own copy of
-# everything it uses — see DESIGN.md rule 4). Never overwrites a file that's been customized: a
-# file that differs from the shipped version is left alone and reported as skipped.
+# personas, the vendored `pantheon` verdict/read-only-git package, and the GitHub Action into
+# the target repo so its own CI checkout can see them (the Action runs inside the target repo's
+# checkout and needs its own copy of everything it uses — see DESIGN.md rule 4). Never
+# overwrites a file that's been customized: a file that differs from the shipped version is left
+# alone and reported as skipped.
 #
 # Does NOT install gate.conf — that file only matters to the CLI lane, and copying it into
 # every repo by default meant most installs got a config file they never look at. CLI-lane
@@ -30,8 +30,9 @@
 # --user (combined with one or more of the above): installs the SAME generated projections at
 # USER level ($HOME) instead of into a target repo, so the personas follow you across every
 # project instead of being installed per-repo. No target-repo argument is accepted with --user —
-# it always writes under $HOME. The gate files (workflow, decide_verdict.py, REVIEW_RULES) are
-# NOT installed under --user: they're repo concepts (a PR gate belongs to one repo's CI), so
+# it always writes under $HOME. The gate files (workflow, the vendored pantheon package,
+# REVIEW_RULES) are NOT installed under --user: they're repo concepts (a PR gate belongs to one
+# repo's CI), so
 # --user installs only the per-tool agent/command projections, and requires at least one tool
 # flag. Each tool's user-level destination is the same relative path as its repo-level one, just
 # rooted at $HOME instead of the target repo — verified per tool against current official docs
@@ -107,17 +108,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 AGENTS_SRC="$SCRIPT_DIR/agents"
 SKILLS_SRC="$SCRIPT_DIR/skills"
-DECIDE_SRC="$SCRIPT_DIR/action/decide_verdict.py"
 ACTION_SRC="$SCRIPT_DIR/action/review.yml"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
-GIT_WRAPPER_SRC="$SCRIPT_DIR/cli/lib/pantheon-git-readonly.sh"
-# The verdict decider's real implementation (port slice 5's absorption, DESIGN.md's "Two
-# runtimes, one rule") — action/review.yml's "Resolve gate scripts (base-pinned)" step reads
-# these three files (the ONLY ones `pantheon.verdict` actually imports: itself, the package's
-# own __init__.py, and pantheon.jqjson for JSON parsing) at the PR's base commit, so they need
-# to exist HERE, vendored into the target repo, for base-pinning to ever find them. DECIDE_SRC
-# above (a deprecated, one-release compat shim as of this slice — see action/decide_verdict.py's
-# own header) is still vendored too, unchanged, for anything scripting against it directly.
+# action/review.yml's "Resolve gate scripts (base-pinned)" step base-pin-reads __init__.py/
+# jqjson.py/verdict.py (the verdict decider's dependency closure) and its "Resolve read-only git
+# wrapper (base-pinned)" step base-pin-reads execution.py (the read-only git wrapper) at the PR's
+# base commit — all four need to exist HERE, vendored into the target repo, for base-pinning to
+# ever find them.
 PANTHEON_PKG_SRC="$SCRIPT_DIR/pantheon"
 
 SKIPPED=()
@@ -142,52 +139,39 @@ install_file() {
 [[ -d "$AGENTS_SRC" ]] || die "missing $AGENTS_SRC — run this from a review-pantheon checkout"
 [[ -d "$SKILLS_SRC" ]] || die "missing $SKILLS_SRC — run this from a review-pantheon checkout"
 
-# Gate files (personas into .github/review-agents, decide_verdict.py, the workflow, the house
-# rules template, .gitignore) are a repo concept — a PR gate belongs to one repo's CI — so
-# --user skips this whole section and installs only the per-tool projections below.
+# Gate files (personas into .github/review-agents, the workflow, the house rules template,
+# .gitignore) are a repo concept — a PR gate belongs to one repo's CI — so --user skips this
+# whole section and installs only the per-tool projections below.
 if [[ "$DO_USER" != "true" ]]; then
-  [[ -f "$DECIDE_SRC" ]] || die "missing $DECIDE_SRC"
   [[ -f "$ACTION_SRC" ]] || die "missing $ACTION_SRC"
   [[ -f "$RULES_SRC" ]] || die "missing $RULES_SRC"
-  [[ -f "$GIT_WRAPPER_SRC" ]] || die "missing $GIT_WRAPPER_SRC"
   [[ -f "$PANTHEON_PKG_SRC/__init__.py" ]] || die "missing $PANTHEON_PKG_SRC/__init__.py"
   [[ -f "$PANTHEON_PKG_SRC/jqjson.py" ]] || die "missing $PANTHEON_PKG_SRC/jqjson.py"
   [[ -f "$PANTHEON_PKG_SRC/verdict.py" ]] || die "missing $PANTHEON_PKG_SRC/verdict.py"
+  [[ -f "$PANTHEON_PKG_SRC/execution.py" ]] || die "missing $PANTHEON_PKG_SRC/execution.py"
 
   AGENTS_DEST="$TARGET/.github/review-agents"
-  DECIDE_DEST="$TARGET/.github/review-agents/decide_verdict.py"
   WORKFLOW_DEST="$TARGET/.github/workflows/review.yml"
   RULES_DEST="$TARGET/REVIEW_RULES.md"
   GITIGNORE_DEST="$TARGET/.gitignore"
-  # Base-pinned by action/review.yml's "Resolve gate scripts (base-pinned)" step (see
-  # PANTHEON_PKG_SRC's own comment above) — same "installed here is required, but the literal
-  # path used at run time is the base-pinned $RUNNER_TEMP copy, not this one" caveat as
-  # GIT_WRAPPER_DEST below.
+  # Base-pinned by action/review.yml's "Resolve gate scripts (base-pinned)" (verdict.py's
+  # dependency closure) and "Resolve read-only git wrapper (base-pinned)" (execution.py) steps —
+  # installed here is required (it's what gets committed and read at the PR's base), but the
+  # literal path used at run time is always the base-pinned $RUNNER_TEMP copy, never this one. A
+  # bare $GITHUB_WORKSPACE-pinned prefix would let a PR replace either file and still be trusted
+  # (Codex P1) — see those steps' own comments in action/review.yml.
   PANTHEON_PKG_DEST="$TARGET/.github/review-agents/pantheon"
-  # action/review.yml reads this file's CONTENT from the PR's base commit (`git show
-  # $BASE_SHA:.github/review-agents/pantheon-git-readonly.sh`, its "Resolve read-only git
-  # wrapper (base-pinned)" step) into $RUNNER_TEMP, and points claude_args' readonly-tier Bash
-  # prefix at THAT resolved path, not at this checked-out-working-tree path directly — installing
-  # it here is still required (it's what gets committed and read at the PR's base), but the path
-  # itself is never the literal --allowedTools prefix. See that step's own comment for why a
-  # wrapper is needed instead of a bare `Bash(git diff *)`-style pattern (Codex P1, round 1) and
-  # why base-pinning is needed on top of the wrapper itself (Codex P1, round 2 — a bare
-  # $GITHUB_WORKSPACE-pinned prefix would let a PR replace this exact file and still be trusted).
-  GIT_WRAPPER_DEST="$TARGET/.github/review-agents/pantheon-git-readonly.sh"
 
   mkdir -p "$AGENTS_DEST"
   for persona in "$AGENTS_SRC"/*.md; do
     install_file "$persona" "$AGENTS_DEST/$(basename "$persona")"
   done
 
-  install_file "$DECIDE_SRC" "$DECIDE_DEST"
   install_file "$ACTION_SRC" "$WORKFLOW_DEST"
   install_file "$RULES_SRC" "$RULES_DEST"
-  install_file "$GIT_WRAPPER_SRC" "$GIT_WRAPPER_DEST"
-  chmod +x "$GIT_WRAPPER_DEST"
 
   mkdir -p "$PANTHEON_PKG_DEST"
-  for pyfile in __init__.py jqjson.py verdict.py; do
+  for pyfile in __init__.py jqjson.py verdict.py execution.py; do
     install_file "$PANTHEON_PKG_SRC/$pyfile" "$PANTHEON_PKG_DEST/$pyfile"
   done
 
@@ -211,7 +195,6 @@ fi
 # file written below is GENERATED from it right here, never hand-duplicated.
 # ---------------------------------------------------------------------------
 # persona_body <persona-file> — strips the YAML frontmatter, prints the body.
-# Same fence-counting approach as cli/review-gate's strip_frontmatter.
 persona_body() {
   awk '
     /^---[[:space:]]*$/ { fence++; next }
@@ -302,9 +285,8 @@ PR reference / flags: $ARGUMENTS
 
 Follow the procedure in the installed `gate` skill (`.claude/skills/gate/SKILL.md`) — dry-run
 first, reading the combined verdict correctly, follow-up mode, and the findings discipline — to
-run `pantheon gate` (the current CLI; the deprecated `cli/review-gate`/`review-gate` compat shim
-still works this release, same flags) against the PR referenced above (ask which PR if none was
-given). Default to a `--dry-run` pass first unless the arguments explicitly request a live run.
+run `pantheon gate` against the PR referenced above (ask which PR if none was given). Default to
+a `--dry-run` pass first unless the arguments explicitly request a live run.
 
 `/gate` installs the *procedure*, not the CLI itself — `install.sh --claude` never puts
 `pantheon` on `PATH`. Before running it, check `command -v pantheon`; if that fails, see the
@@ -507,8 +489,8 @@ EOF
   done
   cat <<EOF
 
-No gate files were installed (workflow, decide_verdict.py, REVIEW_RULES.md) — those are repo
-concepts. Run install.sh (without --user) inside each repo you want the CI gate in.
+No gate files were installed (workflow, the vendored pantheon package, REVIEW_RULES.md) — those
+are repo concepts. Run install.sh (without --user) inside each repo you want the CI gate in.
 EOF
   exit 0
 fi

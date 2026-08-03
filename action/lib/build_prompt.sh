@@ -6,9 +6,8 @@
 # reasoning), so the five possible agents each get their own literal build/run/decide step
 # trio. This script is what keeps that unrolling from becoming five hand-copied prompt-builder
 # bodies: one file, invoked once per enabled agent, same fence-stripping + context-block shape
-# as action/review.yml's inline "Build prompt" step (kept identical on purpose — DESIGN.md's
-# "Two runtimes, one rule" is about the verdict decision, but the prompt shape should match too
-# so a persona sees the same context regardless of which runtime invoked it).
+# as action/review.yml's inline "Build prompt" step (kept identical on purpose — so a persona
+# sees the same context regardless of which surface invoked it).
 #
 # Usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>
 # Reads from env: REPO_NAME, PR_NUMBER, PR_TITLE, BASE_SHA, HEAD_SHA, BASE_REF, RULES_FILE,
@@ -30,12 +29,21 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-# shellcheck disable=SC1091
-# pantheon_execution_context_note (below) — the same tiered-execution helper cli/review-gate
-# uses, sourced here via a relative path into the action's own checkout (safe because the
-# published action ships this whole repo at github.action_path — same pattern
-# action/lib/combine_verdicts.sh already uses to source cli/lib/render_comment.sh).
-source "$SCRIPT_DIR/../../cli/lib/execution.sh"
+PANTHEON_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# pantheon_execution_context_note — thin shell wrapper around
+# pantheon.execution.execution_context_note(), invoked via this action's own trusted checkout
+# (safe because the published action ships this whole repo at github.action_path — same pattern
+# action/lib/combine_verdicts.sh uses for pantheon.render). Invoked with PYTHONPATH set to
+# $PANTHEON_ROOT (not `python3 -m`) so `from pantheon import execution` resolves without
+# prepending this process's cwd to sys.path.
+pantheon_execution_context_note() {
+  PYTHONPATH="$PANTHEON_ROOT" python3 -c '
+import sys
+from pantheon import execution
+sys.stdout.write(execution.execution_context_note(sys.argv[1], sys.argv[2]))
+' "$1" "$2"
+}
 
 AGENT_NAME="${1:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
 PERSONAS_DIR="${2:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
@@ -61,10 +69,8 @@ fi
 # delimiter-collision class this action already guards against for its GITHUB_OUTPUT heredocs
 # (`openssl rand -hex 16`, see action.yml). Mirrors that trust model: unpredictable per render,
 # so content authored in advance (a fork PR's REVIEW_RULES.md, base-pinned or not) cannot know
-# the marker to spoof it. Uses bash-builtin $RANDOM (same mechanism as the CLI lane's identical
-# helper in cli/review-gate — see DESIGN.md's "Two runtimes, one rule" applied to prompt-
-# building) rather than `openssl`, so this script doesn't pick up a dependency the rest of it
-# doesn't already have.
+# the marker to spoof it. Uses bash-builtin $RANDOM rather than `openssl`, so this script doesn't
+# pick up a dependency the rest of it doesn't already have.
 pantheon_fence_id() {
   printf 'pantheon-%s-%s%s%s-%s' "$$" "$RANDOM" "$RANDOM" "$RANDOM" "$(date +%s)"
 }
