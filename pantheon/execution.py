@@ -17,11 +17,16 @@ call and by refusing any argument that looks like a flag, because a prefix-match
 ``Bash(git diff *)`` permission rule has no understanding of git's own argument grammar. Python
 replaces that string-discipline with STRUCTURE: an argv **list** passed to
 ``subprocess.run(..., shell=False)`` is never re-interpreted by a shell at all, and every
-subcommand's allowlist is enumerated in code (``READONLY_SUBCOMMANDS``, per-flag "no flags at
-all" rule) rather than pattern-matched. That closes the whole class of prefix-match/
-flag-injection findings by construction — it does not excuse skipping verification; every row
-below still needs its own provable closure (tests/test-git-readonly-wrapper.sh, adapted per
-docs/PYTHON-PORT.md §4 to target this module via ``python -m pantheon.execution wrapper ...``).
+subcommand's allowlist is enumerated in code (``READONLY_SUBCOMMANDS`` plus that subcommand's own
+:data:`SAFE_FLAGS_FOR_SUBCOMMAND` entry) rather than pattern-matched. Note this is default-deny
+but NOT "no caller flag ever reaches git": issue #26 replaced the original blanket flag refusal —
+which made the tier unusable, since the personas are told to run ``git diff --stat`` and friends —
+with a narrow, per-subcommand allowlist, so a fixed set of presentation flags (``--stat``,
+``--name-only``, ``-U<n>``, ``--find-renames``, …) DOES pass through. See ARGV VALIDATION below for
+the exact rule. That closes the whole class of prefix-match/flag-injection findings by
+construction — it does not excuse skipping verification; every row below still needs its own
+provable closure (tests/test-git-readonly-wrapper.sh, which targets this module via
+``python -m pantheon.execution wrapper ...``).
 
 ARGV VALIDATION (the caller's argv — build_readonly_argv()):
   - subcommand (argv[0]) must be exactly one of: diff, show, log, status.

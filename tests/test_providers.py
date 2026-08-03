@@ -1,9 +1,9 @@
 """tests/test_providers.py — pytest unit layer for pantheon.providers' argv-construction,
 PATH-resolution, environment-construction, and timeout/process-group seams
-(docs/PYTHON-PORT.md section 4's port slice 4 deliverable).
+.
 
-pantheon.providers has NO dedicated black-box fixture suite (docs/PYTHON-PORT.md §9's disclosed
-pre-existing gap — no test-providers.sh for the bash lanes either), so this file is the ONLY
+pantheon.providers has NO dedicated black-box fixture suite (a disclosed, pre-existing gap — the
+retired bash lanes never had a test-providers.sh either), so this file is the ONLY
 coverage its argv-construction/CLI-resolution/env-construction logic gets, not a duplication of
 anything else. Every test here monkeypatches `providers._resolve_cli` and/or
 `providers.subprocess.Popen` so it never actually shells out to a real
@@ -16,6 +16,7 @@ allowlist (never a blanket `os.environ` copy), and on `_terminate_group` firing 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,8 @@ from pathlib import Path
 import pytest
 
 from pantheon import execution, jqjson, providers, verdict
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture()
@@ -1183,3 +1186,32 @@ def test_readonly_tier_end_to_end_produces_a_parseable_verdict(tmp_path, monkeyp
     # The verdict content reflects REAL data that flowed through the readonly wrapper's own
     # --stat flag against the real repo (not a canned string unrelated to the actual diff).
     assert "f.txt" in decision["verdict_json"]["summary"]
+
+
+def test_verdict_json_schema_stays_byte_identical_to_the_action_surface() -> None:
+    """VERDICT_JSON_SCHEMA's docstring promises the constant is 'kept byte-identical
+    deliberately' with the schema action.yml passes to claude-code-action. Nothing enforced that
+    promise until this test (a live self-hosted-gate finding, artemis @ PR #28): a future PR could
+    extend the schema on either surface alone, every suite would stay green, and the two lanes
+    would silently enforce DIFFERENT verdict shapes -- the cross-surface divergence class issue #26
+    exists to close.
+
+    Deliberately compares raw TEXT, not parsed-and-re-serialized JSON: the claim is byte-identity,
+    and a parsed comparison would pass while the two surfaces disagreed on key order -- which is
+    exactly the kind of drift a reader diffing the two files by eye is being promised is absent.
+    """
+    action_yml = (REPO_ROOT / "action.yml").read_text(encoding="utf-8")
+
+    matches = re.findall(r"JSON_SCHEMA='([^']*)'", action_yml)
+    # Fail loudly if the extraction itself stops matching (a renamed variable or a re-quoted
+    # assignment) rather than silently vacuously passing on zero copies found.
+    assert len(matches) == 1, (
+        f"expected exactly one JSON_SCHEMA='...' assignment in action.yml, found {len(matches)} "
+        "-- the extraction anchor drifted; fix this test's regex, do not delete the check"
+    )
+
+    assert matches[0] == providers.VERDICT_JSON_SCHEMA, (
+        "action.yml's JSON_SCHEMA and pantheon.providers.VERDICT_JSON_SCHEMA have DRIFTED -- the "
+        "CLI lane and the Action lane would enforce different verdict shapes. Update both, or "
+        "drop the byte-identity claim from providers.VERDICT_JSON_SCHEMA's comment."
+    )
