@@ -199,6 +199,56 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # CRITICAL fix (adversarial review, round 8, live Artemis blocker on this PR's own
+    # self-hosted gate): CRITICAL-1's original fix (neutral cwd + conditional --bare) only ever
+    # covered the CLI (Python) lane — this composite action's own five `uses:
+    # anthropics/claude-code-action` steps (below) still ran with cwd at the checked-out PR's own
+    # working tree, no neutral relocation available (a `uses:` step can't take a
+    # working-directory override the way this action's own shell steps can), and until this fix
+    # no --bare either. The identical config/MCP/hooks startup auto-discovery vector CRITICAL-1
+    # closed on the CLI lane was fully open here — on the lane this repo actually recommends for
+    # fork-PR review, with the job's own github_token/CLAUDE_CODE_OAUTH_TOKEN in scope. Worst
+    # case: RCE on the runner via a PR-committed `.mcp.json` MCP server or `.claude/settings.json`
+    # hook, before this action's own `--allowedTools` scoping is ever consulted.
+    #
+    # Closed with two independent layers, since neutral-cwd relocation isn't available here:
+    #   1. `--bare` passed UNCONDITIONALLY in `claude_args` on every one of the five `Run <agent>`
+    #      steps below (see each one's own comment) — Claude Code's own current headless docs
+    #      (code.claude.com/docs/en/headless, verified live before this fix, not assumed):
+    #      "reduce startup time by skipping auto-discovery of hooks, skills, plugins, MCP
+    #      servers, auto memory, and CLAUDE.md." The CLI lane's OWN `--bare` is conditional on an
+    #      explicit credential because its primary documented auth path is an interactive,
+    #      keychain-based `claude auth login` session with no token env var at all — that
+    #      caveat does NOT apply here: this action's auth is ALWAYS either `claude_code_oauth_
+    #      token` or `anthropic_api_key`, an explicit credential every run, which is exactly the
+    #      shape `--bare` (documented: "only sees credentials you pass explicitly") requires.
+    #   2. THIS step: scrubs the actual auto-discovery files from the workspace before any agent
+    #      ever runs — defense-in-depth for a `--bare` bug/edge-case/future regression, since
+    #      there is no cwd-relocation backup the way the CLI lane has. Enumerated from Claude
+    #      Code's own current docs (code.claude.com/docs/en/claude-directory, verified live
+    #      before this fix): everything project-specific lives under `.claude/` (`settings.json`/
+    #      `settings.local.json` — hooks are CONFIGURED inside these, there is no separate
+    #      `hooks/` directory — `rules/`, `skills/`, `commands/`, `agents/`, `workflows/`,
+    #      `agent-memory/`), plus two root-level files: `CLAUDE.md` (also checked at
+    #      `.claude/CLAUDE.md`, both removed by removing the whole directory) and `.mcp.json`
+    #      ("lives at the project root, not inside .claude/", per that same doc). None of these
+    #      are needed for review: every agent reads the diff/rules/spec through base-pinned
+    #      reads and the read-only git wrapper (see "Resolve gate configuration"/"Resolve
+    #      read-only git wrapper" below), never the live working tree's own config.
+    #      Fails the whole action CLOSED (not just best-effort `rm -rf`) if any path survives —
+    #      no agent runs against a workspace this step can't vouch for.
+    - name: Scrub Claude auto-discovery surface from the workspace
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf -- .mcp.json .claude CLAUDE.md
+        for path in .mcp.json .claude CLAUDE.md; do
+          if [ -e "$path" ]; then
+            echo "::error::review-pantheon: failed to scrub $path from the workspace before invoking any agent — refusing to run (would leave the config/MCP/hooks auto-discovery exfiltration vector open)."
+            exit 1
+          fi
+        done
+
     - name: Assert exactly one auth input is set
       shell: bash
       env:
@@ -415,7 +465,20 @@ runs:
         # git" allowance kept bare `git log`/`git diff` working regardless — see
         # cli/lib/execution.sh's header comment for the fuller writeup (a real Apollo finding,
         # from this PR's own self-review, on this exact composite action).
+        #
+        # --bare, UNCONDITIONAL (adversarial review, round 8 — see the "Scrub Claude
+        # auto-discovery surface" step at the top of this file for the full CRITICAL writeup this
+        # is layer 1 of). Verified against Claude Code's current official headless docs before
+        # adding, not assumed: skips auto-discovery of hooks, skills, plugins, MCP servers, auto
+        # memory, and CLAUDE.md. Unlike the CLI (Python) lane's OWN conditional --bare (which
+        # exists specifically to preserve a LOCAL interactive `claude auth login` keychain
+        # session with no token env var) this action's auth is ALWAYS an explicit credential —
+        # `claude_code_oauth_token`/`anthropic_api_key`, exactly one required by "Assert exactly
+        # one auth input is set" above — so the keychain caveat that makes the CLI lane's own
+        # flag conditional does not apply here; --bare's own "only sees credentials you pass
+        # explicitly" is exactly what this action already does either way.
         CLAUDE_ARGS="--allowedTools \"$ALLOWED_TOOLS\"
+        --bare
         --permission-mode dontAsk
         --json-schema '$JSON_SCHEMA'"
         if [ -n "$MODEL" ]; then
