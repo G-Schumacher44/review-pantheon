@@ -15,6 +15,7 @@ allowlist (never a blanket `os.environ` copy), and on `_terminate_group` firing 
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -1215,3 +1216,69 @@ def test_verdict_json_schema_stays_byte_identical_to_the_action_surface() -> Non
         "CLI lane and the Action lane would enforce different verdict shapes. Update both, or "
         "drop the byte-identity claim from providers.VERDICT_JSON_SCHEMA's comment."
     )
+
+
+def test_verdict_schema_is_never_stricter_than_the_decider() -> None:
+    """The provider schema must not reject a verdict `pantheon.verdict.decide()` ACCEPTS.
+
+    A schema stricter than the decider fails closed in the WRONG direction: a real, reviewable
+    verdict is rejected before the decider ever sees it and surfaces as UNVERIFIED / NOT GATED.
+    A live Codex review on PR #28 caught exactly that -- `line` typed `integer` and all five
+    display fields `required`, while DESIGN.md's "The display surface -- deliberately NOT
+    schema-validated" section reserves those fields for the render layer, which coerces a
+    non-numeric or absent `.line` to "?".
+
+    Pinned structurally rather than by running a JSON-Schema validator: this package is
+    stdlib-only by design, so there is no validator to call. These assertions compare the schema's
+    own constraint surface against the decider's, which is the property that actually matters.
+    """
+    schema = json.loads(providers.VERDICT_JSON_SCHEMA)
+
+    # The decision surface: exactly the keys decide() demands, no more.
+    assert set(schema["required"]) == set(verdict.REQUIRED_KEYS)
+
+    props = schema["properties"]
+    # Strict where decide() branches -- these types are what the blocker invariant relies on.
+    assert props["has_blocker"]["type"] == "boolean"
+    assert props["verdict"]["type"] == "string"
+    assert props["agent"]["type"] == "string"
+    assert props["findings"]["type"] == "array"
+
+    item = props["findings"]["items"]
+    # severity is the only findings field decide() reads, so it is the only one required.
+    assert item["required"] == ["severity"], (
+        "findings items must require ONLY severity -- requiring a display field rejects verdicts "
+        "decide() accepts (see this test's docstring)"
+    )
+    assert item["properties"]["severity"]["type"] == "string"
+
+    # Loose on every display field, in the exact way render.py already compensates for.
+    assert "string" in item["properties"]["line"]["type"]
+    assert "null" in item["properties"]["line"]["type"]
+    for field in ("file", "issue", "scenario"):
+        assert "null" in item["properties"][field]["type"], field
+    assert "null" in props["summary"]["type"]
+
+
+def test_decider_really_does_accept_the_loose_shape_the_schema_now_permits() -> None:
+    """Companion to the test above: proves the leniency being permitted is REAL, not assumed.
+
+    Without this, the schema could be loosened toward a decider behavior nobody verified -- the
+    two tests together pin both halves (schema permits it AND decide() accepts it), so neither
+    can drift into the gap alone.
+    """
+    loose = json.dumps(
+        {
+            "agent": "artemis",
+            "verdict": "SHIP",
+            "has_blocker": False,
+            "findings": [{"severity": "note", "line": "section X"}],
+            "summary": None,
+        }
+    )
+
+    decision = verdict.decide("artemis", loose)
+
+    assert decision["color"] == "green", decision
+    assert decision["verdict"] == "SHIP"
+    assert decision["invariant_fired"] is False

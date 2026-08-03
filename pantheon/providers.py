@@ -272,12 +272,25 @@ _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 # relying entirely on pantheon.verdict's own trailing-JSON-extraction fallback — the flag this
 # constant is used with (`--json-schema`, confirmed present via `claude --help`) exists and the
 # two GitHub Action surfaces already use it; this module's own `_claude()` now does too.
+#
+# THE SCHEMA MIRRORS THE DECISION SURFACE ONLY — it must never be stricter than
+# `pantheon.verdict.decide()`, or it turns a verdict the binding contract ACCEPTS into UNVERIFIED
+# (fail-closed in the wrong direction: a real, reviewable result reported as NOT GATED). A live
+# Codex review on PR #28 caught exactly that: an earlier revision typed `line` as `integer` and
+# `required`'d all five display fields, so a model emitting `"line": "section X"` — which
+# `pantheon.render` explicitly coerces to `"?"` (see its `_or_default` line-number handling) and
+# which `decide()` accepts as green — was rejected before the decider ever saw it.
+# So: STRICT on what decide() branches on (agent/verdict/has_blocker/findings + severity), LOOSE
+# on the display fields DESIGN.md's "The display surface — deliberately NOT schema-validated"
+# section reserves for the render layer. Keep the two in step; the top-level `required` list here
+# mirrors `pantheon.verdict.REQUIRED_KEYS` exactly.
 VERDICT_JSON_SCHEMA = (
     '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},'
     '"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object",'
-    '"properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},'
-    '"issue":{"type":"string"},"scenario":{"type":"string"}},'
-    '"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},'
+    '"properties":{"severity":{"type":"string"},"file":{"type":["string","null"]},'
+    '"line":{"type":["integer","string","null"]},"issue":{"type":["string","null"]},'
+    '"scenario":{"type":["string","null"]}},'
+    '"required":["severity"]}},"summary":{"type":["string","null"]}},'
     '"required":["agent","verdict","has_blocker","findings","summary"]}'
 )
 
