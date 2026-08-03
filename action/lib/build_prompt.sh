@@ -34,15 +34,16 @@ PANTHEON_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # pantheon_execution_context_note — thin shell wrapper around
 # pantheon.execution.execution_context_note(), invoked via this action's own trusted checkout
 # (safe because the published action ships this whole repo at github.action_path — same pattern
-# action/lib/combine_verdicts.sh uses for pantheon.render). Invoked with PYTHONPATH set to
-# $PANTHEON_ROOT (not `python3 -m`) so `from pantheon import execution` resolves without
-# prepending this process's cwd to sys.path.
+# action/lib/combine_verdicts.sh uses for pantheon.render). Invokes action/lib/
+# execution_context_note.py BY ITS OWN ABSOLUTE PATH — deliberately NOT `python3 -c '<code>'` (a
+# live Codex P1 finding on this file's own prior fix): `-c` sets sys.path[0] to "", which Python
+# resolves as the composite-action step's cwd (the CONSUMING repo's checkout on a fork PR) —
+# BEFORE any PYTHONPATH entry, reopening the identical cwd-shadow-import vector this repo's own
+# verdict.py/basepin.py/execution.py invocations already close by running a trusted file via its
+# own absolute path instead. See execution_context_note.py's own module docstring for the full
+# writeup.
 pantheon_execution_context_note() {
-  PYTHONPATH="$PANTHEON_ROOT" python3 -c '
-import sys
-from pantheon import execution
-sys.stdout.write(execution.execution_context_note(sys.argv[1], sys.argv[2]))
-' "$1" "$2"
+  PYTHONPATH="$PANTHEON_ROOT" python3 "$SCRIPT_DIR/execution_context_note.py" "$1" "$2"
 }
 
 AGENT_NAME="${1:?usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>}"
