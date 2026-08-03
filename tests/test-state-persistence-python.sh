@@ -230,6 +230,100 @@ fi
 
 rm -rf "$ANCESTRY_REPO"
 
+# ---------------------------------------------------------------------------
+# CRITICAL fix (adversarial review): a state-write FAILURE for a green verdict must fail this
+# CLI shim's own exit code closed (nonzero), never silently exit 0 — the pre-fix `_update_cli`
+# discarded update_state()'s outcome entirely and always returned 0. Live pre-fix reproduction:
+# reverting `_update_cli` to `update_state(...); return 0` (unconditional) makes the FIRST check
+# below FAIL (exits 0 despite the write having visibly failed) — verified locally before landing
+# this fix. Skipped when running as root (POSIX permission checks are bypassed for root, same
+# precondition tests/test_state.py's own chmod-555 fixtures guard against).
+# ---------------------------------------------------------------------------
+section "State-write failure fails closed (python -m pantheon.state update must exit nonzero)"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "SKIP: running as root — POSIX permission checks are bypassed, precondition unmet"
+else
+  FAILCLOSED_DIR="$(mktemp -d)"
+  FAILCLOSED_STATE="$FAILCLOSED_DIR/state.json"
+  echo '{}' > "$FAILCLOSED_STATE"
+  chmod 555 "$FAILCLOSED_DIR"
+
+  py_update "green" "42" "deadbeefcafe" "$FAILCLOSED_STATE" >/dev/null 2>&1
+  FAILCLOSED_STATUS=$?
+
+  chmod 755 "$FAILCLOSED_DIR"  # restore so cleanup below can actually remove it
+  rm -rf "$FAILCLOSED_DIR"
+
+  if [[ "$FAILCLOSED_STATUS" -ne 0 ]]; then
+    pass "python -m pantheon.state update: exits nonzero when the state directory is unwritable for a green verdict — fail-closed, matches bash's own abort-on-mv-failure behavior"
+  else
+    fail "python -m pantheon.state update: exited 0 despite a failed state write (state dir chmod 555) — this was the CRITICAL-3 gap: state-write failure was fail-OPEN"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Empty-state-file behavior (medium finding, adversarial review; corrected by a live Codex
+# finding on this PR's own review). real jq on a genuinely empty state file passed as a FILENAME
+# ARGUMENT (bash's exact invocation shape — never piped via stdin) exits 0 with NO output,
+# whether reading (`jq -r ... "$STATE_FILE"`) OR writing (`jq '...' "$STATE_FILE" > "$tmp_state"`)
+# — verified live below for BOTH. The READ side self-heals correctly: empty output means "no
+# prior state," matching pantheon.state.load_state_or_raise()'s own self-heal-to-{} (closing the
+# original hard-abort-forever finding). The WRITE side is a genuine bash QUIRK, not a self-heal:
+# a green/yellow update against an empty existing file produces zero bytes of jq output, `mv`'d
+# over $state_file — the file STAYS EMPTY, recording NOTHING, even though the operation itself
+# "succeeds" (exit 0). An earlier version of this Python port's fix got the write side wrong
+# (populated a fresh entry instead of replicating the no-record quirk) — corrected here to match
+# bash exactly, per docs/PYTHON-PORT.md's "byte-compatible... not a redesign" charter.
+# ---------------------------------------------------------------------------
+section "Empty state file: read self-heals, write matches bash's real no-record quirk"
+
+EMPTY_STATE="$WORKDIR/state-empty.json"
+: > "$EMPTY_STATE"  # genuinely 0 bytes
+
+py_update "green" "42" "deadbeefcafe" "$EMPTY_STATE" >/dev/null 2>&1
+EMPTY_UPDATE_STATUS=$?
+empty_state_bytes="$(wc -c < "$EMPTY_STATE" | tr -d ' ')"
+empty_reviewed_sha="$(jq -r '.["42"].reviewed_sha // empty' "$EMPTY_STATE" 2>/dev/null)"
+
+if [[ "$EMPTY_UPDATE_STATUS" -eq 0 ]]; then
+  pass "update_state(): a green outcome against a genuinely EMPTY existing state file still exits 0 (matches bash's own exit-0 shape for this case)"
+else
+  fail "update_state(): expected exit 0 against an empty existing state file, got status=$EMPTY_UPDATE_STATUS"
+fi
+if [[ "$empty_state_bytes" == "0" ]]; then
+  pass "update_state(): the file stays genuinely EMPTY afterward (0 bytes) — matches bash's real no-record quirk for this exact case, not a silent 'improvement'"
+else
+  fail "update_state(): expected the state file to stay empty (0 bytes), got $empty_state_bytes byte(s) — this Python port must replicate bash's quirk here, not fix it silently"
+fi
+if [[ -z "$empty_reviewed_sha" ]]; then
+  pass "update_state(): no reviewed_sha was recorded for the empty-existing-file case (matches bash — nothing gets recorded, not even after a green outcome)"
+else
+  fail "update_state(): a reviewed_sha ('$empty_reviewed_sha') was recorded despite the existing state file being empty — diverges from bash's real behavior"
+fi
+
+if command -v jq >/dev/null 2>&1; then
+  LIVE_EMPTY_READ_FILE="$WORKDIR/live-empty-read.json"
+  : > "$LIVE_EMPTY_READ_FILE"
+  live_empty_read="$(jq -r --arg pr "42" '.[$pr].reviewed_sha // empty' "$LIVE_EMPTY_READ_FILE")"
+  live_empty_read_status=$?
+  if [[ "$live_empty_read_status" -eq 0 && -z "$live_empty_read" ]]; then
+    pass "live cross-check (read, file argument): real jq on an empty FILE exits 0 with no output for the same SEEN_SHA-shaped query bash's own review-gate uses"
+  else
+    fail "live cross-check (read): real jq's empty-file-argument behavior did not match what this fixture assumes (status=$live_empty_read_status, output='$live_empty_read')"
+  fi
+
+  LIVE_EMPTY_WRITE_FILE="$WORKDIR/live-empty-write.json"
+  : > "$LIVE_EMPTY_WRITE_FILE"
+  live_empty_write="$(jq --arg pr "42" --arg sha "deadbeefcafe" '.[$pr] = {"reviewed_sha": $sha}' "$LIVE_EMPTY_WRITE_FILE")"
+  live_empty_write_status=$?
+  if [[ "$live_empty_write_status" -eq 0 && -z "$live_empty_write" ]]; then
+    pass "live cross-check (write, file argument): real jq's write transform against an empty FILE also produces zero bytes of output — the exact quirk update_state() now replicates instead of silently fixing"
+  else
+    fail "live cross-check (write): real jq's empty-file-argument write behavior did not match what this fixture assumes (status=$live_empty_write_status, output='$live_empty_write')"
+  fi
+fi
+
 echo
 echo "state-persistence (python) fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

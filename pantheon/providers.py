@@ -75,12 +75,138 @@ Fixture suites: none today — docs/PYTHON-PORT.md §9 notes this as a pre-exist
 obligated to close. ``pantheon.cli``'s own black-box exams exercise the ``claude`` lane's argv
 construction indirectly via ``--dry-run`` (which never calls a provider) and via the
 ``PANTHEON_CLI``-parameterized suites where a real ``claude`` CLI happens to be resolvable.
+
+**Neutral launch cwd, never the PR checkout — the worst finding from an adversarial review
+(CRITICAL-1), closed with three layered fixes.** PATH-filtering, the env allowlist, and the
+process-group timeout above all assume the vulnerability enters through the SUBPROCESS'S OWN
+ARGV/ENV — but a provider CLI's OWN STARTUP auto-discovers repo-local configuration from its
+CURRENT WORKING DIRECTORY, entirely BEFORE any tool call and entirely OUTSIDE
+``--allowedTools``'s reach: a PR-committed ``.mcp.json`` (Claude Code auto-loads and SPAWNS every
+listed MCP server — arbitrary command execution, not a tool call this repo's own readonly-tier
+scoping ever sees), a PR-committed ``.claude/settings.json`` (hooks that fire on tool events —
+including on an ALLOWED ``Read``), or ``CLAUDE.md``/similar project-memory files (prompt content
+a PR fully controls, injected before this repo's own persona framing ever runs). Every one of
+these was reachable purely because this module launched the provider with ``cwd=repo_root`` — the
+PR's own checkout — live-reproduced by the reviewer with a fake ``claude`` binary that printed
+which MCP servers it would have spawned and confirmed a PR-committed hook would have fired on an
+allowed ``Read`` tool call. Fixed with defense in depth, all three layers, none alone sufficient:
+
+  1. **Neutral cwd.** Every provider now launches with ``cwd=neutral_cwd`` — a scratch directory
+     ``pantheon.cli`` creates and owns (never the repo checkout, never anywhere inside it) —
+     instead of ``cwd=repo_root``. A provider CLI's own startup-time config/MCP/hooks discovery
+     scans ITS OWN cwd (and, for some tools, ancestor directories of it); a neutral, repo-free
+     directory has nothing there to discover. The agent still reaches repo CONTENT exclusively
+     through the readonly git wrapper (now told the real repo root via an explicit
+     ``--repo-root`` flag baked into its own fixed Bash-tool prefix — see
+     ``pantheon.cli._wrapper_invocation``'s own docstring) and explicit ``Read``/``Grep``/``Glob``
+     calls against the repo root's own now-advertised absolute path (see
+     ``pantheon.cli._build_prompt``) — exactly the design's stated intent (the wrapper is the
+     ONLY sanctioned path back to the tree under ``readonly``), now actually true for the
+     provider's OWN startup-time behavior too, not just its later tool calls.
+  2. **``--bare`` on the claude lane, CONDITIONALLY (the only lane with a real, documented flag
+     for this — see :func:`_claude`'s own docstring for the full conditional and why it isn't
+     unconditional).** Verified against Claude Code's current official headless docs
+     (code.claude.com/docs/en/headless): ``--bare`` "reduce[s] startup time by skipping
+     auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md" — the
+     exact five vectors this finding named, in ONE documented flag, layered on top of (never
+     instead of) the neutral-cwd fix above. A live Codex review on this PR caught that an
+     unconditional ``--bare`` is a real usability regression, not a security one: the same
+     official doc discloses it ALSO skips OAuth/system-keychain login (the CLI lane's documented
+     primary auth path, docs/SETUP.md's Way C ``claude auth login`` — no env var at all), so
+     :func:`_claude` now passes it only when an explicit ``ANTHROPIC_API_KEY``/
+     ``CLAUDE_CODE_OAUTH_TOKEN`` is present, falling back to normal (keychain-capable) startup
+     otherwise — the neutral cwd itself stays unconditional either way, so this narrows an
+     ADDITIONAL hardening layer, not the primary fix.
+     ``codex``/``gemini``/``cursor-agent`` have **no equivalent documented flag** as of this
+     writing (researched against each CLI's current official docs before writing this — not
+     assumed): this is a disclosed, honest residual exposure for those three best-effort lanes,
+     not silently treated as closed — see DESIGN.md's "Security posture" for the same disclosure
+     in the repo's own binding spec.
+  3. **``_PROVIDER_ENV_PASSTHROUGH_KEYS`` re-audited.** Every key on that list already carried a
+     specific, documented reason before this fix (see that data's own comment) — re-reviewed here
+     specifically for "does this key exist ONLY because it's convenient, or because a named lane's
+     documented auth/locale surface genuinely needs it": every key survived that re-read (each is
+     tied to a specific lane's documented env-var auth mechanism, a POSIX locale/temp-dir
+     convention every CLI here needs to run at all, or the proxy-transport fix a prior Codex wave
+     already justified) — no key was removed, because none was found that exists WITHOUT a
+     specific need, and removing a genuinely-needed auth key would just break that lane's real
+     credential flow without closing anything (an execution-bearing variable like
+     ``NODE_OPTIONS``/``LD_PRELOAD`` was never on this allowlist in the first place — that closure
+     already existed, per round 3 above).
+
+**The cwd contract, enumerated — every behavior anywhere in this port that used to implicitly
+assume "the provider's own process cwd == the repo checkout", decided explicitly, not
+rediscovered one Codex round at a time.** A live Codex review on the round that introduced the
+neutral cwd above found THREE more instances of this exact assumption (P1 on the claude lane's
+own auth, P1 on the codex lane's own repo-presence check, P1 on trusted-mode's own command
+rooting) after the first pass only closed the ORIGINAL exfiltration vector — this is the
+enumeration that review asked for, so the next reader sees the contract instead of re-deriving
+it finding by finding. Each entry: the behavior, whether it genuinely depends on cwd == checkout,
+and how it's resolved.
+
+  - **claude's startup-time config/MCP/hooks auto-discovery** — YES, the original vulnerability.
+    Resolved: neutral cwd, unconditional under the ``readonly`` tier (round 1 above).
+  - **claude's OAuth/system-keychain login** (``claude auth login``, docs/SETUP.md's Way C) — NO,
+    keychain auth is tied to the user account, not cwd; broken instead by ``--bare``'s OWN
+    documented side effect (skips stored-credential lookup), triggered as a consequence of this
+    fix, not a cwd dependency itself. Resolved: ``--bare`` is now conditional on an explicit
+    ``ANTHROPIC_API_KEY``/``CLAUDE_CODE_OAUTH_TOKEN`` being present (see :func:`_claude`) — absent
+    either, Claude Code's own normal (keychain-capable) startup runs instead.
+  - **codex's non-interactive "am I in a git repository" guard** — YES, `codex exec` refuses to
+    run at all outside a git repository. Resolved: ``--skip-git-repo-check``, unconditional,
+    since this lane always launches from the neutral cwd (see :func:`_codex`).
+  - **gemini/cursor-agent's own config auto-discovery** — disclosed, unverified; no documented
+    opt-out flag exists for either CLI as of this writing (checked, not assumed). Left as the
+    honest residual exposure round 2 above and DESIGN.md's "Security posture" already disclose —
+    narrowed (nothing repo-local in a neutral scratch dir to discover) but not eliminated.
+  - **Trusted-mode's own bare ``git diff``/``git show``/``git log`` instructions** — YES, those
+    are relative-to-cwd commands, not ``-C``-scoped. Resolved: trusted mode roots the provider's
+    cwd at ``ctx.repo_root`` itself, restoring the pre-fix behavior for this ONE tier only (see
+    ``pantheon.cli._run_agent``'s own ``provider_cwd`` selection) — safe because trusted mode is
+    an explicit opt-in for content the operator ALREADY trusts (never a fork PR — DESIGN.md's
+    "Security posture") and already grants full, unrestricted Bash, so neutral-cwd protects
+    nothing additional there in the first place.
+  - **readonly tier's Read/Grep/Glob tool calls against the checkout** — YES, those tools take a
+    path argument, not implicitly "the cwd". Resolved: the prompt's own Run-context block now
+    advertises the repo root's ABSOLUTE path explicitly (``pantheon.cli._build_prompt``), paired
+    with an instruction that findings must still cite repo-RELATIVE paths (belt-and-suspenders on
+    top of ``pantheon.render``'s own mechanical redaction, see that module's own docstring).
+  - **readonly tier's readonly-git-wrapper invocation** — YES, the wrapper used to resolve the
+    repo via :func:`os.getcwd`. Resolved: ``--repo-root <repo_root>``, shell-quoted
+    (:func:`shlex.quote`), baked into the fixed Bash-tool permission prefix itself (see
+    ``pantheon.cli._wrapper_invocation`` and ``pantheon.execution._wrapper_cli``).
+  - **``pantheon.cli``'s OWN gate.conf/rules/spec reads** (base-pinned or working-tree) — NO,
+    these run in the TRUSTED orchestrator process itself (``pantheon.cli``'s own ``_git``/
+    ``basepin`` calls), never inside a launched provider subprocess at all — repo_root/cwd are
+    already passed EXPLICITLY to every one of these calls, unaffected by this whole fix.
+  - **PATH resolution for the provider CLI binary itself** (``_filtered_path``/``_resolve_cli``)
+    — NO, computed in the TRUSTED orchestrator process before the child is ever spawned;
+    ``_filtered_path`` already excludes ``os.getcwd()``/``repo_root`` explicitly, independent of
+    whatever the CHILD's own eventual cwd turns out to be.
+
+Every entry above is now a deliberate, documented decision — either the repo root is passed
+EXPLICITLY (the wrapper, Read/Grep/Glob, codex's repo-check opt-out), the behavior is correctly
+rootless (PATH resolution, ``pantheon.cli``'s own config reads), or the gap is an honestly
+disclosed residual (gemini/cursor). None of these should need rediscovering by a future review
+the way three of them were on this one.
+
+**The SAME contract, applied to the provider's ENV, not just its cwd (adversarial review, round
+6, Codex P1 — proof this list needed a sibling, not that it was wrong).** Everything above
+enumerates cwd-dependent behavior; it says nothing about a provider CLI's own env-var-driven
+config resolution — a SEPARATE door to the identical exfiltration vector, reopened when
+``_provider_env`` forwarded ``CLAUDE_CONFIG_DIR`` from ambient env unconditionally even after
+neutral cwd closed the cwd door. :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS`'s own header comment is
+that list's enumeration, in the identical spirit — every key classified PATH-SHAPED (needs a
+containment check, or a non-env resolution for ``HOME``) or not, so a NEW key added to that
+allowlist in the future has an obvious place to make the same call explicitly instead of
+defaulting to a blind passthrough.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -92,6 +218,8 @@ __all__ = [
     "KNOWN_PROVIDERS",
     "default_allowed_tools",
     "provider_run",
+    "trusted_roots",
+    "resolves_inside_a_trusted_root",
     "main",
 ]
 
@@ -138,7 +266,7 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini", "cursor")
 _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 
 
-def default_allowed_tools() -> str:
+def default_allowed_tools(repo_root: str | None = None) -> str:
     """The readonly-tier fallback ``--allowedTools`` value (see this module's own docstring for
     why this exists) — resolves :data:`_WRAPPER_SCRIPT_NAME`'s absolute path via
     ``pantheon.execution.resolve_console_script`` (checks both a venv's/system install's own
@@ -146,10 +274,23 @@ def default_allowed_tools() -> str:
     ``PATH`` lookup), falling back to the OLDER, unprotected ``python -m pantheon.execution
     wrapper`` form only when the console script genuinely isn't installed anywhere that function
     checks (a plain dev checkout — docs/PYTHON-PORT.md's own disclosed package-layout caveat for
-    this slice), with a loud stderr warning every time that fallback fires."""
+    this slice), with a loud stderr warning every time that fallback fires.
+
+    ``repo_root``, when given, is baked into the returned string as a fixed ``--repo-root``
+    literal — a CRITICAL fix (adversarial review), mirroring ``pantheon.cli``'s own
+    ``_wrapper_invocation()`` exactly (see that function's own docstring for the full rationale:
+    providers no longer launch with the repo checkout as their own cwd, so the wrapper needs the
+    real repo root told to it explicitly), INCLUDING shell-quoting it (:func:`shlex.quote`) — a
+    P2 finding from a live Codex review on ``pantheon.cli``'s own copy of this same embedding,
+    fixed identically here so this fallback doesn't reopen the same whitespace-in-checkout-path
+    bug for standalone use. Optional (default ``None``, omitting the flag entirely) so this
+    function's existing zero-argument call shape keeps working for genuinely standalone use (this
+    module's own ``python -m pantheon.providers run ...`` CLI, invoked with no ``repo-root``
+    positional) — the one case where no repo root is actually known yet."""
     candidate = execution.resolve_console_script(_WRAPPER_SCRIPT_NAME)
+    repo_root_suffix = f" --repo-root {shlex.quote(repo_root)}" if repo_root else ""
     if candidate is not None:
-        return f"Read,Grep,Glob,Bash({candidate} wrapper *)"
+        return f"Read,Grep,Glob,Bash({candidate} wrapper{repo_root_suffix} *)"
     print(
         f"pantheon: warning: the '{_WRAPPER_SCRIPT_NAME}' console script is not installed "
         "(checked alongside sys.executable and the per-user scripts directory) — falling back "
@@ -158,7 +299,7 @@ def default_allowed_tools() -> str:
         "package closes. Run one of those to get the hardened path.",
         file=sys.stderr,
     )
-    fallback_cmd = f"{sys.executable} -m pantheon.execution wrapper"
+    fallback_cmd = f"{sys.executable} -m pantheon.execution wrapper{repo_root_suffix}"
     return f"Read,Grep,Glob,Bash({fallback_cmd} *)"
 
 
@@ -177,55 +318,114 @@ def _read_prompt(prompt_file: str) -> str:
 # this module's own docstring already carries for their argv construction. Extend this list
 # explicitly when a real, documented need shows up; never fall back to a blanket copy to "just
 # make something work."
+#
+# EVERY key on this list is a security boundary (adversarial review, round 6, Codex P1 —
+# reopened CRITICAL-1 through a DIFFERENT door than the one already closed: not the provider's
+# cwd this time, but its ENV). Two mutually-exclusive categories, both audited below per-key:
+#
+#   PATH-SHAPED keys (a provider CLI — or the config-loading library underneath it, per the
+#   XDG Base Directory spec many of these CLIs honor as a fallback even without their OWN
+#   explicit override set — treats the value as a directory/file to READ CONFIG, MCP-server
+#   definitions, or hooks FROM at startup): forwarding one blindly from ambient env recreates
+#   CRITICAL-1's original exfiltration vector exactly, just one hop later — a hostile checkout's
+#   own env-loading mechanism (a `.envrc`, an environment-setting CI step reading repo content,
+#   ANY way a checkout can influence the parent process's env before this module runs — the same
+#   disclosed vector `pantheon.execution.real_home_dir`'s own docstring already names) pointing
+#   one of these AT a directory inside the checkout would let the provider CLI's own NORMAL
+#   startup load attacker-controlled MCP servers/hooks, entirely outside `--allowedTools`'s
+#   reach. These are listed in :data:`_PATH_SHAPED_ENV_KEYS` below and go through
+#   :func:`_safe_path_env_value` — verified (via :func:`resolves_inside_a_trusted_root`) to
+#   resolve OUTSIDE the repo root/cwd before being forwarded; a value that resolves INSIDE either
+#   is dropped (never forwarded, loudly), regardless of how it got set. ``HOME`` specifically is
+#   never even READ from ambient env at all — see :func:`_provider_env`'s own body for why a
+#   validate-or-drop check isn't strong enough for that one specifically.
+#
+#   NON-path keys (opaque credential values, locale/region/profile-name strings, proxy URLs):
+#   these have no filesystem "resolves inside the checkout" meaning at all — a string like an
+#   API key or a locale tag can't be redirected at a directory the way a path can. Forwarded
+#   as-is, audited below to confirm none of them is secretly path-shaped in some CLI's own docs.
 _PROVIDER_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
-    # Process/locale basics every one of these CLIs needs to run and print sane output.
+    # --- Process/locale basics every one of these CLIs needs to run and print sane output ---
+    # HOME: PATH-SHAPED, see _PATH_SHAPED_ENV_KEYS below — never read from ambient env at all.
     "HOME",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TERM",
+    "USER",  # a username STRING (not a path) — printed/logged by some CLIs, never resolved as one.
+    "LOGNAME",  # same as USER — POSIX's older name for the identical username string.
+    "LANG",  # a locale tag ("en_US.UTF-8") — a string, not a filesystem path.
+    "LC_ALL",  # same shape as LANG.
+    "LC_CTYPE",  # same shape as LANG.
+    "TERM",  # a terminal-type STRING ("xterm-256color") — not a path.
+    # TMPDIR: PATH-SHAPED (where temp files land) — see _PATH_SHAPED_ENV_KEYS below.
     "TMPDIR",
+    # TZ can rarely be a tzfile path (":/usr/share/zoneinfo/...") on some POSIX systems, but a
+    # hijacked TZ only ever corrupts DISPLAYED timestamps — no config/MCP/hook loading, no
+    # capability grant, not the CRITICAL-1 vector class this audit is scoped to. Left as a plain
+    # passthrough on that basis (a real path-shaped USE would be cosmetic-only, not exploitable).
     "TZ",
+    # XDG_CONFIG_HOME/XDG_CACHE_HOME/XDG_DATA_HOME/XDG_STATE_HOME: PATH-SHAPED (the XDG Base
+    # Directory spec's own config/cache/data/state ROOTS — several of these provider CLIs fall
+    # back to computing a path under one of these, or under HOME, when their OWN dedicated
+    # override is unset) — see _PATH_SHAPED_ENV_KEYS below.
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
-    # Claude Code CLI — the only integration-tested lane. Auth surface documented in
-    # docs/SETUP.md's "Post-install checklist"/Way C auth table: CLAUDE_CODE_OAUTH_TOKEN or
-    # ANTHROPIC_API_KEY (exactly one). CLAUDE_CONFIG_DIR is the CLI's own conventional config-dir
-    # override. The Bedrock/Vertex vars are disclosed in docs/SETUP.md as "supported by
+    # --- Claude Code CLI — the only integration-tested lane ---
+    # Auth surface documented in docs/SETUP.md's "Post-install checklist"/Way C auth table:
+    # CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY (exactly one) — opaque credential VALUES, not
+    # paths; there is nothing to "resolve inside the checkout" about a bearer token string. The
+    # Bedrock/Vertex vars are disclosed in docs/SETUP.md as "supported by
     # anthropics/claude-code-action itself... NOT wired through THIS repo's composite action" —
     # that disclosure is about the Action's `with:` inputs, not this CLI lane; a locally
     # configured `claude` CLI using them still needs them forwarded to behave the same way it
     # would run outside this gate.
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    # CLAUDE_CONFIG_DIR: PATH-SHAPED — the CLI's own conventional config-dir override, and the
+    # ORIGINAL live vector this whole round-6 audit closes (Claude's own current headless docs:
+    # verified against code.claude.com before this fix, not assumed). See
+    # _PATH_SHAPED_ENV_KEYS below.
     "CLAUDE_CONFIG_DIR",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_REGION",
-    "AWS_DEFAULT_REGION",
+    "CLAUDE_CODE_USE_BEDROCK",  # a boolean-flag string ("1"/"true") — not a path.
+    "CLAUDE_CODE_USE_VERTEX",  # same shape as CLAUDE_CODE_USE_BEDROCK.
+    "AWS_ACCESS_KEY_ID",  # an opaque credential VALUE — not a path.
+    "AWS_SECRET_ACCESS_KEY",  # an opaque credential VALUE — not a path.
+    "AWS_SESSION_TOKEN",  # an opaque credential VALUE — not a path.
+    "AWS_REGION",  # a region-name STRING ("us-east-1") — not a path.
+    "AWS_DEFAULT_REGION",  # same shape as AWS_REGION.
+    # AWS_PROFILE names a SECTION inside ~/.aws/credentials|config by NAME, not by path — it
+    # can't itself point anywhere; the FILES it indexes into are HOME-anchored, and HOME is now
+    # always the passwd-resolved real value (see _provider_env's own body), never ambient.
     "AWS_PROFILE",
+    # GOOGLE_APPLICATION_CREDENTIALS: PATH-SHAPED (a service-account-key FILE path) — a hijacked
+    # value here doesn't leak secrets OUT so much as let an attacker SUBSTITUTE their own
+    # credentials for the review run's GCP identity; still "points into the checkout" per this
+    # audit's own rule, so it gets the identical containment check. See _PATH_SHAPED_ENV_KEYS
+    # below.
     "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_CLOUD_PROJECT",
-    "CLOUD_ML_REGION",
-    # codex/gemini/cursor — best-effort lanes, no dedicated auth-surface doc in this repo; these
-    # are each CLI's own conventional API-key env var name.
+    "GOOGLE_CLOUD_PROJECT",  # a project-ID STRING — not a path.
+    "CLOUD_ML_REGION",  # a region-name STRING — not a path.
+    # --- codex/gemini/cursor — best-effort lanes, no dedicated auth-surface doc in this repo ---
+    # Each is that CLI's own conventional API-key env var name — opaque credential VALUES, not
+    # paths. NOTE (this audit's own "sweep their docs" sweep, verified live, not assumed): each
+    # of these three CLIs ALSO has its own config-dir override — CODEX_HOME (defaults to
+    # ~/.codex), GEMINI_CONFIG_DIR (defaults to ~/.gemini or ~/.config/gemini), CURSOR_CONFIG_DIR
+    # (defaults to ~/.cursor) — but NONE of the three is on this passthrough list today, so none
+    # is currently forwarded/exploitable; if one is ever added, it MUST go through
+    # :data:`_PATH_SHAPED_ENV_KEYS`/:func:`_safe_path_env_value` like CLAUDE_CONFIG_DIR, never as
+    # a plain passthrough.
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "CURSOR_API_KEY",
-    # Proxy transport vars -- a Codex review finding on this port's own PR: `pantheon.cli`'s own
-    # git/gh env already forwards these (dropping them broke `git fetch`/`gh pr view` behind a
-    # corporate HTTP(S) proxy); every networked PROVIDER invocation needs the identical fix, or
-    # a proxy-gated network still lets metadata/fetch through while every agent's own API call
-    # fails and reads UNVERIFIED. Both cases forwarded (see `pantheon.cli`'s own comment on this
-    # same allowlist for why).
+    # --- Proxy transport vars ---
+    # a Codex review finding on this port's own PR: `pantheon.cli`'s own git/gh env already
+    # forwards these (dropping them broke `git fetch`/`gh pr view` behind a corporate HTTP(S)
+    # proxy); every networked PROVIDER invocation needs the identical fix, or a proxy-gated
+    # network still lets metadata/fetch through while every agent's own API call fails and reads
+    # UNVERIFIED. URLs, not filesystem paths — "resolves inside the checkout" has no meaning for
+    # a proxy URL; a hijacked proxy value is a DIFFERENT (network-MITM) risk class, already
+    # implicitly accepted for the same reason `pantheon.cli`'s own identical allowlist accepts it
+    # (out of scope for this specific containment-check fix, not a "still open" finding of it).
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -234,6 +434,28 @@ _PROVIDER_ENV_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "https_proxy",
     "no_proxy",
     "all_proxy",
+)
+
+# PATH-SHAPED keys from the allowlist above that need the containment check
+# (:func:`resolves_inside_a_trusted_root`) before being forwarded — see the allowlist's own
+# header comment for the full rationale. ``HOME`` is deliberately NOT in this set: a
+# validate-or-drop check is weaker than never reading the ambient value in the first place (a
+# value could resolve OUTSIDE the repo root today and still have been set by the exact same
+# hostile env-loading mechanism this whole audit is about — the containment check only proves
+# "not currently pointed at the checkout", not "not attacker-influenced at all") — HOME instead
+# gets :func:`pantheon.execution.real_home_dir`'s OS-level (pwd database) resolution, which
+# cannot be redirected by any environment variable at all, matching the stronger guarantee that
+# function already gives the readonly git wrapper.
+_PATH_SHAPED_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "CLAUDE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "TMPDIR",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    }
 )
 
 # Force-cleared in every constructed env this module builds (never merely omitted) — a Codex
@@ -251,6 +473,38 @@ _PROVIDER_PYTHON_ENV_DEFENSIVE_CLEAR: dict[str, str] = {
     "PYTHONSTARTUP": "",
     "PYTHONNOUSERSITE": "1",
 }
+
+
+def trusted_roots(repo_root: str | None = None) -> list[str]:
+    """The realpath-resolved directories a checkout-controlled value must never resolve inside —
+    the current working directory ALWAYS, plus ``repo_root`` when given (round 2's fix on
+    :func:`_filtered_path`, factored out here so :func:`_provider_env`'s own containment check —
+    round 6 — shares the identical root set rather than each caller keeping its own copy of the
+    same security-critical list). See :func:`_filtered_path`'s own docstring for why BOTH are
+    needed (cwd alone misses a repo-controlled entry when launched from a nested directory).
+
+    **Public (not ``_``-prefixed) specifically so ``pantheon.cli`` can reuse it too** (adversarial
+    review, round 7, Codex P1 — CRITICAL-1's neutral-cwd control reopened a THIRD way:
+    ``tempfile.TemporaryDirectory()`` honors ambient ``TMPDIR``, so a hostile checkout exporting
+    it could put the "neutral" provider cwd back inside the repository. ``pantheon.cli.run_gate``
+    uses this same root set, together with :func:`resolves_inside_a_trusted_root`, to verify the
+    neutral workdir it creates actually resolves outside every trusted root before using it —
+    fail-closed if not, rather than trusting a fixed temp-base choice alone to be sufficient."""
+    roots = [os.path.realpath(os.getcwd())]
+    if repo_root:
+        real_repo_root = os.path.realpath(repo_root)
+        if real_repo_root not in roots:
+            roots.append(real_repo_root)
+    return roots
+
+
+def resolves_inside_a_trusted_root(path: str, roots: list[str]) -> bool:
+    """Whether ``path`` (realpath-resolved, following symlinks — never compared as a raw
+    string) is one of ``roots`` or lives somewhere underneath one. Shared by
+    :func:`_filtered_path` (a PATH entry) and :func:`_safe_path_env_value` (a path-shaped env
+    var's value) — the same "resolves inside a trusted root" test, one implementation."""
+    real_path = os.path.realpath(path)
+    return any(real_path == root or real_path.startswith(root + os.sep) for root in roots)
 
 
 def _filtered_path(repo_root: str | None = None) -> str:
@@ -271,21 +525,40 @@ def _filtered_path(repo_root: str | None = None) -> str:
     provider CLIs are installed through too many different mechanisms for a fixed directory
     allowlist (contrast ``pantheon.cli``'s/``pantheon.execution``'s ``TRUSTED_GIT_DIRS``,
     appropriate for git/gh specifically) to be practical here."""
-    roots = [os.path.realpath(os.getcwd())]
-    if repo_root:
-        real_repo_root = os.path.realpath(repo_root)
-        if real_repo_root not in roots:
-            roots.append(real_repo_root)
-
+    roots = trusted_roots(repo_root)
     kept: list[str] = []
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         if not entry or not os.path.isabs(entry):
             continue
-        real_entry = os.path.realpath(entry)
-        if any(real_entry == root or real_entry.startswith(root + os.sep) for root in roots):
+        if resolves_inside_a_trusted_root(entry, roots):
             continue
         kept.append(entry)
     return os.pathsep.join(kept)
+
+
+def _safe_path_env_value(key: str, value: str, roots: list[str]) -> str | None:
+    """Returns ``value`` unchanged when it resolves OUTSIDE every trusted root — an operator's
+    own, legitimate override (a real ``CLAUDE_CONFIG_DIR`` for a second account, say) — or
+    ``None`` (never forwarded) when it resolves INSIDE one, logging a loud warning either way a
+    value gets dropped. This is a validate-or-DROP gate, not a hard abort of the whole gate run:
+    every key routed through this is an OPTIONAL override (see :data:`_PATH_SHAPED_ENV_KEYS`'s
+    own header comment) whose absence just falls back to that provider CLI's own default — dropping
+    the hostile value, rather than aborting, is the correct fail-closed shape here (deny the
+    CAPABILITY the hostile value would have granted, without taking down an otherwise-legitimate
+    run over an env var most callers never even set). A relative ``value`` is realpath-resolved
+    against THIS process's own cwd by :func:`resolves_inside_a_trusted_root` — the common case
+    (the gate is invoked from inside the repo checkout) naturally lands it under the cwd trusted
+    root already in ``roots``, so no separate relative-path special-case is needed."""
+    if resolves_inside_a_trusted_root(value, roots):
+        print(
+            f"pantheon: warning: ambient {key} resolves inside a trusted root (the working "
+            "directory or the repo checkout) — refusing to forward it to the provider CLI (would "
+            "reopen the config/MCP/hook-loading exfiltration vector CRITICAL-1 closed, through "
+            f"the process's own environment instead of its cwd); {key} is omitted this run",
+            file=sys.stderr,
+        )
+        return None
+    return value
 
 
 def _provider_env(repo_root: str | None = None) -> dict[str, str]:
@@ -295,12 +568,35 @@ def _provider_env(repo_root: str | None = None) -> dict[str, str]:
     own docstring, round 3, for the concrete exploit a blanket copy left open). ``PATH`` is the
     filtered value from :func:`_filtered_path` (``repo_root``-aware); every other key is copied
     one at a time from the explicit :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` allowlist, never in
-    bulk."""
+    bulk.
+
+    **``HOME`` and every PATH-SHAPED key get extra treatment (adversarial review, round 6, Codex
+    P1 — reopened CRITICAL-1 through this function's ENV construction, not the cwd CRITICAL-1's
+    original fix already closed).** ``HOME`` is NEVER read from ambient env at all — resolved via
+    :func:`pantheon.execution.real_home_dir` (the passwd database), the identical fix already
+    applied to the readonly git wrapper's own env for the same hijack class, now shared rather
+    than re-derived here. Every key in :data:`_PATH_SHAPED_ENV_KEYS` (``CLAUDE_CONFIG_DIR`` and
+    the rest — see that set's own header comment) is passed through :func:`_safe_path_env_value`
+    first: a value that resolves inside the cwd or ``repo_root`` is dropped, never forwarded,
+    regardless of how it got set."""
     env: dict[str, str] = {"PATH": _filtered_path(repo_root)}
+
+    real_home = execution.real_home_dir()
+    if real_home:
+        env["HOME"] = real_home
+
+    roots = trusted_roots(repo_root)
     for key in _PROVIDER_ENV_PASSTHROUGH_KEYS:
+        if key == "HOME":
+            continue  # handled above — never read from ambient env at all, see this function's own docstring.
         value = os.environ.get(key)
-        if value is not None:
-            env[key] = value
+        if value is None:
+            continue
+        if key in _PATH_SHAPED_ENV_KEYS:
+            value = _safe_path_env_value(key, value, roots)
+            if value is None:
+                continue
+        env[key] = value
     env.update(_PROVIDER_PYTHON_ENV_DEFENSIVE_CLEAR)
     return env
 
@@ -377,11 +673,11 @@ def _run(
     """Runs ``argv`` (``argv[0]`` already resolved via :func:`_resolve_cli`, never a bare command
     name left for the child's own shell/exec lookup to re-resolve) with the explicitly
     constructed environment from :func:`_provider_env` — see this module's own docstring for why.
-    ``cwd`` mirrors ``cli/review-gate``'s own posture: that script ``cd``s to ``$REPO_ROOT`` once,
-    near the top, and never leaves it, so every provider it launches inherits the repo root as
-    its own cwd automatically; this port's callers are expected to pass ``ctx.repo_root``
-    explicitly instead (this module has no persistent process-wide cwd of its own to rely on).
-    Started with ``start_new_session=True`` (POSIX) so :func:`_terminate_group` can reach the
+    ``cwd`` is a NEUTRAL scratch directory (``pantheon.cli``'s own, never the repo checkout —
+    a CRITICAL fix, adversarial review: launching a provider with the repo checkout as its own
+    cwd let its startup-time config/MCP/hooks auto-discovery reach PR-controlled content entirely
+    outside ``--allowedTools``'s reach — see this module's own docstring for the full finding and
+    fix). Started with ``start_new_session=True`` (POSIX) so :func:`_terminate_group` can reach the
     WHOLE process group on a timeout, not just this one PID (see this module's own docstring).
     Merges stdout+stderr into one text stream — mirrors bash's own
     ``raw_output="$(run_with_timeout ... provider_run "$MODEL" "$prompt_file" 2>&1)"`` capture in
@@ -436,43 +732,130 @@ def _run(
     return stdout
 
 
-def _claude(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
+def _claude(
+    model: str,
+    prompt_file: str,
+    allowed_tools: str,
+    timeout: float | None,
+    repo_root: str | None,
+    neutral_cwd: str | None,
+) -> str:
     """Provider lane: Claude Code CLI. Default lane — the only one integration-tested (mirrors
     cli/providers/claude.sh). ``--permission-mode dontAsk`` (not "default"): Claude Code's own
     docs describe ``default`` mode as auto-approving reads only — everything else, including a
     tool call that DOES match ``--allowedTools``, still goes through a permission decision nothing
     can answer non-interactively outside a terminal; ``dontAsk`` is documented as the mode "for
-    CI pipelines and scripts", auto-denying anything not pre-approved rather than hanging."""
+    CI pipelines and scripts", auto-denying anything not pre-approved rather than hanging.
+
+    ``--bare`` — a CRITICAL fix (adversarial review), verified against Claude Code's current
+    official headless-mode docs (code.claude.com/docs/en/headless) before adding, not assumed:
+    documented to "reduce startup time by skipping auto-discovery of hooks, skills, plugins, MCP
+    servers, auto memory, and CLAUDE.md" — closing, in one flag, every one of the config-discovery
+    vectors this module's own docstring names, layered on top of (never instead of) launching from
+    a neutral ``cwd`` (see :func:`_run`'s own docstring).
+
+    **Passed CONDITIONALLY, only when an explicit credential is present — a P1 finding from a
+    live Codex review on this PR, correcting an earlier version's own docstring claim that
+    forwarding ``ANTHROPIC_API_KEY``/``CLAUDE_CODE_OAUTH_TOKEN`` made this "a non-issue".** That
+    claim assumed a token env var is always set; it isn't for the CLI lane's documented primary
+    auth path (docs/SETUP.md's Way C — ``claude auth login``, which stores credentials in the
+    system keychain, no env var at all). The SAME official doc that documents ``--bare`` also
+    discloses it skips OAuth/system-keychain login entirely, "only sees credentials you pass
+    explicitly" — an unconditional ``--bare`` would silently turn the CLI lane's default,
+    documented, interactively-authenticated setup into UNVERIFIED for every run, a real
+    usability regression, not a security one. Resolved by checking for an explicit credential
+    (either of the two env vars this module's own :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` already
+    forwards) before adding the flag: present -> ``--bare`` (the hardened path, appropriate for
+    unattended/CI use, which is what an explicit token implies); absent -> omit it, falling back
+    to Claude Code's own normal startup (stored/keychain auth still works, matching this lane's
+    pre-fix behavior for that one case). This does NOT reopen CRITICAL-1's own vulnerability
+    either way: the neutral ``cwd`` (layer 1 of that fix, see :func:`_run`'s own docstring) is
+    unconditional regardless of ``--bare`` — nothing repo-local exists in the scratch directory
+    for a provider's own startup-time discovery to find via cwd, credential source aside —
+    ``--bare`` is genuinely redundant defense-in-depth on top of that, not the primary control, so
+    making it conditional narrows an ADDITIONAL hardening layer, not the fix itself.
+
+    **Correction (adversarial review, round 6, Codex P1): the claim above was true for the CWD
+    door, but incomplete — CRITICAL-1 reopened through a SECOND, separate door this ``--bare``
+    conditionality never touched: the provider's own ENV.** Omitting ``--bare`` on the
+    stored-keychain path (correct, for local sessions — see above) still left
+    :func:`_provider_env` forwarding ``CLAUDE_CONFIG_DIR`` from ambient env unconditionally; a
+    hostile checkout's own env-loading mechanism pointing that AT a directory inside the checkout
+    got a normal Claude startup against attacker-controlled config (MCP servers, hooks) —
+    identical exfiltration, different door, ``--bare`` or not (an EXPLICIT ``CLAUDE_CONFIG_DIR``
+    override isn't something ``--bare``'s own OAuth/keychain-skip behavior touches either way).
+    Closed at :func:`_provider_env` itself, not here: every PATH-SHAPED key in
+    :data:`_PATH_SHAPED_ENV_KEYS` (``CLAUDE_CONFIG_DIR`` included) is now validated to resolve
+    outside the repo root/cwd before being forwarded, and ``HOME`` is never read from ambient env
+    at all — see that function's own docstring. Fixture proof, both ``--bare`` and no-``--bare``:
+    tests/test_providers.py's ``test_claude_env_never_forwards_a_claude_config_dir_pointed_
+    inside_the_repo_root_with_bare``/``..._without_bare``."""
     claude_bin = _resolve_cli("claude", repo_root)
     if claude_bin is None:
         raise ProviderError("'claude' CLI not found on PATH")
 
     prompt = _read_prompt(prompt_file)
-    tools = allowed_tools or default_allowed_tools()
-    argv = [claude_bin, "-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
+    tools = allowed_tools or default_allowed_tools(repo_root)
+    argv = [claude_bin]
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        argv.append("--bare")
+    argv += ["-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
     if model:
         argv += ["--model", model]
-    return _run(argv, timeout=timeout, cwd=repo_root, repo_root=repo_root)
+    return _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
 
 
-def _codex(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
+def _codex(
+    model: str,
+    prompt_file: str,
+    allowed_tools: str,
+    timeout: float | None,
+    repo_root: str | None,
+    neutral_cwd: str | None,
+) -> str:
     """Provider lane: Codex CLI. Best-effort — mirrors cli/providers/codex.sh's ``codex exec -``
-    invocation, prompt piped via stdin."""
+    invocation, prompt piped via stdin. No documented flag equivalent to the claude lane's
+    ``--bare`` exists for this CLI as of this writing (researched against Codex's own official
+    docs before landing this fix, not assumed) — this lane's own repo-local config/AGENTS.md
+    auto-discovery is a disclosed, honest residual exposure the neutral ``cwd`` below narrows
+    (nothing repo-local for it to discover in a scratch directory) but doesn't eliminate the way
+    an explicit flag would; see this module's own docstring and DESIGN.md's "Security posture".
+
+    ``--skip-git-repo-check`` — a P1 finding from a live Codex review on this PR: `codex exec`
+    refuses to run at all outside a git repository unless this flag is passed (verified against
+    `codex exec --help` and Codex CLI's own current docs — "Not inside a trusted directory and
+    --skip-git-repo-check was not specified"). Since this lane now ALWAYS launches from the
+    neutral scratch ``cwd`` (CRITICAL-1's own fix, deliberately never a git repository — see this
+    module's own docstring), omitting this flag would silently break every codex-configured gate
+    run, landing on UNVERIFIED for every PR rather than actually reviewing anything. The flag
+    only bypasses codex's own non-interactive repository GUARD for this one invocation — it does
+    not widen its sandbox, grant additional trust, or change anything this module's own
+    PATH-filtering/env-allowlist/process-isolation controls."""
     codex_bin = _resolve_cli("codex", repo_root)
     if codex_bin is None:
         raise ProviderError("'codex' CLI not found on PATH")
 
     prompt = _read_prompt(prompt_file)
-    argv = [codex_bin, "exec"]
+    argv = [codex_bin, "exec", "--skip-git-repo-check"]
     if model:
         argv += ["--model", model]
     argv.append("-")
-    return _run(argv, input_text=prompt, timeout=timeout, cwd=repo_root, repo_root=repo_root)
+    return _run(argv, input_text=prompt, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
 
 
-def _gemini(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
+def _gemini(
+    model: str,
+    prompt_file: str,
+    allowed_tools: str,
+    timeout: float | None,
+    repo_root: str | None,
+    neutral_cwd: str | None,
+) -> str:
     """Provider lane: Gemini CLI. Best-effort — mirrors cli/providers/gemini.sh's ``gemini -p
-    <prompt> [-m <model>]`` invocation."""
+    <prompt> [-m <model>]`` invocation. No documented flag equivalent to the claude lane's
+    ``--bare`` exists for this CLI as of this writing (researched against Gemini CLI's own
+    official docs before landing this fix, not assumed) — same disclosed residual exposure as the
+    codex lane above, narrowed but not eliminated by the neutral ``cwd`` below."""
     gemini_bin = _resolve_cli("gemini", repo_root)
     if gemini_bin is None:
         raise ProviderError("'gemini' CLI not found on PATH")
@@ -481,12 +864,24 @@ def _gemini(model: str, prompt_file: str, allowed_tools: str, timeout: float | N
     argv = [gemini_bin, "-p", prompt]
     if model:
         argv += ["-m", model]
-    return _run(argv, timeout=timeout, cwd=repo_root, repo_root=repo_root)
+    return _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
 
 
-def _cursor(model: str, prompt_file: str, allowed_tools: str, timeout: float | None, repo_root: str | None) -> str:
+def _cursor(
+    model: str,
+    prompt_file: str,
+    allowed_tools: str,
+    timeout: float | None,
+    repo_root: str | None,
+    neutral_cwd: str | None,
+) -> str:
     """Provider lane: Cursor CLI (``cursor-agent``). Best-effort — mirrors
-    cli/providers/cursor.sh's ``cursor-agent -p <prompt> [--model <model>]`` invocation."""
+    cli/providers/cursor.sh's ``cursor-agent -p <prompt> [--model <model>]`` invocation. No
+    documented flag equivalent to the claude lane's ``--bare`` exists for this CLI as of this
+    writing (its own official docs state it "honours the same `.cursor/rules/`, MCP servers... as
+    the desktop editor" with no disclosed opt-out — researched before landing this fix, not
+    assumed) — same disclosed residual exposure as the codex/gemini lanes above, narrowed but not
+    eliminated by the neutral ``cwd`` below."""
     cursor_bin = _resolve_cli("cursor-agent", repo_root)
     if cursor_bin is None:
         raise ProviderError("'cursor-agent' CLI not found on PATH")
@@ -495,7 +890,7 @@ def _cursor(model: str, prompt_file: str, allowed_tools: str, timeout: float | N
     argv = [cursor_bin, "-p", prompt]
     if model:
         argv += ["--model", model]
-    return _run(argv, timeout=timeout, cwd=repo_root, repo_root=repo_root)
+    return _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
 
 
 _DISPATCH = {"claude": _claude, "codex": _codex, "gemini": _gemini, "cursor": _cursor}
@@ -508,6 +903,7 @@ def provider_run(
     allowed_tools: str = "",
     timeout: float | None = None,
     repo_root: str | None = None,
+    neutral_cwd: str | None = None,
 ) -> str:
     """Dispatches to the named provider lane and returns its raw stdout (merged with stderr, see
     :func:`_run`). ``provider`` must be one of :data:`KNOWN_PROVIDERS` — an unrecognized name is
@@ -517,19 +913,30 @@ def provider_run(
     the ``claude`` lane (readonly-tier tool scoping — see :func:`_claude`); the other three ignore
     it, matching docs/CLI.md's disclosed "no readonly-tier tool restriction at all" gap for those
     lanes. ``repo_root``, when given (``pantheon.cli`` always passes its own resolved repo root),
-    is used BOTH as the launched provider's own ``cwd`` (mirroring ``cli/review-gate``'s own
-    ``cd "$REPO_ROOT"`` posture — see :func:`_run`) and as an additional trusted root excluded
-    from PATH resolution (see :func:`_filtered_path`)."""
+    is used as an additional trusted root excluded from PATH resolution (see
+    :func:`_filtered_path`) and threaded to the readonly-wrapper resolution helpers.
+
+    ``neutral_cwd``, when given (``pantheon.cli`` always passes a scratch directory it created
+    and owns), is the launched provider's own ``cwd`` — a CRITICAL fix (adversarial review): this
+    used to be ``repo_root`` (mirroring ``cli/review-gate``'s own ``cd "$REPO_ROOT"`` posture),
+    which let a provider's own startup-time config/MCP/hooks auto-discovery reach the PR's own
+    checkout before any tool call ever ran — see this module's own docstring for the full finding
+    and fix. Left ``None`` (the default), a caller gets the OLD behavior of inheriting this
+    process's own cwd unmodified — acceptable for genuinely standalone, operator-invoked use
+    (this module's own ``python -m pantheon.providers run ...`` CLI below, run at the operator's
+    own discretion, not as part of reviewing untrusted PR content) but never how
+    ``pantheon.cli``'s own gate run invokes this function."""
     fn = _DISPATCH.get(provider)
     if fn is None:
         raise ProviderError(f"unknown provider lane '{provider}' (known: {', '.join(KNOWN_PROVIDERS)})")
-    return fn(model, prompt_file, allowed_tools, timeout, repo_root)
+    return fn(model, prompt_file, allowed_tools, timeout, repo_root, neutral_cwd)
 
 
 # ---------------------------------------------------------------------------------------------
 # CLI — a thin black-box seam for ad hoc/manual verification (this module has no dedicated
 # fixture suite, see this module's own docstring for why):
-#   python -m pantheon.providers run <provider> <model> <prompt-file> [allowed-tools] [timeout] [repo-root]
+#   python -m pantheon.providers run <provider> <model> <prompt-file> [allowed-tools] [timeout] \
+#       [repo-root] [neutral-cwd]
 # Prints the raw output on success (exit 0); prints the ProviderError message to stderr and
 # exits 1 on failure.
 # ---------------------------------------------------------------------------------------------
@@ -540,7 +947,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(argv) < 4 or argv[0] != "run":
         print(
             "usage: python -m pantheon.providers run <provider> <model> <prompt-file> "
-            "[allowed-tools] [timeout] [repo-root]",
+            "[allowed-tools] [timeout] [repo-root] [neutral-cwd]",
             file=sys.stderr,
         )
         return 2
@@ -549,9 +956,10 @@ def main(argv: list[str] | None = None) -> int:
     allowed_tools = rest[0] if len(rest) > 0 else ""
     timeout = float(rest[1]) if len(rest) > 1 else None
     repo_root = rest[2] if len(rest) > 2 else None
+    neutral_cwd = rest[3] if len(rest) > 3 else None
 
     try:
-        output = provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root)
+        output = provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root, neutral_cwd)
     except ProviderError as e:
         print(str(e), file=sys.stderr)
         if e.output:

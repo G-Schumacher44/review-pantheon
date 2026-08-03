@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from pantheon import providers
+from pantheon import execution, providers
 
 
 @pytest.fixture()
@@ -88,6 +88,8 @@ def _install_fake_popen(monkeypatch, **fake_proc_kwargs):
 
 def test_claude_argv_shape(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     captured = _install_fake_popen(monkeypatch, stdout='{"ok":true}')
 
     out = providers.provider_run("claude", "sonnet", prompt_file, "Read,Grep,Glob,Bash(/wrap *)")
@@ -109,6 +111,168 @@ def test_claude_argv_shape(monkeypatch, prompt_file) -> None:
     assert captured["kwargs"]["env"] is not None
     assert captured["kwargs"]["shell"] is False
     assert captured["kwargs"]["start_new_session"] is True
+
+
+# ---------------------------------------------------------------------------------------------
+# --bare's conditional presence — a P1 finding from a live Codex review on this PR: an earlier
+# version passed --bare unconditionally, which (per Claude Code's own official headless docs)
+# ALSO skips OAuth/system-keychain login — a real usability regression for the CLI lane's
+# documented primary auth path (docs/SETUP.md's Way C, `claude auth login`, no env var at all).
+# --bare must appear only when an explicit credential env var is present.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_claude_argv_includes_bare_when_explicit_api_key_present(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+    assert "--bare" in captured["argv"]
+
+
+def test_claude_argv_includes_bare_when_explicit_oauth_token_present(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test-456")
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+    assert "--bare" in captured["argv"]
+
+
+def test_claude_argv_omits_bare_when_no_explicit_credential_present(monkeypatch, prompt_file) -> None:
+    # The locally-authenticated-session case the Codex finding names: no explicit token env var
+    # (e.g. `claude auth login`'s stored keychain credential instead) -- --bare must be absent so
+    # Claude Code's own normal (keychain-capable) startup still works.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+    assert "--bare" not in captured["argv"]
+
+
+def test_claude_cwd_stays_neutral_regardless_of_bare_flag_presence(monkeypatch, prompt_file) -> None:
+    # "Prove both directions": making --bare conditional (the usability fix above) must NOT
+    # reopen CRITICAL-1's own vulnerability (a provider's startup-time config/MCP/hooks
+    # auto-discovery reaching the PR checkout). The neutral cwd is layer 1 of that fix and is
+    # UNCONDITIONAL -- it does not depend on whether --bare fires. Proven here by checking the
+    # actual Popen cwd kwarg (not just the argv) across both the with-credential and
+    # without-credential cases: in neither case does cwd ever become repo_root.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    captured_no_bare = _install_fake_popen(monkeypatch)
+    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
+    assert "--bare" not in captured_no_bare["argv"]
+    assert captured_no_bare["kwargs"]["cwd"] == "/some/scratch/dir"
+    assert captured_no_bare["kwargs"]["cwd"] != "/some/repo/root"
+
+
+# ---------------------------------------------------------------------------------------------
+# CLAUDE_CONFIG_DIR reopening CRITICAL-1 through the provider's ENV (adversarial review, round 6,
+# Codex P1). The --bare fix above (previous section) closed CRITICAL-1's cwd door; this section
+# proves the (separate) env door is closed too, on BOTH the --bare (explicit token) and no-bare
+# (stored keychain) paths -- neither "prove both directions" fixture above actually exercised
+# CLAUDE_CONFIG_DIR at all, which is exactly how this reopened without either of them catching it.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root_with_bare(
+    monkeypatch, prompt_file, tmp_path
+) -> None:
+    # The --bare (explicit-token) path: an attacker sets CLAUDE_CONFIG_DIR (via ANY mechanism
+    # that can influence this process's ambient env before it runs -- a repo-local .envrc, an
+    # environment-setting CI step reading repo content) to a directory inside the checkout
+    # containing a marker MCP-server/hook config. That marker directory's PATH must never reach
+    # the subprocess env at all -- if it did, Claude Code's own normal startup would load it
+    # (config/MCP/hook auto-discovery happens before --allowedTools's reach), even with --bare
+    # present, since --bare only skips OAuth/keychain login, not an EXPLICIT CLAUDE_CONFIG_DIR
+    # override.
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    marker_config_dir = repo_root / ".claude-hijacked"
+    marker_config_dir.mkdir()
+    (marker_config_dir / "settings.json").write_text('{"hooks": {"marker": "FIRED"}}')
+
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(marker_config_dir))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run(
+        "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
+    )
+
+    assert "--bare" in captured["argv"]  # still the credential-present path
+    env = captured["kwargs"]["env"]
+    assert "CLAUDE_CONFIG_DIR" not in env, "the marker config directory's path must never reach the subprocess env"
+
+
+def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root_without_bare(
+    monkeypatch, prompt_file, tmp_path
+) -> None:
+    # The no-bare (stored-keychain-session) path -- the coordinator's own naming of this as the
+    # door CRITICAL-1's --bare fix correctly left open (for usability) but that a blindly-
+    # forwarded CLAUDE_CONFIG_DIR reopened anyway, --bare or not.
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    marker_config_dir = repo_root / ".claude-hijacked"
+    marker_config_dir.mkdir()
+    (marker_config_dir / "settings.json").write_text('{"hooks": {"marker": "FIRED"}}')
+
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(marker_config_dir))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run(
+        "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
+    )
+
+    assert "--bare" not in captured["argv"]  # still the stored-keychain-session path
+    env = captured["kwargs"]["env"]
+    assert "CLAUDE_CONFIG_DIR" not in env, "the marker config directory's path must never reach the subprocess env"
+
+
+def test_claude_env_still_forwards_a_legitimate_claude_config_dir_without_bare(
+    monkeypatch, prompt_file, tmp_path
+) -> None:
+    # Regression guard (fixture (c) -- "don't re-break what you just fixed"): a real local
+    # multi-account CLAUDE_CONFIG_DIR override that resolves OUTSIDE any trusted root must still
+    # reach the subprocess env, on the stored-keychain (no --bare) path an operator actually uses
+    # day to day.
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    legitimate_config_dir = tmp_path / "not-the-checkout" / ".claude-alt-account"
+    legitimate_config_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(legitimate_config_dir))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run(
+        "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
+    )
+
+    assert "--bare" not in captured["argv"]
+    env = captured["kwargs"]["env"]
+    assert env["CLAUDE_CONFIG_DIR"] == str(legitimate_config_dir)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+    captured_with_bare = _install_fake_popen(monkeypatch)
+    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
+    assert "--bare" in captured_with_bare["argv"]
+    assert captured_with_bare["kwargs"]["cwd"] == "/some/scratch/dir"
+    assert captured_with_bare["kwargs"]["cwd"] != "/some/repo/root"
 
 
 def test_claude_omits_model_flag_when_empty(monkeypatch, prompt_file) -> None:
@@ -135,10 +299,24 @@ def test_codex_pipes_prompt_via_stdin(monkeypatch, prompt_file) -> None:
     captured = _install_fake_popen(monkeypatch)
 
     providers.provider_run("codex", "o3", prompt_file, "")
-    assert captured["argv"] == ["/usr/bin/codex", "exec", "--model", "o3", "-"]
+    assert captured["argv"] == ["/usr/bin/codex", "exec", "--skip-git-repo-check", "--model", "o3", "-"]
     # stdin is piped (not inherited) whenever input_text is given — Popen's own stdin= kwarg,
     # not an `input=` kwarg (that belongs to communicate(), not Popen's constructor).
     assert captured["kwargs"]["stdin"] == subprocess.PIPE
+
+
+def test_codex_argv_always_includes_skip_git_repo_check(monkeypatch, prompt_file) -> None:
+    # A live Codex-review finding (P1) on this PR's own security round: `codex exec` refuses to
+    # run at all outside a git repository unless this flag is passed — and this lane now ALWAYS
+    # launches from a neutral, deliberately-not-a-git-repo scratch cwd (CRITICAL-1's own fix), so
+    # omitting this flag would silently turn every codex-configured gate run into UNVERIFIED.
+    # Checked with no model given too, to prove the flag isn't accidentally coupled to --model.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("codex"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("codex", "", prompt_file, "")
+    assert "--skip-git-repo-check" in captured["argv"]
+    assert captured["argv"].index("--skip-git-repo-check") == captured["argv"].index("exec") + 1
 
 
 def test_gemini_argv_shape(monkeypatch, prompt_file) -> None:
@@ -183,25 +361,48 @@ def test_nonzero_exit_raises_provider_error_with_output(monkeypatch, prompt_file
 
 
 # ---------------------------------------------------------------------------------------------
-# Provider process cwd + repo_root threading (a Codex finding: neither provider_run() nor _run()
-# supplied cwd, so a launched provider inherited whatever directory the gate process happened to
-# be running from instead of the repo root — cli/review-gate's own cd "$REPO_ROOT" posture).
+# Provider process cwd + repo_root/neutral_cwd threading. A Codex finding originally added
+# cwd=repo_root here (neither provider_run() nor _run() supplied any cwd, so a launched provider
+# inherited whatever directory the gate process happened to be running from instead of the repo
+# root — cli/review-gate's own cd "$REPO_ROOT" posture). A CRITICAL fix from a LATER adversarial
+# review reversed that specific choice: cwd=repo_root let a provider's own startup-time
+# config/MCP/hooks auto-discovery reach the PR's own checkout entirely outside --allowedTools's
+# reach (a fake-claude-binary PoC confirmed it would auto-load a PR-committed .mcp.json and fire a
+# PR-committed hook on an ALLOWED Read call) — see this module's own docstring for the full
+# finding. cwd is now neutral_cwd (a scratch directory pantheon.cli creates and owns); repo_root
+# is still threaded through, but only for PATH-filtering (_filtered_path) and readonly-wrapper
+# resolution, never as the launched process's own working directory.
 # ---------------------------------------------------------------------------------------------
 
 
-def test_provider_run_passes_repo_root_as_cwd(monkeypatch, prompt_file) -> None:
+def test_provider_run_uses_neutral_cwd_never_repo_root_as_the_launched_process_cwd(monkeypatch, prompt_file) -> None:
+    # The CRITICAL-1 fix, live-proved: even when repo_root IS given (as pantheon.cli always
+    # gives it, for PATH-filtering/wrapper resolution), the launched process's own cwd must be
+    # neutral_cwd, never repo_root — repo_root must never leak into the Popen cwd kwarg again.
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     captured = _install_fake_popen(monkeypatch)
 
-    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root")
-    assert captured["kwargs"]["cwd"] == "/some/repo/root"
+    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
+    assert captured["kwargs"]["cwd"] == "/some/scratch/dir"
+    assert captured["kwargs"]["cwd"] != "/some/repo/root"
 
 
-def test_provider_run_cwd_is_none_when_repo_root_not_given(monkeypatch, prompt_file) -> None:
+def test_provider_run_cwd_is_none_when_neither_repo_root_nor_neutral_cwd_given(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     captured = _install_fake_popen(monkeypatch)
 
     providers.provider_run("claude", "", prompt_file, "")
+    assert captured["kwargs"]["cwd"] is None
+
+
+def test_provider_run_cwd_is_none_when_only_repo_root_given_no_neutral_cwd(monkeypatch, prompt_file) -> None:
+    # Regression guard for the OLD (pre-CRITICAL-1) behavior: repo_root alone, with no
+    # neutral_cwd, must NOT fall back to using repo_root as cwd — that would silently reopen the
+    # exact vulnerability this fix closes for any caller that forgot to pass neutral_cwd.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root")
     assert captured["kwargs"]["cwd"] is None
 
 
@@ -437,6 +638,100 @@ def test_provider_env_path_is_always_filtered_never_ambient(monkeypatch, tmp_pat
     env = providers._provider_env()
     assert str(checkout) not in env["PATH"].split(os.pathsep)
     assert "/usr/bin" in env["PATH"].split(os.pathsep)
+
+
+# ---------------------------------------------------------------------------------------------
+# _provider_env() -- round 6, Codex P1: CRITICAL-1 reopened through the provider's ENV (not its
+# cwd, already closed). HOME is never read from ambient env; CLAUDE_CONFIG_DIR and every other
+# PATH-SHAPED key in _PATH_SHAPED_ENV_KEYS is dropped when it resolves inside a trusted root
+# (cwd or repo_root), forwarded unchanged otherwise.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_provider_env_home_is_never_read_from_ambient_env(monkeypatch, tmp_path) -> None:
+    hijacked_home = tmp_path / "hostile-checkout-home"
+    hijacked_home.mkdir()
+    monkeypatch.setenv("HOME", str(hijacked_home))
+
+    env = providers._provider_env()
+
+    assert env.get("HOME") != str(hijacked_home)
+    # Whatever HOME IS, it must be the real passwd-database resolution -- the same source
+    # pantheon.execution.real_home_dir() (and pantheon.execution's own git-wrapper env) already
+    # uses, never the ambient value this test just hijacked.
+    real_home = execution.real_home_dir()
+    if real_home:
+        assert env["HOME"] == real_home
+    else:
+        assert "HOME" not in env
+
+
+def test_provider_env_drops_claude_config_dir_pointed_inside_the_repo_root(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    hostile_config_dir = repo_root / ".claude-hijack"
+    hostile_config_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(hostile_config_dir))
+
+    env = providers._provider_env(repo_root=str(repo_root))
+
+    assert "CLAUDE_CONFIG_DIR" not in env
+
+
+def test_provider_env_drops_claude_config_dir_pointed_at_the_cwd(monkeypatch, tmp_path) -> None:
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cwd))
+
+    env = providers._provider_env()
+
+    assert "CLAUDE_CONFIG_DIR" not in env
+
+
+def test_provider_env_forwards_claude_config_dir_when_it_resolves_outside_every_trusted_root(
+    monkeypatch, tmp_path
+) -> None:
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    legitimate_config_dir = tmp_path / "not-the-checkout" / ".claude-alt-account"
+    legitimate_config_dir.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(legitimate_config_dir))
+
+    env = providers._provider_env(repo_root=str(repo_root))
+
+    assert env["CLAUDE_CONFIG_DIR"] == str(legitimate_config_dir)
+
+
+def test_provider_env_drops_every_path_shaped_key_pointed_inside_the_repo_root(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    for key in sorted(providers._PATH_SHAPED_ENV_KEYS):
+        hostile_dir = repo_root / f"hijack-{key.lower()}"
+        hostile_dir.mkdir()
+        monkeypatch.setenv(key, str(hostile_dir))
+
+    env = providers._provider_env(repo_root=str(repo_root))
+
+    for key in providers._PATH_SHAPED_ENV_KEYS:
+        assert key not in env, f"{key} should have been dropped (resolves inside repo_root)"
+
+
+def test_provider_env_symlink_resolved_path_shaped_value_still_caught(monkeypatch, tmp_path) -> None:
+    # The containment check is realpath-based (follows symlinks), not a raw string-prefix
+    # comparison -- a value that only LOOKS like it's outside the checkout, but symlinks back
+    # inside it, must still be caught.
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    real_hostile_dir = repo_root / "real-hostile-config"
+    real_hostile_dir.mkdir()
+    outside_symlink = tmp_path / "looks-legitimate"
+    outside_symlink.symlink_to(real_hostile_dir)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(outside_symlink))
+
+    env = providers._provider_env(repo_root=str(repo_root))
+
+    assert "CLAUDE_CONFIG_DIR" not in env
 
 
 # ---------------------------------------------------------------------------------------------

@@ -371,9 +371,9 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
   | Personas (`agents/*.md`) | ✅ `$PANTHEON_ROOT/agents` — review-pantheon's own installed copy, never the target repo's | ✅ `$ACTION_PATH/agents` by default; ✅ base-pinned into `$RUNNER_TEMP` when `personas_path` is set (this PR) | ✅ base-pinned into `$RUNNER_TEMP` (this PR — was `$GITHUB_WORKSPACE`) |
   | Verdict decider (`cli/lib/verdict.sh` / `decide_verdict.py`) | ✅ `$PANTHEON_ROOT/cli/lib/verdict.sh` — this repo's own file | ✅ `$ACTION_PATH/action/decide_verdict.py` | ✅ base-pinned into `$RUNNER_TEMP` (this PR — was `$GITHUB_WORKSPACE`) |
   | Read-only git wrapper | ✅ `$PANTHEON_ROOT/cli/lib/pantheon-git-readonly.sh` | ✅ `$ACTION_PATH/cli/lib/pantheon-git-readonly.sh` | ✅ base-pinned into `$RUNNER_TEMP` (prior fix) |
-  | House rules / spec (`REVIEW_RULES.md` / `DESIGN.md`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ⚠️ read from `$GITHUB_WORKSPACE` — documented exception, see "Surface differences" |
-  | `gate.conf`'s `execution=` key | ✅ base-pinned | — (no `gate.conf`; `execution` is an explicit input, operator-typed, not PR content) | — (no config surface at all) |
-  | `gate.conf`'s other keys (provider/model/base_branch/rules_file/spec_file/agents) | ⚠️ working-tree-sourced — lower-stakes, doesn't control tool-execution breadth or which files get read | — | — |
+  | House rules / spec (`REVIEW_RULES.md` / `DESIGN.md`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned into `$RUNNER_TEMP` (closed by an adversarial-review fix — was `$GITHUB_WORKSPACE`, see "Surface differences") |
+  | `gate.conf`'s `execution=`/`provider=`/`rules_file=`/`spec_file=`/`agents=` keys | ✅ base-pinned (all five, one `git show`+parse — an adversarial-review fix generalized `execution=`'s own pre-existing base-pinning to the other four, closing docs/CLI.md's disclosed issue #13 for `provider=` along the way) | — (no `gate.conf`; these are explicit inputs, operator-typed, not PR content) | — (no config surface at all) |
+  | `gate.conf`'s `model=`/`base_branch=` keys | ⚠️ working-tree-sourced — neither affects tool-execution breadth or which file is trusted as a judgment boundary (`model` only picks which model an already-scoped provider uses; `base_branch` is a fallback only ever consulted when `gh pr view` itself doesn't report a `baseRefName`) | — | — |
   | `.review-gate-state.json` (follow-up-mode `reviewed_sha`) | ⚠️ working-tree-sourced (see "Honest limit" below) | — | — |
   | Prompt-builder shell (`cli/lib/execution.sh`, `action/lib/build_prompt.sh`, `action/lib/combine_verdicts.sh`) | ✅ this repo's own file | ✅ `$ACTION_PATH/...` | ✅ inline in the workflow file itself (this repo's own committed YAML, not the target repo's content) |
   | The diff / file contents under review | untrusted **by design** — this is the data the gate exists to evaluate; never treated as instructions (`agents/*.md`'s "Untrusted data, not instructions") | same | same |
@@ -467,6 +467,227 @@ execution=readonly       # readonly (default) or trusted — see "Security postu
     duplicating the table here. Getting there took eight rounds of individual Codex/Apollo
     findings against this same wrapper, each reproduced live against the pre-fix version before
     the fix landed: [docs/HARDENING-HISTORY.md](docs/HARDENING-HISTORY.md).
+- **Provider processes launch from a neutral cwd, never the repo checkout — the CLI (Python)
+  lane, an adversarial-review fix.** (The two Action surfaces get the identical protection
+  through a DIFFERENT mechanism, since a `uses:` step can't be cwd-relocated — see the dedicated
+  writeup below, "Both Action surfaces close the identical vector too" — this bullet and its
+  three numbered layers describe the CLI lane's own fix specifically.) `--allowedTools`/the
+  read-only wrapper scope what a
+  provider CLI's *tool calls* can do, but a provider CLI's own STARTUP also auto-discovers
+  repo-local configuration from its current working directory — entirely before any tool call,
+  entirely outside `--allowedTools`'s reach: a PR-committed `.mcp.json` (Claude Code auto-loads
+  and SPAWNS every listed MCP server — arbitrary command execution, not a scoped tool call), a
+  PR-committed `.claude/settings.json` (hooks that fire on tool events, including an ALLOWED
+  `Read`), or `CLAUDE.md`-style project-memory files (PR-controlled prompt content injected
+  before this repo's own persona framing ever runs). Live-reproduced by the reviewer with a fake
+  `claude` binary that printed which MCP servers it would spawn and confirmed a PR-committed hook
+  would fire on an allowed `Read`. Closed with three layers, none alone sufficient:
+  1. `pantheon.cli` creates a scratch directory it owns (never the checkout, never anywhere
+     inside it) and passes it as every provider's own `cwd` (`pantheon.providers`' `neutral_cwd`
+     parameter) — nothing repo-local for a provider's own startup-time scan to find. The agent
+     still reaches repo content exclusively through the readonly git wrapper (now told the real
+     repo root via a fixed `--repo-root` literal baked into its own Bash-tool permission prefix —
+     see `pantheon.cli._wrapper_invocation`) and explicit `Read`/`Grep`/`Glob` calls against the
+     repo root's own now-advertised absolute path (the prompt's Run-context block; previously
+     only the basename).
+  2. The claude lane also passes `--bare` — verified against Claude Code's current official
+     headless docs before adding, not assumed: documented to skip auto-discovery of hooks,
+     skills, plugins, MCP servers, auto memory, and CLAUDE.md, in one flag, layered on top of (not
+     instead of) the neutral cwd. Codex/Gemini/Cursor have **no documented equivalent flag** as of
+     this writing (each CLI's own current official docs were checked) — a disclosed, honest
+     residual exposure for those three best-effort lanes, narrowed (nothing repo-local in a
+     neutral cwd) but not eliminated, not silently treated as closed.
+  3. `pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS` (the explicit env allowlist every
+     provider subprocess receives) was re-audited against "does this key exist only because it's
+     convenient, or because a named lane's documented auth/locale surface genuinely needs it" —
+     every key survived; none were removed (each ties to a specific lane's documented env-var
+     auth mechanism, a locale/temp-dir convention every listed CLI needs to run, or the
+     proxy-transport fix a prior Codex wave already justified).
+  - **A live Codex P1 reopened the SAME vulnerability through the provider's ENV rather than its
+    cwd, in a later round (round 6): layer 1 above (neutral cwd) closes the cwd door, but layer 3's
+    own re-audit missed that several allowlisted keys are themselves PATH-shaped config-dir
+    overrides a provider CLI honors — forwarding one blindly from ambient env reopens the identical
+    config/MCP/hook-loading exfiltration, one hop later. Concretely: `CLAUDE_CONFIG_DIR` forwarded
+    unconditionally meant a hostile checkout's own env-loading mechanism (a `.envrc`, an
+    environment-setting CI step reading repo content — any way a checkout can influence the parent
+    process's env before this module runs) pointing it AT a directory inside the checkout got a
+    normal Claude startup against attacker-controlled config, `--bare` or not (an explicit
+    `CLAUDE_CONFIG_DIR` override isn't something `--bare`'s own OAuth/keychain-skip behavior
+    touches). Closed by classifying every allowlisted key as PATH-SHAPED or not
+    (`pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS`'s own header comment is now that
+    classification, key by key, with the reasoning for each): `HOME` is never read from ambient env
+    at all — resolved via `pantheon.execution.real_home_dir()` (the POSIX passwd database,
+    `pwd.getpwuid`, un-redirectable by any environment variable — the identical fix already applied
+    to the readonly git wrapper's own env, now shared rather than re-derived); every other
+    PATH-SHAPED key (`CLAUDE_CONFIG_DIR`, the four `XDG_*` dirs, `TMPDIR`,
+    `GOOGLE_APPLICATION_CREDENTIALS`) is validated (`pantheon.providers._safe_path_env_value`) to
+    resolve OUTSIDE the repo root/cwd before being forwarded — a value that resolves inside either
+    is dropped (never forwarded, loudly), regardless of how it got set; the CLI's own default takes
+    over instead. A genuinely legitimate override (an operator's real, non-repo `CLAUDE_CONFIG_DIR`
+    for a second account) still passes the check and is forwarded unchanged. Fixture proof, both
+    directions, both the `--bare` and no-`--bare` (stored-keychain) paths:
+    `tests/test_providers.py`'s `test_claude_env_never_forwards_a_claude_config_dir_pointed_
+    inside_the_repo_root_with_bare`/`..._without_bare`/
+    `test_claude_env_still_forwards_a_legitimate_claude_config_dir_without_bare`.
+  - **A consequence of exposing the repo's absolute path (step 1 above) that needed its own
+    close: the reviewing model can echo that path back into a finding's own text, which then
+    reaches the POSTED PR comment.** On a CI runner that's a harmless ephemeral path; on a CLI-lane
+    run from a maintainer's own machine it's their real home directory (often containing their
+    username), published into what may be a public PR — an information-disclosure regression an
+    otherwise-correct fix would have introduced. Closed mechanically, not by asking the persona
+    nicely: `pantheon.render`'s existing sanitize-at-render chokepoint (`sanitize_inline` — the
+    same function DESIGN.md's "Validation surface" section already describes as the one place
+    every model-controlled display field is sanitized before it reaches a comment) now also
+    redacts every occurrence of the repo's absolute path to the placeholder `<repo>`, in every
+    human-readable field AND the machine-tail raw-JSON block (the same information would otherwise
+    just resurface there, unredacted). The prompt's own Run-context block additionally tells the
+    persona explicitly that findings must cite repo-RELATIVE paths (belt-and-suspenders — never
+    the primary control, since prompt instructions are advisory, not enforced). Fixture:
+    `tests/test-render-comment-python.sh`'s repo-root-redaction case — a verdict whose summary/
+    issue/file/scenario contain the absolute repo root renders with every occurrence replaced by
+    `<repo>`, including the machine tail, with a regression-direction guard proving the redaction
+    is opt-in (via `PANTHEON_REPO_ROOT`) and doesn't fire when unset.
+  - **A live Codex review on this fix's own PR found THREE more instances of the same class —
+    code that implicitly assumed "the provider's cwd == the repo checkout" — after the first pass
+    above closed only the original exfiltration vector.** `pantheon.providers`' own module
+    docstring now carries the full enumeration ("The cwd contract, enumerated") every future
+    reader should consult instead of rediscovering these one review round at a time; summarized:
+    (1) claude's `--bare` flag also skips OAuth/system-keychain login (docs/SETUP.md's Way C,
+    `claude auth login`) — fixed by making `--bare` conditional on an explicit
+    `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` being present, never unconditional; (2) the
+    codex lane's own `codex exec` refuses to run at all outside a git repository — fixed with
+    `--skip-git-repo-check`, a real documented flag for exactly this, verified before adding;
+    (3) `execution=trusted` still launched the provider from the neutral scratch dir, breaking
+    the bare `git diff`/`git show`/`git log` commands `_build_prompt`'s own trusted-mode
+    instructions rely on — fixed by rooting the provider's cwd at `ctx.repo_root` itself under
+    that ONE tier (trusted mode is an explicit opt-in for content the operator already trusts,
+    never a fork PR, and already grants unrestricted Bash, so neutral-cwd protects nothing
+    additional there). The readonly-tier `--repo-root` wrapper-prefix interpolation was also
+    found unquoted (a checkout path containing whitespace would split into two argv tokens) —
+    fixed with `shlex.quote`. Verified in both directions, not just that these three regressions
+    are closed: `tests/test_providers.py`'s
+    `test_claude_cwd_stays_neutral_regardless_of_bare_flag_presence` and
+    `tests/test_cli_helpers.py`'s paired `test_run_agent_uses_neutral_cwd_under_readonly_execution`/
+    `test_run_agent_uses_repo_root_as_cwd_under_trusted_execution` both prove the readonly tier's
+    neutral-cwd protection is unaffected by these three fixes — a regression-fix that reopened the
+    original vulnerability would have been the real failure mode here, not just the three bugs
+    themselves.
+  - **Both Action surfaces close the identical vector too — a live Artemis blocker on this repo's
+    own self-hosted gate, round 8, and the single largest scope gap in this whole fix's history:
+    every layer above only ever covered the CLI (Python) lane.** `action.yml` (the published
+    composite action) and `action/review.yml` (the vendored, no-config-surface twin) each invoke
+    `claude-code-action` with cwd at the checked-out PR's own working tree — a `uses:` step has no
+    working-directory override the way this repo's own shell steps do, so the neutral-cwd
+    relocation the CLI lane uses is not available here at all. Until this fix, neither surface
+    passed `--bare` either, so the ENTIRE original vulnerability (a PR-committed `.mcp.json`
+    auto-spawning MCP servers, a PR-committed `.claude/settings.json` hook firing on an allowed
+    tool call, `CLAUDE.md`-style prompt injection — all before `--allowedTools` is ever consulted)
+    was fully open on the lane this repo actually RECOMMENDS for fork-PR review, with the job's
+    own `github_token`/`CLAUDE_CODE_OAUTH_TOKEN` in scope — worst case, RCE on the CI runner with
+    those credentials. Strictly more severe than the CLI-lane case every layer above closes, since
+    that lane is the least-recommended, most-manual entry point (docs/SETUP.md's own Way
+    ordering). This fix went through TWO live rounds before landing — kept here in full, not just
+    the final state, since a future maintainer re-deriving "why is there no scrub step" needs the
+    path, not just the ending:
+    - **Round 8's first attempt** added `--bare` UNCONDITIONALLY to both surfaces' `claude_args`
+      (the CLI lane's own flag is conditional only to preserve a local interactive keychain
+      session — both Action surfaces' auth is ALWAYS an explicit credential, so that caveat
+      doesn't apply) PLUS a hand-rolled "Scrub Claude auto-discovery surface from the workspace"
+      step (`rm -rf .mcp.json .claude CLAUDE.md`) on both surfaces, running before any agent
+      invocation. Two live bugs surfaced, in order:
+      1. `--bare` broke `--json-schema`-driven `structured_output` on this Action lane
+         specifically — a live self-hosted-gate run failed both agents to UNVERIFIED with
+         `--json-schema was provided but Claude did not return structured_output`. Reverted; the
+         CLI (Python) lane's own `--bare` is unaffected (it never asks Claude Code for
+         `--json-schema`-validated `structured_output` — that lane parses raw text output itself
+         via `pantheon.jqjson`), so the two lanes were never interchangeable here.
+      2. **The scrub step was DESTRUCTIVE to a CONSUMING repo's own workspace — a P2 finding
+         correctly flagged as more serious than its badge.** A repo that legitimately tracks
+         `.claude/`/`CLAUDE.md`/`.mcp.json` and runs build/test/deploy steps AFTER this
+         action/workflow in the SAME job would find those files permanently deleted —
+         destroying adopter content as a side effect of reviewing a PR, the exact opposite of
+         this action's own "nothing is copied into the target repo" zero-footprint promise.
+    - **Round 9's fix: removed the scrub step entirely, closing the vector with ZERO workspace
+      mutation of this repo's own.** Investigating `anthropics/claude-code-action`'s own source
+      at the EXACT pinned SHA both surfaces already trust (`be7b93b1907a4abad570368f3c74b6fe
+      3807510b`) found it already ships an UNCONDITIONAL, NATIVE mitigation for this identical
+      vector — `src/entrypoints/run.ts`, gated only on `isEntityContext(context) &&
+      context.isPR` (true for every PR-triggered run, not behind any input/config this repo
+      controls):
+      ```
+      // On PRs, .claude/ and .mcp.json in the checkout are attacker-controlled.
+      // Restore them from the base branch before the CLI reads them.
+      ...
+      restoreConfigFromBase(restoreBase);
+      ```
+      `restoreConfigFromBase` (`src/github/operations/restore-config.ts`, same SHA) snapshots
+      the PR's own sensitive-path content into `.claude-pr/` first (so a review agent can still
+      inspect what changed, without ever executing it), then deletes the working-tree versions,
+      fetches the PR's base branch, and `git checkout`s each of `.claude`, `.mcp.json`,
+      `.claude.json`, `.gitmodules`, `.ripgreprc`, `CLAUDE.md`, `CLAUDE.local.md`, `.husky` from
+      that trusted ref — BEFORE the CLI's own startup ever reads any of them. Confirmed FIRING
+      in this repo's own live self-check run (the exact console line, verbatim): `Restoring
+      .claude, .mcp.json, .claude.json, .gitmodules, .ripgreprc, CLAUDE.md, CLAUDE.local.md,
+      .husky from origin/dev (PR head is untrusted)`. This is the identical class of protection
+      round 8's own scrub step tried to hand-roll, already shipped natively — the safest fix is
+      the one that requires no mutating code of this repo's own at all.
+
+    Fixtures (`tests/test-action-refs.sh`): `--bare` asserted ABSENT on both surfaces (a
+    regression guard against a future "harmonize the flags" change silently re-breaking verdict
+    parsing); NO step named "Scrub Claude auto-discovery surface" exists on either surface, and
+    — checked more broadly than just that one step name — neither file contains any LIVE
+    (non-comment) recursive `rm` targeting `.mcp.json`/`.claude`/`CLAUDE.md` anywhere at all (the
+    actual invariant that matters: adopter content must never be deleted by this repo's own
+    code), mutation-tested live (re-added a destructive step, confirmed the check catches it)
+    before relying on it. Honest limit of what's locally reproducible, stated plainly: this repo
+    cannot live-verify `claude-code-action`'s own `restoreConfigFromBase` behavior against a real
+    GitHub Actions runner from its own CI (can't integration-test the published action until this
+    repo is public — see "Published action" section); that rests on the pinned source itself
+    (quoted above, at the exact commit both surfaces trust) AND this repo's own live self-check
+    run's console output, the same evidentiary bar every other flag/mechanism claim in this
+    section already holds to.
+- **Every `gate.conf` key that shapes gate BEHAVIOR is base-pinned, not just `execution=` — an
+  adversarial-review fix generalizing a class this repo's own docs/CLI.md had already disclosed
+  as unfixed (issue #13, for `provider=` specifically).** `provider=`/`rules_file=`/`spec_file=`/
+  `agents=` now resolve from the PR's BASE commit only (`pantheon.cli._load_base_pinned_gate_conf`
+  — one `git show`+parse for all five keys alongside `execution=`), the identical mechanism and
+  identical `gh pr checkout <n>`-before-invoking-the-CLI trust boundary `execution=`'s own
+  base-pinning already existed to close: a working-tree-sourced `provider=` could point at any
+  known lane, silently swapping WHICH agent CLI's own judgment gates the merge; a working-tree-
+  sourced `rules_file=`/`spec_file=` could redirect either key at a path absent at base, silently
+  downgrading the base-pinned CONTENT read's own loud "not present" fallback into a full bypass
+  of the real house rules/spec without ever touching their trusted text; a working-tree-sourced
+  `agents=` could swap the enforcing twin panel for a weaker or non-blocking list. `model=`/
+  `base_branch=` remain working-tree-sourced — neither affects tool-execution breadth or which
+  file is trusted as a judgment boundary — see the "Read → provenance matrix" table above for the
+  current split. An explicit `--provider`/`--agents` CLI flag still wins, exactly like
+  `--execution` already did over its own base-pinned default — this closes PR-controlled
+  CONFIGURATION, never an operator's own explicit, interactively-typed choice. **The read itself
+  is routed through `pantheon.basepin.base_pinned_read` (symlink-safe), not a bare `git show` — a
+  P2 finding from a live Codex review on this fix's own PR**: a tracked SYMLINK at `gate.conf`
+  (a legitimate pattern — pointing at a shared `config/gate.conf`, say) would have a bare
+  `git show` return the link-target pathname text instead of content, silently reverting every
+  one of these five keys to its compiled-in default; this is a deliberate hardening beyond bash's
+  own historical gap here (bash's `execution=`-only read was never security-motivated to begin
+  with, just an oversight a single narrower key didn't happen to expose), matching the same
+  symlink-safety this repo's own rules/spec CONTENT reads already get (issue #6's class).
+- **`REVIEW_RULES.md`/`DESIGN.md` are now base-pinned on the vendored workflow (`action/review.yml`)
+  too — an adversarial-review fix closing this surface's own disclosed exception, see "Surface
+  differences" below.** This step's "Build prompt" step used to only PRESENCE-CHECK these two
+  files at `$GITHUB_WORKSPACE` (the PR's own HEAD checkout) and tell the agent "present — go read
+  it"; the agent then read the actual CONTENT live from that same PR-controlled working tree via
+  its own `Read` tool, entirely outside base-pinning — a reviewer built a working PoC (a PR
+  editing `REVIEW_RULES.md` on its own head to add a favorable house rule, applied verbatim).
+  Fixed the identical way the wrapper/persona/pantheon-package reads on this same surface already
+  are: `pantheon_base_pinned_read` resolves CONTENT from the PR's BASE commit into `$RUNNER_TEMP`,
+  fenced with the same randomized BEGIN/END anti-collision markers `action/lib/build_prompt.sh`
+  already uses for this content, now added to this step's own inline copy alongside them.
+- **`PR_TITLE`/`BASE_REF` are now fenced with the same randomized-marker treatment file content
+  already got, on both Action surfaces** (`action/review.yml`'s inline "Build prompt" step,
+  `action/lib/build_prompt.sh`) — an adversarial-review finding: these two PR-event-context
+  values were interpolated straight into the surrounding prose unfenced, while base-pinned file
+  content got the anti-injection BEGIN/END treatment. `PR_TITLE` specifically is PR-author-
+  controlled data; both now get the identical fence-and-label treatment, at a smaller scale.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is
@@ -510,8 +731,9 @@ identical tools. Differences are intentional, not oversights:
 | Configuration | `gate.conf` (provider, model, base branch, rules file, agent list, execution tier). | None — twin panel (artemis, apollo), `REVIEW_RULES.md`, and the read-only execution tier are hardcoded in the workflow. |
 | Provider choice | Pluggable lane (`--provider`, `cli/providers/*.sh`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
-| Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Still reads `REVIEW_RULES.md`/`DESIGN.md` straight from the checked-out working tree (this surface's inline "Build prompt" step is a third, hand-synced copy of the prompt-build logic — see "Layout" below — and wasn't brought forward in this fix). The published `action.yml` surface (a **different** file from this table's `action/review.yml` column) got the same base-pinning as the CLI. This remains the one open item in issue #6's provenance sweep — judgment CONTENT, not gate behavior (see the class statement above), which is why it's tracked as a documented exception rather than left silently unswept. |
+| Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Base-SHA-pinned into `$RUNNER_TEMP` (closed by an adversarial-review fix — this surface's inline "Build prompt" step is still a third, hand-synced copy of the prompt-build logic, see "Layout" below, but it now resolves rules/spec CONTENT the same way its "Resolve gate scripts (base-pinned)" step already resolves the persona/pantheon-verdict trio, instead of presence-checking `$GITHUB_WORKSPACE` and letting the agent read live PR-head content). This closes what was the one remaining open item in issue #6's provenance sweep on this surface — see "Security posture" above for the fix and its own PoC. |
 | Persona / verdict-decider provenance | N/A — always `$PANTHEON_ROOT/agents` and `cli/lib/verdict.sh`, this repo's own installed copy; the target repo never supplies these on the CLI surface. | Base-pinned on both GitHub Action surfaces, same as the CLI's non-issue: the published `action.yml` reads `$ACTION_PATH/agents` and `$ACTION_PATH/action/decide_verdict.py` by default (this repo's own trusted checkout), base-pinned into `$RUNNER_TEMP` when `personas_path` opts into reading from the target repo instead; `action/review.yml` (a **different** file from this table's column) base-pins both into `$RUNNER_TEMP` via its own "Resolve gate scripts (base-pinned)" step (issue #6 — closed in this PR; previously read straight from `$GITHUB_WORKSPACE`, the PR's own checkout, same class as the read-only git wrapper fix above). |
+| Provider startup config-discovery protection | Neutral cwd (a scratch directory `pantheon.cli` owns, never the checkout) — three layers, see "Security posture" above. `--bare` is CONDITIONAL (an explicit `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` env credential is present), since the CLI lane's documented primary auth path is a LOCAL interactive `claude auth login` keychain session with no token env var at all — an unconditional `--bare` would silently break that. | No cwd relocation available (a `uses:` step can't take a working-directory override), and NO `--bare` either (empirically breaks `--json-schema`/`structured_output` on this Action lane — confirmed via a live self-hosted-gate failure, see "Security posture" above). Closes the vector with ZERO workspace mutation of this repo's own instead: `anthropics/claude-code-action`'s own pinned source (`src/entrypoints/run.ts`, the exact SHA both surfaces trust) already restores `.claude`/`.mcp.json`/`CLAUDE.md`/etc. from the PR's base branch, unconditionally, before the CLI's own startup ever reads them — confirmed firing live in this repo's own self-check log. Adversarial-review, round 8 (the finding) then round 9 (a correction on round 8's own first fix, a hand-rolled `rm -rf` scrub step that turned out to be destructive to a consuming repo's own tracked content) — see "Security posture" above, "Both Action surfaces close the identical vector too", for the full writeup; this was the largest scope gap in that fix's whole history (every earlier round covered the CLI lane only). |
 
 ## Published action
 

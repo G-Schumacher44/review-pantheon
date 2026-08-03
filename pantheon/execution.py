@@ -87,7 +87,7 @@ row. "PY" column names the exact mechanism in this module that closes it.
 
   Every row's "PY" column boils down to one structural fact: ``_forced_env()`` builds the
   subprocess environment as a **new dict containing only the keys this module explicitly sets**
-  — PATH is pinned to :data:`TRUSTED_GIT_DIRS` and HOME is pinned via :func:`_real_home_dir`
+  — PATH is pinned to :data:`TRUSTED_GIT_DIRS` and HOME is pinned via :func:`real_home_dir`
   (the passwd-database account home, never the ambient ``HOME`` env var — a Codex finding fixed
   this after an earlier version of this comment called HOME a safely-forwardable ambient value;
   it isn't, once a launcher environment can set it, the same class of hijack
@@ -134,6 +134,7 @@ __all__ = [
     "validate_execution",
     "execution_context_note",
     "resolve_console_script",
+    "real_home_dir",
     "main",
 ]
 
@@ -218,7 +219,7 @@ def _forced_env() -> dict[str, str]:
     child that just reads its own environ, but this way the guarantee doesn't depend on every
     future maintainer remembering to keep these off the allowlist.
 
-    ``HOME`` is pinned via :func:`_real_home_dir` (the passwd-database account home), never the
+    ``HOME`` is pinned via :func:`real_home_dir` (the passwd-database account home), never the
     ambient ``os.environ.get("HOME")`` — a second-round Codex finding on this same PR, same
     "never trust an env-derived HOME" principle :func:`_default_user_scripts_dir` was fixed for:
     forwarding a hijacked ambient ``HOME`` into this constructed env would let a hostile
@@ -227,7 +228,7 @@ def _forced_env() -> dict[str, str]:
     close everywhere else."""
     env: dict[str, str] = {}
     env["PATH"] = os.pathsep.join(TRUSTED_GIT_DIRS)
-    home = _real_home_dir()
+    home = real_home_dir()
     if home:
         env["HOME"] = home
     env["GIT_PAGER"] = "cat"
@@ -440,7 +441,7 @@ def execution_context_note(tier: str, wrapper_path: str) -> str:
     )
 
 
-def _real_home_dir() -> str | None:
+def real_home_dir() -> str | None:
     """The REAL account home directory for the process's current UID, resolved via the POSIX
     passwd database (``pwd.getpwuid(os.getuid()).pw_dir``) — NEVER via
     ``os.path.expanduser("~")`` or any other mechanism that reads the ``HOME`` environment
@@ -460,6 +461,14 @@ def _real_home_dir() -> str | None:
     Also used by :func:`_forced_env` to pin the ``HOME`` this module's own git subprocess calls
     receive, for the identical reason — never the ambient (potentially hijacked) ``HOME``.
 
+    **Public (not ``_``-prefixed) specifically so ``pantheon.providers`` can reuse it too**
+    (adversarial review, round 6, Codex P1 — reopened CRITICAL-1 through a DIFFERENT door: a
+    provider CLI's own env, not its cwd). ``pantheon.providers._provider_env()`` used to forward
+    the ambient ``HOME`` straight to every provider-CLI subprocess — the identical hijack class
+    this function was built to close for the readonly git wrapper, just never applied to the
+    broader provider-CLI env construction. Both call sites now share this ONE resolution instead
+    of each carrying its own copy of the same security-critical logic.
+
     Returns ``None`` (never raises, never falls back to ``os.path.expanduser``) when this lookup
     itself fails — no ``pwd`` module (Windows), or no passwd entry for this UID (some minimal/
     scratch container users) — rather than silently degrading to a weaker resolution."""
@@ -477,7 +486,7 @@ def _default_user_scripts_dir() -> str | None:
     ``--user`` layout) — WITHOUT reading ``PYTHONUSERBASE``, ``HOME``, or any other environment
     variable naming a filesystem location, to compute it. This is Python's own DEFAULT per-user
     base formula, replicated by hand from a value this process cannot have redirected:
-    :func:`_real_home_dir` (the passwd-database account home — see that function's own docstring
+    :func:`real_home_dir` (the passwd-database account home — see that function's own docstring
     for why ``os.path.expanduser("~")``/``HOME`` are never trusted for this, a second-round
     Codex finding on this same fix).
 
@@ -496,7 +505,7 @@ def _default_user_scripts_dir() -> str | None:
     environment cannot move, rather than either trusting an attacker-influenced env var or
     silently degrading to a weaker code path. The FIRST version of this fix used
     ``os.path.expanduser("~")`` for the "fixed formula" — itself still HOME-env-influenced, a
-    second Codex finding on this same PR; :func:`_real_home_dir` closes that too.
+    second Codex finding on this same PR; :func:`real_home_dir` closes that too.
 
     ``sysconfig.get_config_var("PYTHONFRAMEWORK")`` (used below to detect a macOS
     python.org/Apple framework build, whose per-user base is ``~/Library/Python/X.Y`` instead of
@@ -511,7 +520,7 @@ def _default_user_scripts_dir() -> str | None:
     adjacent-only check is the only lookup performed in that case, same as before this fix."""
     if os.name != "posix":
         return None
-    home = _real_home_dir()
+    home = real_home_dir()
     if not home:
         return None
     if sys.platform == "darwin" and sysconfig.get_config_var("PYTHONFRAMEWORK"):
@@ -567,8 +576,27 @@ def resolve_console_script(name: str) -> str | None:
 
 
 def _wrapper_cli(argv: list[str]) -> int:
+    """Parses an OPTIONAL leading ``--repo-root <path>`` (a CRITICAL fix, adversarial review)
+    before handing the rest of ``argv`` to :func:`build_readonly_argv`'s own four-subcommand
+    validation — ``--repo-root`` is a WRAPPER-LEVEL option, never a git subcommand argument, so
+    it must be stripped here rather than reaching that validation (which refuses ANY
+    ``-``-prefixed token uniformly, including this one).
+
+    Why this exists: ``pantheon.cli``'s ``_wrapper_invocation()`` now bakes the caller's real
+    repo root into the wrapper invocation string it embeds as the ONE allowed Bash-tool prefix
+    (``Bash(<script> wrapper --repo-root <repo_root> *)``) — provider processes no longer launch
+    with the repo checkout as their own cwd (see ``pantheon.providers``' own docstring for the
+    config/MCP/hooks auto-discovery vector that closes), so :func:`os.getcwd` alone is no longer
+    a reliable way for THIS process to learn where the repo actually is when a Bash-tool child of
+    that provider invokes it. When ``--repo-root`` is given, it wins outright; when absent
+    (direct CLI/test use — ``tests/test-git-readonly-wrapper.sh``'s own invocation shape, which
+    predates and is unaffected by this fix), this falls back to :func:`os.getcwd`, unchanged."""
+    cwd = os.getcwd()
+    if len(argv) >= 2 and argv[0] == "--repo-root":
+        cwd = argv[1]
+        argv = argv[2:]
     try:
-        result = run_readonly_wrapper(argv, cwd=os.getcwd())
+        result = run_readonly_wrapper(argv, cwd=cwd)
     except WrapperRefused as exc:
         print(f"pantheon-git-readonly: {exc}", file=sys.stderr)
         return 1
@@ -582,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "wrapper":
         return _wrapper_cli(argv[1:])
     print(
-        "usage: python -m pantheon.execution wrapper <diff|show|log|status> [args...]",
+        "usage: python -m pantheon.execution wrapper [--repo-root <path>] <diff|show|log|status> [args...]",
         file=sys.stderr,
     )
     return 2

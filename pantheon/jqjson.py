@@ -53,6 +53,7 @@ a bare f-string/``str()``; every place a caller's bash counterpart captured a jq
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from decimal import Decimal
 from typing import Any
@@ -107,6 +108,14 @@ class JqNaN:
 
 
 NAN = JqNaN()
+
+# Wraps every dumps()-generated placeholder token (see _prepare_for_dump) on both sides --
+# code points no legitimate model output or file content this port parses is expected to
+# contain, belt-and-braces on top of the token's own salt-derived collision-freedom guarantee
+# (_generate_dump_salt). A module-level chr(0xE000) constant, not a literal character embedded
+# in source, so this file's own bytes stay unambiguous in any editor/diff tool regardless of
+# how it renders an invisible Private-Use-Area code point.
+_PUA_WRAP = chr(0xE000)
 
 # jq's max/min IEEE-754 double — what jq's parser coerces the non-standard Infinity/-Infinity
 # JSON-extension TOKENS to (verified live against real jq: 1.7.1 local, 1.7 in the exact Ubuntu
@@ -217,6 +226,60 @@ def _parse_float(text: str) -> Any:
     if canonical != repr(value):
         return _RawBigNumber(canonical)
     return value
+
+
+_JQ_MAX_PARSE_DEPTH = 256
+
+
+# jq's own parse-time object/array nesting cap — verified live against real jq (jq-1.7.1): a
+# JSON document with 300 levels of `[`-nesting produces `jq: parse error (at <stdin>:1): Exceeds
+# depth limit for parsing`, exit code 5. A CRITICAL finding from an adversarial review's live PoC
+# (reproduced against this module's PRE-fix state): Python's stdlib `json` module has no
+# equivalent cap at all (the C-accelerated scanner recurses natively, well past 256, before ever
+# hitting Python's own `sys.getrecursionlimit()`), so a verdict object with a pathologically deep
+# `display`/`summary` field parsed clean through `jqjson.loads()` while real jq's own bash
+# pipeline (`extract_last_json` -> `jq` extraction) would have already rejected the SAME input at
+# parse time -- a genuine decision-color divergence: the Python CLI could read a verdict as GREEN
+# for input bash's own runtime would have failed closed to UNVERIFIED on. This is a PRE-PARSE
+# text scan (never handing the pathological text to `json.loads` at all), not a post-parse walk
+# of the resulting Python value tree -- structurally closer to what real jq itself does (jq
+# aborts the PARSE, before any value is ever constructed), and it means this module never risks
+# ITS OWN C-stack exhaustion on adversarially deep input either, independent of where Python's
+# json module's own limits happen to sit today.
+def _check_depth_limit(text: str) -> None:
+    """Raises :class:`JqParseError` if `text` contains an object/array nested more than
+    :data:`_JQ_MAX_PARSE_DEPTH` levels deep, matching real jq's own parse-time refusal exactly
+    (see this constant's own comment for the live verification). Tracks bracket depth
+    character-by-character, skipping the CONTENTS of JSON string literals (respecting `\\"`
+    escapes) so a string value that merely CONTAINS many `{`/`[` characters as literal text never
+    counts toward nesting depth -- only real structural nesting does. Deliberately independent of
+    :func:`loads`'s own `json.loads` call: this scan raises (or doesn't) entirely on its own, and
+    is *always* run before `json.loads` ever sees the text, so a pathologically deep document
+    never reaches the stdlib parser at all in either the success or failure case."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+            if depth > _JQ_MAX_PARSE_DEPTH:
+                raise JqParseError(
+                    f"Exceeds depth limit for parsing (jq's own cap is {_JQ_MAX_PARSE_DEPTH} "
+                    "levels of object/array nesting, verified live against real jq: rc=5, "
+                    "'Exceeds depth limit for parsing')"
+                )
+        elif ch in "}]":
+            depth -= 1
 
 
 def _verify_utf8(value: Any) -> None:
@@ -331,17 +394,23 @@ def loads(text: str) -> Any:
     trade-off for a pathological-input class no legitimate agent output would ever produce, not
     a decision-parity gap this module tries to close."""
     try:
+        _check_depth_limit(text)
         value = json.loads(text, parse_constant=_parse_constant, parse_float=_parse_float)
         _verify_utf8(value)
+    except JqParseError:
+        # Already the right shape (e.g. _check_depth_limit's own raise) — re-raise unchanged
+        # rather than wrapping it a second time through the catch-all below.
+        raise
     except Exception as e:  # deliberate catch-all — see this function's own docstring
         raise JqParseError(str(e)) from e
     return value
 
 
 def _collect_strings(value: Any, out: list) -> None:
-    """Recursively collects every string in ``value`` (dict keys included) into ``out`` —
-    used by :func:`_make_unique_token` to verify a generated placeholder token collides with
-    nothing already present in the tree being serialized, before that token is ever used."""
+    """Recursively collects every string in ``value`` (dict keys included) into ``out`` --
+    used by :func:`_generate_dump_salt` to verify a generated placeholder salt collides with
+    nothing already present in the tree being serialized, before any token derived from it is
+    ever used."""
     if isinstance(value, str):
         out.append(value)
     elif isinstance(value, dict):
@@ -353,53 +422,78 @@ def _collect_strings(value: Any, out: list) -> None:
             _collect_strings(v, out)
 
 
-def _make_unique_token(existing_strings: list) -> str:
-    """Generates a placeholder token for :func:`_prepare_for_dump` that is PROVABLY absent
-    from every string already in the tree — not merely "unlikely to collide". An earlier
-    version used a deterministic, sequential token (``jqjson-raw-0``, ``jqjson-raw-1``, ...);
-    since this is a public open-source repo, that token's exact text is readable by anyone,
-    including whoever is crafting the untrusted model output this module parses — a payload
-    that deliberately contains the literal placeholder string as genuine content (e.g. an
-    ``.issue`` field equal to the placeholder's own text) would have its own content silently
-    corrupted into an unrelated preserved number by :func:`dumps`'s later global string-replace
-    pass, since that pass has no way to distinguish "the placeholder I inserted" from
-    "identical text the model happened to submit". Fixed two ways at once: the token's own
-    identifying component is 128 bits of ``secrets``-module cryptographic randomness (not a
-    guessable sequence number), AND — for a provable guarantee rather than a merely-
-    overwhelming-probability one — the candidate is checked against every string already in
-    the tree and regenerated on the (already astronomically unlikely) chance of a collision,
-    exactly like the finding demanded ("use a collision-proof encoding strategy rather than
-    assuming the placeholder cannot occur"). Plain ASCII (``jqjson-raw-<32 hex chars>``) — no
-    Private-Use-Area wrapping needed once collision-freedom is proven structurally rather than
-    assumed from an unguessable-but-still-collidable token space; :func:`dumps`'s own
-    placeholder-splice pass (below) handles the ``ensure_ascii=True``/``False`` quoting
-    difference by searching for each token's own properly re-encoded quoted form, not by relying
-    on any particular code-point range surviving both modes unescaped."""
+def _generate_dump_salt(existing_strings: list) -> str:
+    """Generates ONE per-:func:`dumps`-call salt (128 bits of ``secrets``-module cryptographic
+    randomness) that is PROVABLY absent from every string already in the tree -- not merely
+    "unlikely to collide". An earlier version of this mechanism (``_make_unique_token``, since
+    removed) generated a FRESH random token, independently, per :class:`_RawBigNumber` value,
+    checking EACH one against ``existing_strings`` individually -- correct, but a CRITICAL-
+    adjacent (medium) finding from an adversarial review caught the cost: with N overflow
+    numbers in one payload, that's N separate O(len(existing_strings)) scans, quadratic overall
+    (live-reproduced pre-fix: 8000 overflow numbers took ~2.1s, dominated by this collision
+    check, not just the splice pass -- see :func:`dumps`'s own docstring for that half of the
+    same fix).
+
+    This function closes it structurally: check the SALT for collision-freedom exactly ONCE per
+    call, then :func:`_prepare_for_dump` derives every token from ``salt`` plus a cheap
+    incrementing counter with NO further collision check needed -- if ``salt`` itself does not
+    appear ANYWHERE in ``existing_strings``, no string containing ``salt`` as a substring (which
+    is exactly what every derived token is, by construction: ``salt`` is always its prefix) can
+    appear there either, so checking the shared prefix once proves every suffix-decorated
+    derivative is equally collision-free, without re-checking each one. Since this is a public
+    open-source repo, the salt's exact text is readable by anyone, including whoever is crafting
+    the untrusted model output this module parses -- a payload that deliberately contains the
+    literal placeholder string as genuine content (e.g. an ``.issue`` field equal to a
+    placeholder's own text) would otherwise have its own content silently corrupted into an
+    unrelated preserved number by :func:`dumps`'s later splice pass, since that pass has no way
+    to distinguish "the placeholder I inserted" from "identical text the model happened to
+    submit" -- the randomness-plus-verification here is what rules that out, exactly like the
+    finding demanded ("use a collision-proof encoding strategy rather than assuming the
+    placeholder cannot occur")."""
     while True:
-        candidate = f"jqjson-raw-{secrets.token_hex(16)}"
+        candidate = secrets.token_hex(16)
         if not any(candidate in s for s in existing_strings):
             return candidate
 
 
-def _prepare_for_dump(value: Any, raw_registry: dict, existing_strings: list) -> Any:
+def _prepare_for_dump(value: Any, raw_registry: dict, salt: str, counter: list) -> Any:
     """Recursively walks ``value``, replacing every :data:`NAN` sentinel with ``None`` (which
-    ``json.dumps`` then serializes as ordinary JSON ``null`` — matching jq's own NaN print form)
-    and every :class:`_RawBigNumber` with a unique placeholder token (see
-    :func:`_make_unique_token`) registered in ``raw_registry``, so :func:`dumps` can splice the
-    raw numeral text back in UNQUOTED after ``json.dumps`` runs (there is no supported way to
-    make the stdlib encoder emit an arbitrary unquoted token directly — the ``default`` hook's
-    return value is itself re-encoded, not spliced in raw)."""
+    ``json.dumps`` then serializes as ordinary JSON ``null`` -- matching jq's own NaN print form)
+    and every :class:`_RawBigNumber` with a unique placeholder token registered in
+    ``raw_registry``, so :func:`dumps` can splice the raw numeral text back in UNQUOTED after
+    ``json.dumps`` runs (there is no supported way to make the stdlib encoder emit an arbitrary
+    unquoted token directly -- the ``default`` hook's return value is itself re-encoded, not
+    spliced in raw). Each token is ``salt`` (verified collision-free ONCE by
+    :func:`_generate_dump_salt`, never re-checked per token -- see that function's own docstring
+    for why that's still a provable guarantee) plus a cheap, per-call-unique hex counter -- O(1)
+    per :class:`_RawBigNumber` value, no per-token scan of the tree's other strings. ``counter``
+    is a one-element list (a mutable cell every recursive call shares and increments), not a
+    plain int, since Python closures/recursive calls can't rebind an outer int in place.
+    Identical PUA-wrapping (U+E000, code points no legitimate model output or file content this
+    port parses is expected to contain -- belt-and-braces on top of the salt's own
+    cryptographic-randomness guarantee) as the earlier per-token mechanism this replaces; see
+    :func:`dumps`'s own docstring for how its splice pass accounts for the wrapper's
+    ``ensure_ascii``-dependent quoted form."""
     if value is NAN:
         return None
     if isinstance(value, _RawBigNumber):
-        token = _make_unique_token(existing_strings)
+        counter[0] += 1
+        token = f"{_PUA_WRAP}jqjson-raw-{salt}-{counter[0]:x}{_PUA_WRAP}"
         raw_registry[token] = str(value)
         return token
     if isinstance(value, dict):
-        return {k: _prepare_for_dump(v, raw_registry, existing_strings) for k, v in value.items()}
+        return {k: _prepare_for_dump(v, raw_registry, salt, counter) for k, v in value.items()}
     if isinstance(value, list):
-        return [_prepare_for_dump(v, raw_registry, existing_strings) for v in value]
+        return [_prepare_for_dump(v, raw_registry, salt, counter) for v in value]
     return value
+
+
+# The hex-digit CORE of a placeholder token (see _prepare_for_dump) -- plain ASCII, quoted
+# identically under both `ensure_ascii` modes. `dumps` builds a per-call pattern anchored to that
+# call's own SALT (never a fixed, cross-call constant -- the salt itself is what proves
+# collision-freedom, so the search pattern must be specific to it), with the counter suffix
+# captured as part of a GROUP so `_splice` can reconstruct the exact original token text (PUA
+# wrapper included) to look up in `raw_registry`.
 
 
 def dumps(obj: Any, *, indent: int | None = None, ensure_ascii: bool = False) -> str:
@@ -419,24 +513,50 @@ def dumps(obj: Any, *, indent: int | None = None, ensure_ascii: bool = False) ->
     ``pantheon.verdict``'s compact single-line CLI decision output), not the full
     ``json.dumps`` kwarg surface.
 
-    The placeholder-splice pass (see :func:`_prepare_for_dump`) searches for each token's OWN
-    properly-escaped quoted form — computed via a nested ``json.dumps(token, ensure_ascii=
-    ensure_ascii)`` call, not a hardcoded raw-quote pattern — because ``_make_unique_token``'s
-    plain-ASCII token (``jqjson-raw-<32 hex chars>``) is quoted IDENTICALLY under both
-    ``ensure_ascii`` modes (nothing in it needs Unicode-escaping either way), but this module
-    still routes the search pattern through the real encoder call rather than hardcoding the raw
-    quoted text, so a future change to the token's own character set (should one ever need
-    non-ASCII content) can't silently reopen the class of gap this re-encoding step exists to
-    close. (Caught live — the repo's own self-hosted gate on this PR flagged this exact gap in
-    ``pantheon.verdict.main()``'s ``ensure_ascii=True`` path, immediately after this function's
-    ``ensure_ascii=False`` path — the only one exercised by ``pantheon.render``'s own tests up to
-    that point — was already verified working.)"""
+    The placeholder-splice pass (see :func:`_prepare_for_dump`) needs each token's OWN
+    properly-escaped quoted form to find it in ``text`` -- a token is
+    ``jqjson-raw-<salt>-<counter>`` (see :func:`_prepare_for_dump`'s own docstring for the
+    PUA-wrapper rationale), and that wrapper IS non-ASCII, so its escaped form genuinely DIFFERS
+    between ``ensure_ascii=True`` (a 6-character escape sequence) and ``ensure_ascii=False`` (raw
+    UTF-8 bytes) -- this function can't get away with one hardcoded pattern for both modes the
+    way a plain-ASCII-only token could. It resolves that ONE escaped form ONCE per call (a single
+    ``json.dumps("", ensure_ascii=ensure_ascii)`` -- cheap, fixed-size, independent of how many
+    placeholders exist) and builds ONE regex from it, anchored to THIS call's own salt (never a
+    fixed cross-call constant -- the salt is what :func:`_generate_dump_salt` proved
+    collision-free), with the counter suffix captured as a group so :func:`_splice` can
+    reconstruct each match's original (unescaped) token text to look up in ``raw_registry``,
+    regardless of which ``ensure_ascii`` form produced the match text it's looking at.
+
+    **Single-pass splice, not one ``str.replace()`` per placeholder -- a CRITICAL-adjacent
+    (medium) finding from an adversarial review, live-reproduced pre-fix: 8000 overflow numbers
+    in one payload took ~2.1s to serialize.** An earlier version of this function called
+    ``json.dumps(token, ...)`` AND ``text.replace()`` once PER registry entry, each ``replace()``
+    call re-scanning the ENTIRE (already-serialized) text from the start -- with N placeholders
+    in a text whose own length grows with N, that's O(N) full-text scans of an O(N)-length
+    string, quadratic in the number of overflow/big-number values a single verdict payload can
+    carry, entirely attacker-influenceable (a hostile agent response, or -- worse -- a hostile
+    PR's own crafted content reaching this path via ``pantheon.verdict``'s fail-closed handling
+    of arbitrary model output). That earlier version's OWN token-generation step
+    (``_make_unique_token``, since removed) was independently quadratic too -- see
+    :func:`_generate_dump_salt`'s own docstring for that half of the same fix. The single
+    ``.sub()`` call below is ONE linear pass over ``text`` regardless of how many placeholders it
+    contains -- each match is resolved via a single dict lookup in ``raw_registry`` (O(1) per
+    match, same total work, just done in one pass instead of N passes)."""
     raw_registry: dict = {}
     existing_strings: list = []
     _collect_strings(obj, existing_strings)
-    prepared = _prepare_for_dump(obj, raw_registry, existing_strings)
+    salt = _generate_dump_salt(existing_strings)
+    prepared = _prepare_for_dump(obj, raw_registry, salt, [0])
     text = json.dumps(prepared, indent=indent, ensure_ascii=ensure_ascii, allow_nan=False)
-    for token, raw in raw_registry.items():
-        quoted_token = json.dumps(token, ensure_ascii=ensure_ascii)
-        text = text.replace(quoted_token, raw)
-    return text
+    if not raw_registry:
+        return text
+
+    pua_escaped = json.dumps(_PUA_WRAP, ensure_ascii=ensure_ascii)[1:-1]  # strip wrapping quotes
+    token_core_re = rf"jqjson-raw-{re.escape(salt)}-[0-9a-f]+"
+    pattern = re.compile('"' + re.escape(pua_escaped) + f"({token_core_re})" + re.escape(pua_escaped) + '"')
+
+    def _splice(match: re.Match[str]) -> str:
+        token = f"{_PUA_WRAP}{match.group(1)}{_PUA_WRAP}"
+        return raw_registry.get(token, match.group(0))
+
+    return pattern.sub(_splice, text)
