@@ -1189,33 +1189,39 @@ def test_readonly_tier_end_to_end_produces_a_parseable_verdict(tmp_path, monkeyp
     assert "f.txt" in decision["verdict_json"]["summary"]
 
 
-def test_verdict_json_schema_stays_byte_identical_to_the_action_surface() -> None:
-    """VERDICT_JSON_SCHEMA's docstring promises the constant is 'kept byte-identical
-    deliberately' with the schema action.yml passes to claude-code-action. Nothing enforced that
-    promise until this test (a live self-hosted-gate finding, artemis @ PR #28): a future PR could
-    extend the schema on either surface alone, every suite would stay green, and the two lanes
-    would silently enforce DIFFERENT verdict shapes -- the cross-surface divergence class issue #26
-    exists to close.
+def test_verdict_json_schema_stays_byte_identical_across_ALL_THREE_surfaces() -> None:
+    """VERDICT_JSON_SCHEMA promises byte-identity with every surface that enforces a schema.
+    Nothing enforced it until this test (a live self-hosted-gate finding, artemis @ PR #28).
 
-    Deliberately compares raw TEXT, not parsed-and-re-serialized JSON: the claim is byte-identity,
-    and a parsed comparison would pass while the two surfaces disagreed on key order -- which is
-    exactly the kind of drift a reader diffing the two files by eye is being promised is absent.
+    THREE copies, not two -- and the third is why this test enumerates its own targets instead of
+    grepping for a variable name. `action.yml` assigns `JSON_SCHEMA='...'`, but `action/review.yml`
+    embeds the schema INLINE as `--json-schema '...'` with no variable at all. A search for the
+    NAME finds two copies and reports the third absent; only a search for the CONTENT finds all
+    three. That is exactly how the third copy drifted a full revision behind (Codex, PR #28) after
+    the first two were fixed together.
+
+    Compares raw TEXT, not parsed-and-re-serialized JSON: the claim is byte-identity, and a parsed
+    comparison would pass while the surfaces disagreed on key order -- the drift a reader diffing
+    them by eye is being promised is absent.
     """
-    action_yml = (REPO_ROOT / "action.yml").read_text(encoding="utf-8")
+    surfaces = {
+        "action.yml": r"JSON_SCHEMA='([^']*)'",
+        "action/review.yml": r"--json-schema '(\{[^']*\})'",
+    }
 
-    matches = re.findall(r"JSON_SCHEMA='([^']*)'", action_yml)
-    # Fail loudly if the extraction itself stops matching (a renamed variable or a re-quoted
-    # assignment) rather than silently vacuously passing on zero copies found.
-    assert len(matches) == 1, (
-        f"expected exactly one JSON_SCHEMA='...' assignment in action.yml, found {len(matches)} "
-        "-- the extraction anchor drifted; fix this test's regex, do not delete the check"
-    )
-
-    assert matches[0] == providers.VERDICT_JSON_SCHEMA, (
-        "action.yml's JSON_SCHEMA and pantheon.providers.VERDICT_JSON_SCHEMA have DRIFTED -- the "
-        "CLI lane and the Action lane would enforce different verdict shapes. Update both, or "
-        "drop the byte-identity claim from providers.VERDICT_JSON_SCHEMA's comment."
-    )
+    for relpath, pattern in surfaces.items():
+        text = (REPO_ROOT / relpath).read_text(encoding="utf-8")
+        matches = re.findall(pattern, text)
+        # Fail loudly if the extraction anchor drifts, rather than vacuously passing on zero found.
+        assert len(matches) == 1, (
+            f"expected exactly one schema occurrence in {relpath}, found {len(matches)} -- the "
+            "extraction anchor drifted; fix this test's regex, do not delete the check"
+        )
+        assert matches[0] == providers.VERDICT_JSON_SCHEMA, (
+            f"{relpath} has DRIFTED from pantheon.providers.VERDICT_JSON_SCHEMA -- that surface "
+            "would enforce a different verdict shape than the others. Update every copy together, "
+            "or drop the byte-identity claim."
+        )
 
 
 def test_verdict_schema_is_never_stricter_than_the_decider() -> None:
@@ -1252,12 +1258,19 @@ def test_verdict_schema_is_never_stricter_than_the_decider() -> None:
     )
     assert item["properties"]["severity"]["type"] == "string"
 
-    # Loose on every display field, in the exact way render.py already compensates for.
-    assert "string" in item["properties"]["line"]["type"]
-    assert "null" in item["properties"]["line"]["type"]
-    for field in ("file", "issue", "scenario"):
-        assert "null" in item["properties"][field]["type"], field
-    assert "null" in props["summary"]["type"]
+    # UNCONSTRAINED on every display field. decide() accepts ANY JSON type there (verified
+    # directly in the companion test below -- objects, arrays, booleans and numbers all come back
+    # green), so permitting only string+null would still be stricter than the decider. An earlier
+    # revision of this very test asserted merely that "null" was allowed, which passed against a
+    # string|null schema that was still too strict -- the assertion was weaker than the guarantee
+    # it claimed to pin. Enumerate every JSON type explicitly so that cannot recur.
+    every_json_type = {"string", "number", "boolean", "object", "array", "null"}
+    for field in ("file", "line", "issue", "scenario"):
+        assert every_json_type <= set(item["properties"][field]["type"]), (
+            f"findings[].{field} is constrained more tightly than decide() -- a verdict the "
+            "binding contract accepts would be rejected as UNVERIFIED"
+        )
+    assert every_json_type <= set(props["summary"]["type"])
 
 
 def test_decider_really_does_accept_the_loose_shape_the_schema_now_permits() -> None:
@@ -1267,18 +1280,28 @@ def test_decider_really_does_accept_the_loose_shape_the_schema_now_permits() -> 
     two tests together pin both halves (schema permits it AND decide() accepts it), so neither
     can drift into the gap alone.
     """
-    loose = json.dumps(
-        {
-            "agent": "artemis",
-            "verdict": "SHIP",
-            "has_blocker": False,
-            "findings": [{"severity": "note", "line": "section X"}],
-            "summary": None,
-        }
-    )
+    # Every JSON type the schema now permits in a display field, proven accepted -- not assumed.
+    for label, finding, summary in [
+        ("string line", {"severity": "note", "line": "section X"}, None),
+        ("object file", {"severity": "note", "file": {"a": 1}}, None),
+        ("array issue", {"severity": "note", "issue": [1, 2]}, None),
+        ("boolean scenario", {"severity": "note", "scenario": True}, None),
+        ("number file", {"severity": "note", "file": 42}, None),
+        ("object summary", {"severity": "note"}, {"nested": "obj"}),
+        ("display fields absent entirely", {"severity": "note"}, "ok"),
+    ]:
+        loose = json.dumps(
+            {
+                "agent": "artemis",
+                "verdict": "SHIP",
+                "has_blocker": False,
+                "findings": [finding],
+                "summary": summary,
+            }
+        )
 
-    decision = verdict.decide("artemis", loose)
+        decision = verdict.decide("artemis", loose)
 
-    assert decision["color"] == "green", decision
-    assert decision["verdict"] == "SHIP"
-    assert decision["invariant_fired"] is False
+        assert decision["color"] == "green", (label, decision)
+        assert decision["verdict"] == "SHIP", label
+        assert decision["invariant_fired"] is False, label

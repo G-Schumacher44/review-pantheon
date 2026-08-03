@@ -468,7 +468,7 @@ runs:
         # deliberately NOT enforcing each agent's own verdict vocabulary here (that would be a
         # SECOND copy of the vocab->color rule alongside `pantheon.verdict`, the one place that
         # rule lives). One schema shared by every agent, computed once.
-        JSON_SCHEMA='{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":["string","null"]},"line":{"type":["integer","string","null"]},"issue":{"type":["string","null"]},"scenario":{"type":["string","null"]}},"required":["severity"]}},"summary":{"type":["string","null"]}},"required":["agent","verdict","has_blocker","findings","summary"]}'
+        JSON_SCHEMA='{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":["string","number","boolean","object","array","null"]},"line":{"type":["string","number","boolean","object","array","null"]},"issue":{"type":["string","number","boolean","object","array","null"]},"scenario":{"type":["string","number","boolean","object","array","null"]}},"required":["severity"]}},"summary":{"type":["string","number","boolean","object","array","null"]}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
         # JSON_SCHEMA above contains only double quotes, never a single quote, so wrapping it
         # in single quotes here (for the CLI arg) needs no further escaping. ALLOWED_TOOLS

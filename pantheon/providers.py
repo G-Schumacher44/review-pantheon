@@ -276,22 +276,31 @@ _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 # THE SCHEMA MIRRORS THE DECISION SURFACE ONLY — it must never be stricter than
 # `pantheon.verdict.decide()`, or it turns a verdict the binding contract ACCEPTS into UNVERIFIED
 # (fail-closed in the wrong direction: a real, reviewable result reported as NOT GATED). A live
-# Codex review on PR #28 caught exactly that: an earlier revision typed `line` as `integer` and
-# `required`'d all five display fields, so a model emitting `"line": "section X"` — which
-# `pantheon.render` explicitly coerces to `"?"` (see its `_or_default` line-number handling) and
-# which `decide()` accepts as green — was rejected before the decider ever saw it.
-# So: STRICT on what decide() branches on (agent/verdict/has_blocker/findings + severity), LOOSE
-# on the display fields DESIGN.md's "The display surface — deliberately NOT schema-validated"
-# section reserves for the render layer. Keep the two in step; the top-level `required` list here
-# mirrors `pantheon.verdict.REQUIRED_KEYS` exactly.
+# Two successive live Codex reviews on PR #28 caught this, and the second is the instructive one.
+# Round 1: `line` was typed `integer` with all five display fields `required`, so a model emitting
+# `"line": "section X"` — which `pantheon.render` coerces to `"?"` and `decide()` accepts as green
+# — was rejected before the decider ever saw it. Round 2: loosening those fields to `string|null`
+# was STILL stricter than the decider, which accepts objects, arrays, booleans and numbers there
+# (verified directly, not assumed — see tests/test_providers.py's companion test). A half-measure
+# satisfies the letter of "loosened" while leaving the stated guarantee false.
+# So: STRICT on what decide() branches on (agent/verdict/has_blocker/findings + severity), and the
+# five display fields DESIGN.md's "The display surface — deliberately NOT schema-validated"
+# section reserves for the render layer are left UNCONSTRAINED, accepting every JSON type. The
+# top-level `required` list mirrors `pantheon.verdict.REQUIRED_KEYS` exactly.
+#
+# THREE copies, not two: this constant, `action.yml`'s `JSON_SCHEMA`, and `action/review.yml`'s
+# INLINE `--json-schema '...'` argument, which has no variable name at all — a grep for
+# `JSON_SCHEMA` finds two and reports the third absent, which is how it drifted a revision behind.
+# The byte-identity test searches by content for that reason. Change one, change all three.
 VERDICT_JSON_SCHEMA = (
     '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},'
     '"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object",'
-    '"properties":{"severity":{"type":"string"},"file":{"type":["string","null"]},'
-    '"line":{"type":["integer","string","null"]},"issue":{"type":["string","null"]},'
-    '"scenario":{"type":["string","null"]}},'
-    '"required":["severity"]}},"summary":{"type":["string","null"]}},'
-    '"required":["agent","verdict","has_blocker","findings","summary"]}'
+    '"properties":{"severity":{"type":"string"},"file":{"type":["string","number","boolean",'
+    '"object","array","null"]},"line":{"type":["string","number","boolean","object","array",'
+    '"null"]},"issue":{"type":["string","number","boolean","object","array","null"]},"scenario":{'
+    '"type":["string","number","boolean","object","array","null"]}},"required":["severity"]}},'
+    '"summary":{"type":["string","number","boolean","object","array","null"]}},"required":['
+    '"agent","verdict","has_blocker","findings","summary"]}'
 )
 
 

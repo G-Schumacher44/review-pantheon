@@ -163,14 +163,20 @@ reasons, and only one of them is schema-checked:
   decision-surface types here, render-surface safety there — and neither substitutes for the
   other.
 
-  This binds the `--json-schema` text the provider lanes hand to the model too (`action.yml`'s
-  `JSON_SCHEMA`, `pantheon.providers.VERDICT_JSON_SCHEMA` — kept byte-identical, enforced by a
-  test). **That schema may never be stricter than the decider.** A schema that rejects a verdict
+  This binds the `--json-schema` text the provider lanes hand to the model too. It lives in
+  **three** places — `pantheon.providers.VERDICT_JSON_SCHEMA`, `action.yml`'s `JSON_SCHEMA`, and
+  `action/review.yml`'s inline `--json-schema` argument — kept byte-identical, enforced by a test
+  that searches for the schema's *content* rather than a variable name (the third copy has no
+  variable, so a name-based search reports it absent — which is how it once drifted a revision
+  behind the other two).
+
+  **That schema may never be stricter than the decider.** A schema that rejects a verdict
   `decide()` would have accepted fails closed in the wrong direction: the run surfaces as
   UNVERIFIED / NOT GATED even though a real, reviewable verdict was produced. So the schema is
   strict on the decision surface — `agent`, `verdict`, `has_blocker`, `findings`, and
-  `findings[].severity` — and deliberately permissive on the display fields above, matching what
-  the render layer already coerces.
+  `findings[].severity` — and leaves the five display fields **entirely unconstrained**, accepting
+  every JSON type, because `decide()` does too and the render layer sanitizes whatever arrives.
+  Permitting merely "string or null" there is still stricter than the decider, and still a bug.
 
 ## Provider lanes
 
