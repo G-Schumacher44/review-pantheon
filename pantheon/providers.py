@@ -211,11 +211,12 @@ import signal
 import subprocess
 import sys
 
-from pantheon import execution
+from pantheon import execution, jqjson
 
 __all__ = [
     "ProviderError",
     "KNOWN_PROVIDERS",
+    "VERDICT_JSON_SCHEMA",
     "default_allowed_tools",
     "provider_run",
     "trusted_roots",
@@ -264,6 +265,61 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini", "cursor")
 # `sys.path[0]` is its OWN install directory, never the caller's cwd, closing the shadow with no
 # `-I`-style collateral restriction).
 _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
+
+# The verdict-contract JSON Schema (DESIGN.md's "Verdict contract") — the SAME schema text
+# action.yml/action/review.yml already pass to claude-code-action's own `claude_args` via
+# `--json-schema` (kept byte-identical deliberately, not re-derived, so every surface that can
+# enforce a schema at all enforces the identical one). Issue #26 item 3: the CLI (Python) lane
+# used to invoke `claude -p ...` and merely HOPE the model ended with a trailing JSON object,
+# relying entirely on pantheon.verdict's own trailing-JSON-extraction fallback — the flag this
+# constant is used with (`--json-schema`, confirmed present via `claude --help`) exists and the
+# two GitHub Action surfaces already use it; this module's own `_claude()` now does too.
+VERDICT_JSON_SCHEMA = (
+    '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},'
+    '"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object",'
+    '"properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},'
+    '"issue":{"type":"string"},"scenario":{"type":"string"}},'
+    '"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},'
+    '"required":["agent","verdict","has_blocker","findings","summary"]}'
+)
+
+
+def _extract_structured_output(envelope_text: str) -> str:
+    """Post-processes the claude lane's `--output-format json` envelope (issue #26 item 3):
+    with `--json-schema` also passed, that envelope carries a `structured_output` key holding
+    the schema-VALIDATED object itself (confirmed live: `claude -p ... --json-schema '<schema>'
+    --output-format json` prints one JSON object to stdout with both a `result` string field AND
+    a separate, already-parsed `structured_output` object field) — this function is what makes
+    that shape a drop-in replacement for the OLD raw-text-and-hope-for-trailing-JSON output every
+    caller of :func:`provider_run` already expects (``pantheon.verdict.decide()``, unchanged by
+    this fix, still does its own trailing-JSON-extraction/parse/validate pass on whatever string
+    this function returns).
+
+    Re-serializes `structured_output` via :func:`pantheon.jqjson.dumps` (never a bare
+    ``json.dumps`` — this port's own JSON-boundary rule) when present, so
+    ``pantheon.verdict.extract_last_json``'s own suffix scan finds exactly one trailing JSON
+    object, the schema-validated one, with nothing else around it to confuse the scan.
+
+    Falls back to `envelope_text` UNCHANGED — never raises, never substitutes a synthetic error
+    object — when the envelope itself doesn't parse as JSON, isn't an object, or has no
+    `structured_output` key (schema validation failed, e.g. `is_error: true` with the CLI's own
+    "did not return structured_output" message in `result`): `pantheon.verdict.decide()` then
+    runs its OWN trailing-JSON-extraction pass on that text, which is `required-keys`-checked
+    against the verdict contract's five required keys — the outer envelope's own keys (`type`,
+    `subtype`, `session_id`, `usage`, ...) never happen to satisfy that set, so this correctly
+    lands on UNVERIFIED ("verdict JSON missing required keys") rather than a lucky false match,
+    matching the same fail-closed posture the pre-#26 raw-text lane already had for any other
+    malformed provider output."""
+    try:
+        envelope = jqjson.loads(envelope_text)
+    except jqjson.JqParseError:
+        return envelope_text
+    if not isinstance(envelope, dict):
+        return envelope_text
+    structured = envelope.get("structured_output")
+    if structured is None:
+        return envelope_text
+    return jqjson.dumps(structured, ensure_ascii=False)
 
 
 def default_allowed_tools(repo_root: str | None = None) -> str:
@@ -789,7 +845,24 @@ def _claude(
     outside the repo root/cwd before being forwarded, and ``HOME`` is never read from ambient env
     at all — see that function's own docstring. Fixture proof, both ``--bare`` and no-``--bare``:
     tests/test_providers.py's ``test_claude_env_never_forwards_a_claude_config_dir_pointed_
-    inside_the_repo_root_with_bare``/``..._without_bare``."""
+    inside_the_repo_root_with_bare``/``..._without_bare``.
+
+    **``--json-schema``/``--output-format json`` — issue #26 item 3.** Every other lane
+    (codex/gemini/cursor, none of which expose an equivalent flag as of this writing — see this
+    module's own docstring's per-lane disclosures) and this lane's own PRE-fix behavior relied
+    entirely on ``pantheon.verdict``'s trailing-JSON-extraction scan to find a verdict object
+    somewhere in the model's raw text output — hope, not enforcement. ``claude --help`` documents
+    ``--json-schema <schema>``, and the two GitHub Action surfaces (``action.yml``,
+    ``action/review.yml``) already pass an identical schema via ``claude_args`` and read the
+    result from ``structured_output``. Confirmed live (this fix's own investigation, a real
+    ``claude -p ... --json-schema '<schema>' --output-format json`` invocation): with both flags,
+    stdout is ONE JSON envelope object carrying a ``structured_output`` key holding the
+    schema-validated object itself — :func:`_extract_structured_output` (see its own docstring)
+    turns that envelope into the same plain, trailing-JSON-object text shape
+    ``pantheon.verdict.decide()`` already expects from every OTHER lane, so that decision function
+    itself needed no change at all: both runtimes (this CLI lane and the Action's own
+    ``structured_output``-driven lane) now enforce the IDENTICAL schema and feed the IDENTICAL
+    decision function, whether or not either enforces it at the CLI-flag level."""
     claude_bin = _resolve_cli("claude", repo_root)
     if claude_bin is None:
         raise ProviderError("'claude' CLI not found on PATH")
@@ -802,7 +875,9 @@ def _claude(
     argv += ["-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
     if model:
         argv += ["--model", model]
-    return _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
+    argv += ["--output-format", "json", "--json-schema", VERDICT_JSON_SCHEMA]
+    envelope = _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
+    return _extract_structured_output(envelope)
 
 
 def _codex(

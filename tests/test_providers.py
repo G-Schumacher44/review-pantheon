@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from pantheon import execution, providers
+from pantheon import execution, jqjson, providers
 
 
 @pytest.fixture()
@@ -292,6 +292,82 @@ def test_claude_falls_back_to_default_allowed_tools_when_empty(monkeypatch, prom
     assert tools == providers.default_allowed_tools()
     assert providers._WRAPPER_SCRIPT_NAME in tools
     assert tools.endswith("wrapper *)")
+
+
+# ---------------------------------------------------------------------------------------------
+# --json-schema / --output-format json enforcement (issue #26 item 3) — the CLI lane used to
+# invoke `claude -p ...` and merely hope the model's raw text ended with a trailing JSON object,
+# relying entirely on pantheon.verdict's own extraction fallback. Confirmed live (this fix's own
+# investigation): with --json-schema and --output-format json, stdout is one JSON envelope
+# carrying a `structured_output` key. These fixtures prove both the new argv shape AND the
+# envelope-to-plain-verdict-text unwrapping (_extract_structured_output).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_claude_argv_includes_json_schema_and_output_format(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+    argv = captured["argv"]
+    assert "--output-format" in argv
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert "--json-schema" in argv
+    assert argv[argv.index("--json-schema") + 1] == providers.VERDICT_JSON_SCHEMA
+
+
+def test_claude_unwraps_structured_output_from_the_envelope(monkeypatch, prompt_file) -> None:
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,'
+        '"result":"{\\"agent\\":\\"artemis\\"}",'
+        '"structured_output":{"agent":"artemis","verdict":"SHIP","has_blocker":false,'
+        '"findings":[],"summary":"looks fine"}}'
+    )
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    _install_fake_popen(monkeypatch, stdout=envelope)
+
+    out = providers.provider_run("claude", "", prompt_file, "")
+
+    parsed = jqjson.loads(out)
+    assert parsed == {
+        "agent": "artemis",
+        "verdict": "SHIP",
+        "has_blocker": False,
+        "findings": [],
+        "summary": "looks fine",
+    }
+
+
+def test_claude_falls_back_to_envelope_text_when_structured_output_missing(monkeypatch, prompt_file) -> None:
+    # Schema validation failed on the CLI's own side (e.g. is_error: true) -- no
+    # `structured_output` key at all. Must fall back to the raw envelope text unchanged, not
+    # raise -- pantheon.verdict.decide()'s own required-keys check then lands on UNVERIFIED
+    # ("verdict JSON missing required keys"), the same fail-closed posture every other malformed
+    # provider output already gets.
+    envelope = (
+        '{"type":"result","is_error":true,'
+        '"result":"--json-schema was provided but Claude did not return structured_output."}'
+    )
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    _install_fake_popen(monkeypatch, stdout=envelope)
+
+    out = providers.provider_run("claude", "", prompt_file, "")
+    assert out == envelope
+
+
+def test_claude_falls_back_to_raw_text_when_envelope_itself_is_not_json(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    _install_fake_popen(monkeypatch, stdout="not json at all")
+
+    out = providers.provider_run("claude", "", prompt_file, "")
+    assert out == "not json at all"
+
+
+def test_extract_structured_output_unit() -> None:
+    assert providers._extract_structured_output('{"structured_output":{"a":1}}') == jqjson.dumps({"a": 1})
+    assert providers._extract_structured_output('{"no_such_key":true}') == '{"no_such_key":true}'
+    assert providers._extract_structured_output("not json") == "not json"
+    assert providers._extract_structured_output("[1,2,3]") == "[1,2,3]"
 
 
 def test_codex_pipes_prompt_via_stdin(monkeypatch, prompt_file) -> None:
@@ -910,3 +986,163 @@ def test_resolve_cli_does_not_find_an_executable_planted_in_a_nested_repo_bin(mo
 
     # _resolve_cli(name, repo_root) must never return it.
     assert providers._resolve_cli("claude", str(repo_root)) is None
+
+
+# ---------------------------------------------------------------------------------------------
+# Readonly-tier end-to-end proof (issue #26 item 2) — "a fixture that proves the FEATURE works,
+# not just that attacks are refused: a readonly-tier run that produces a parseable verdict end
+# to end. This is the test whose absence caused the whole problem." Before this fix, this repo's
+# own CI never dogfooded the shipped default: the self-check job runs `execution: trusted` (no
+# wrapper at all), and every other fixture in this file/tests/test-git-readonly-wrapper.sh proves
+# either "the wrapper refuses hostile input" or "argv construction looks right" — never that the
+# WHOLE chain (prompt -> provider -> a real Bash-tool-shaped wrapper call against a real repo ->
+# a schema-shaped verdict -> pantheon.verdict.decide()) produces a real, non-UNVERIFIED decision.
+#
+# Fixture-level, not a live Anthropic model call (this repo's own posture: no metered API key,
+# `claude` here is a stand-in the same way every other test in this file replaces the real CLI
+# with `_resolve_cli`/`Popen` fakes) — but everything AROUND that one stand-in is genuinely real:
+# a real two-commit git repo, the REAL installed `pantheon-git-readonly` console script (skips if
+# not installed), a real `execution.build_readonly_argv`/`run_readonly_wrapper` subprocess call
+# reading real `git diff --stat` output (deliverable 1's own safe-flag allowlist), the real
+# `pantheon.cli._build_prompt` (deliverable 7's cwd fix), and the real
+# `pantheon.verdict.decide()` decision function (deliverable 4's schema-envelope unwrapping).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_readonly_tier_end_to_end_produces_a_parseable_verdict(tmp_path, monkeypatch) -> None:
+    import json
+    import subprocess
+
+    from pantheon import cli as cli_module
+    from pantheon import verdict
+
+    wrapper_script = execution.resolve_console_script("pantheon-git-readonly")
+    if wrapper_script is None:
+        pytest.skip("pantheon-git-readonly console script is not installed in this test environment")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("one\ntwo\nthree\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "first"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("one\ntwo\nthree\nfour\nfive\n")
+    subprocess.run(["git", "commit", "-q", "-am", "second"], cwd=repo, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    parent = subprocess.run(
+        ["git", "rev-parse", "HEAD~1"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    diff_range = f"{parent}...{head}"
+
+    neutral_cwd = tmp_path / "neutral-scratch"
+    neutral_cwd.mkdir()
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+
+    ctx = cli_module.GateContext(
+        repo_root=str(repo),
+        pr_number="1",
+        pr_title="test pr",
+        diff_range=diff_range,
+        base_ref="main",
+        base_sha=parent,
+        execution_tier="readonly",
+        rules_file="",
+        spec_file="",
+    )
+    prompt_file = cli_module._build_prompt(ctx, "artemis", str(workdir), str(neutral_cwd))
+    prompt_text = Path(prompt_file).read_text(encoding="utf-8")
+
+    # Deliverable 7's own fix, proved here as a side effect of this same end-to-end chain: the
+    # prompt states the REAL cwd (the neutral scratch dir), never the false "you are in the
+    # repo's working tree" claim that (per issue #26's own report) likely compounded the
+    # wrapper's flag refusals.
+    assert str(neutral_cwd) in prompt_text
+    assert "NOT the target repo's working tree" in prompt_text
+
+    # A fake "claude" standing in for the model: parses the SAME Run-context lines a real agent
+    # reads, then ACTUALLY invokes the real readonly wrapper -- exactly the Bash-tool call a real
+    # agent makes under `Bash(<wrapper> wrapper --repo-root <root> *)` -- with a safe flag from
+    # deliverable 1's own allowlist (`--stat`), before emitting a --json-schema-shaped envelope
+    # (deliverable 4).
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, re, subprocess, sys\n"
+        "argv = sys.argv[1:]\n"
+        "prompt = argv[argv.index('-p') + 1]\n"
+        "repo_root = re.search(r'Repo root \\(absolute path[^)]*\\): (\\S+)', prompt).group(1)\n"
+        "diff_range = re.search(r'Diff range \\(read-only git refs, already fetched\\): (\\S+)', prompt).group(1)\n"
+        f"wrapper = {wrapper_script!r}\n"
+        "result = subprocess.run(\n"
+        "    [wrapper, 'wrapper', '--repo-root', repo_root, 'diff', '--stat', diff_range],\n"
+        "    capture_output=True, text=True,\n"
+        ")\n"
+        "assert result.returncode == 0, ('wrapper failed: ' + result.stdout + result.stderr)\n"
+        "stat_output = result.stdout.strip()\n"
+        "assert 'f.txt' in stat_output, ('no f.txt in wrapper --stat output: ' + stat_output)\n"
+        "f_txt_line = [line for line in stat_output.splitlines() if 'f.txt' in line][0]\n"
+        "verdict_obj = {\n"
+        "    'agent': 'artemis',\n"
+        "    'verdict': 'FIX_FIRST',\n"
+        "    'has_blocker': False,\n"
+        "    'findings': [{\n"
+        "        'severity': 'should_fix',\n"
+        "        'file': 'f.txt',\n"
+        "        'line': 4,\n"
+        "        'issue': 'grew via the readonly wrapper --stat flag',\n"
+        "        'scenario': 'issue #26 end-to-end proof',\n"
+        "    }],\n"
+        "    'summary': 'readonly wrapper --stat output: ' + f_txt_line,\n"
+        "}\n"
+        "envelope = {\n"
+        "    'type': 'result', 'is_error': False,\n"
+        "    'result': json.dumps(verdict_obj),\n"
+        "    'structured_output': verdict_obj,\n"
+        "}\n"
+        "print(json.dumps(envelope))\n"
+    )
+    fake_claude.chmod(0o755)
+
+    monkeypatch.setattr(
+        providers,
+        "_resolve_cli",
+        lambda name, repo_root=None: str(fake_claude) if name == "claude" else None,
+    )
+
+    wrapper_invocation = f"{wrapper_script} wrapper --repo-root {repo}"
+    allowed_tools = execution.allowed_tools_for("readonly", wrapper_invocation)
+
+    raw_output = providers.provider_run(
+        "claude",
+        "",
+        prompt_file,
+        allowed_tools,
+        timeout=30,
+        repo_root=str(repo),
+        neutral_cwd=str(neutral_cwd),
+    )
+
+    # provider_run's own return value is already the unwrapped, schema-validated verdict text
+    # (deliverable 4's _extract_structured_output) -- parseable on its own, not just buried
+    # inside a provider envelope.
+    parsed_raw = json.loads(raw_output)
+    assert parsed_raw["agent"] == "artemis"
+
+    decision = verdict.decide("artemis", raw_output)
+
+    # THE proof: a readonly-tier run produces a real, PARSEABLE, non-UNVERIFIED verdict -- not
+    # the 3x UNVERIFIED issue #26 reported live.
+    assert decision["color"] == "yellow", decision
+    assert decision["verdict"] == "FIX_FIRST"
+    assert decision["invariant_fired"] is False
+    assert decision["reason"] == ""
+    # The verdict content reflects REAL data that flowed through the readonly wrapper's own
+    # --stat flag against the real repo (not a canned string unrelated to the actual diff).
+    assert "f.txt" in decision["verdict_json"]["summary"]

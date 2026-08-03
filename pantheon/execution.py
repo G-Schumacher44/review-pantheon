@@ -178,12 +178,12 @@ READONLY_SUBCOMMANDS: tuple[str, ...] = ("diff", "show", "log", "status")
 # output-formatting toggles, nothing that spawns a helper, writes a file, or touches config.
 _DIFFSTAT_FLAGS: frozenset[str] = frozenset(
     {
-        "--stat", # summary of insertions/deletions per file
-        "--numstat", # machine-readable version of --stat
-        "--name-only", # changed paths only
-        "--name-status", # changed paths + A/M/D status
-        "--no-color", # disables ANSI color codes (never a write/exec surface)
-        "--find-renames", # rename detection heuristic — read-only, no external helper
+        "--stat",  # summary of insertions/deletions per file
+        "--numstat",  # machine-readable version of --stat
+        "--name-only",  # changed paths only
+        "--name-status",  # changed paths + A/M/D status
+        "--no-color",  # disables ANSI color codes (never a write/exec surface)
+        "--find-renames",  # rename detection heuristic — read-only, no external helper
     }
 )
 
@@ -213,6 +213,7 @@ def _is_safe_flag(subcommand: str, arg: str) -> bool:
     if arg in SAFE_FLAGS_FOR_SUBCOMMAND.get(subcommand, frozenset()):
         return True
     return subcommand in _UNIFIED_CONTEXT_SUBCOMMANDS and bool(_UNIFIED_CONTEXT_RE.match(arg))
+
 
 # GLOBAL_OVERRIDES are ``-c key=value`` pairs THIS MODULE writes and controls itself — distinct
 # from the caller's argv (which build_readonly_argv() has already rejected any '-'-prefixed
