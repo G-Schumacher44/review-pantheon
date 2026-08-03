@@ -197,7 +197,12 @@ SAFE_FLAGS_FOR_SUBCOMMAND: dict[str, frozenset[str]] = {
     "diff": _DIFFSTAT_FLAGS,
     "show": _DIFFSTAT_FLAGS,
     "log": _DIFFSTAT_FLAGS | frozenset({"--oneline"}),
-    "status": frozenset({"--short", "-s", "--porcelain", "--no-color"}),
+    # NOT "--no-color": a self-hosted-gate finding (Artemis, live) caught that real `git status`
+    # has no such flag at all -- verified live, `git status --no-color` -> `error: unknown
+    # option 'no-color'` (exit 129). Never needed anyway: this wrapper's own git subprocess has
+    # no controlling TTY (subprocess.run, no PAGER-interactive session), and git already
+    # auto-detects a non-TTY stdout and disables color output on its own for every subcommand.
+    "status": frozenset({"--short", "-s", "--porcelain"}),
 }
 
 # Subcommands whose diff body -U<n>/--unified=<n> is meaningful ("show" and "log" both print a
@@ -463,6 +468,18 @@ def build_readonly_argv(argv: Sequence[str], cwd: str | None = None) -> list[str
 
     if subcommand == "show":
         return ["show", *flags, "--no-ext-diff", "--no-textconv", *positionals]
+
+    if subcommand == "log":
+        # Codex review finding (P1) on this PR's own safe-flag allowlist: `-U<n>`/`--unified=<n>`
+        # on `log` git's own docs say IMPLIES `--patch` — so allowing it here makes `log` a
+        # SECOND diff-producing subcommand, alongside `diff`/`show`, that needed the identical
+        # `--no-ext-diff`/`--no-textconv` forcing those two already get; `log` was missing it
+        # entirely pre-fix. Verified live before landing this fix: a two-commit repo with
+        # `*.evil diff=pwn` + a configured `diff.pwn.textconv` fires the configured helper via
+        # `log -U0 HEAD~1..HEAD` on the pre-fix wrapper. Forced unconditionally (not only when a
+        # unified-context flag is present) — harmless no-op for a `log` call that never produces
+        # a patch body at all, matching `diff`/`show`'s own unconditional forcing.
+        return ["log", *flags, "--no-ext-diff", "--no-textconv", *positionals]
 
     return [subcommand, *flags, *positionals]
 

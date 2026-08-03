@@ -440,7 +440,9 @@ def test_build_readonly_argv_accepts_a_plain_positional_argument_without_a_dash(
     # this same check — proves the fixtures above are exercising the dash-prefix branch
     # specifically, not some other, over-broad refusal.
     assert execution.build_readonly_argv(["status"]) == ["status"]
-    assert execution.build_readonly_argv(["log", "main"]) == ["log", "main"]
+    # log's own return value now also carries the forced --no-ext-diff/--no-textconv (see
+    # test_build_readonly_argv_forces_no_ext_diff_and_no_textconv_on_log below for why).
+    assert execution.build_readonly_argv(["log", "main"]) == ["log", "--no-ext-diff", "--no-textconv", "main"]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -460,7 +462,25 @@ def test_build_readonly_argv_accepts_a_safe_flag_on_status() -> None:
 
 
 def test_build_readonly_argv_accepts_a_safe_flag_on_log() -> None:
-    assert execution.build_readonly_argv(["log", "--oneline"]) == ["log", "--oneline"]
+    assert execution.build_readonly_argv(["log", "--oneline"]) == [
+        "log",
+        "--oneline",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]
+
+
+def test_build_readonly_argv_forces_no_ext_diff_and_no_textconv_on_log() -> None:
+    # Codex review finding (P1) on this PR's own safe-flag allowlist: git's own docs say
+    # -U<n>/--unified=<n> on `log` IMPLIES --patch, making `log` a second diff-producing
+    # subcommand (alongside diff/show) that needs the identical --no-ext-diff/--no-textconv
+    # forcing — missing here pre-fix. Live-reproduced before landing the fix: a two-commit repo
+    # with `*.evil diff=pwn` + a configured `diff.pwn.textconv` fires the configured helper via
+    # `log -U0 HEAD~1..HEAD` on the pre-fix wrapper (tests/test-git-readonly-wrapper.sh has the
+    # full black-box, real-subprocess proof; this is the direct in-process shape check).
+    argv = execution.build_readonly_argv(["log", "-U0", "HEAD~1..HEAD"])
+    assert "--no-ext-diff" in argv
+    assert "--no-textconv" in argv
 
 
 def test_build_readonly_argv_accepts_diff_with_stat_and_a_real_range(tmp_path) -> None:

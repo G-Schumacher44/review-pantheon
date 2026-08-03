@@ -211,7 +211,7 @@ import signal
 import subprocess
 import sys
 
-from pantheon import execution, jqjson
+from pantheon import execution, jqjson, verdict
 
 __all__ = [
     "ProviderError",
@@ -301,17 +301,38 @@ def _extract_structured_output(envelope_text: str) -> str:
     object, the schema-validated one, with nothing else around it to confuse the scan.
 
     Falls back to `envelope_text` UNCHANGED — never raises, never substitutes a synthetic error
-    object — when the envelope itself doesn't parse as JSON, isn't an object, or has no
+    object — when no trailing JSON object can be isolated at all, that object has no
     `structured_output` key (schema validation failed, e.g. `is_error: true` with the CLI's own
-    "did not return structured_output" message in `result`): `pantheon.verdict.decide()` then
-    runs its OWN trailing-JSON-extraction pass on that text, which is `required-keys`-checked
-    against the verdict contract's five required keys — the outer envelope's own keys (`type`,
-    `subtype`, `session_id`, `usage`, ...) never happen to satisfy that set, so this correctly
-    lands on UNVERIFIED ("verdict JSON missing required keys") rather than a lucky false match,
-    matching the same fail-closed posture the pre-#26 raw-text lane already had for any other
-    malformed provider output."""
+    "did not return structured_output" message in `result`), or that key is JSON `null`:
+    `pantheon.verdict.decide()` then runs its OWN trailing-JSON-extraction pass on that text,
+    which is `required-keys`-checked against the verdict contract's five required keys — the
+    outer envelope's own keys (`type`, `subtype`, `session_id`, `usage`, ...) never happen to
+    satisfy that set, so this correctly lands on UNVERIFIED ("verdict JSON missing required
+    keys") rather than a lucky false match, matching the same fail-closed posture the pre-#26
+    raw-text lane already had for any other malformed provider output.
+
+    **Isolates the envelope via :func:`pantheon.verdict.extract_last_json` FIRST, never a bare
+    whole-text :func:`pantheon.jqjson.loads` — a P2 finding from a live Codex review on this PR.**
+    ``_run()``'s own contract merges stdout AND stderr into one text stream (mirroring bash's own
+    ``2>&1`` capture — see that function's own docstring); a SUCCESSFUL claude invocation can
+    still emit an unrelated warning/diagnostic line on stderr, which lands BEFORE the JSON
+    envelope in that merged text. A bare ``jqjson.loads(envelope_text)`` on the WHOLE merged text
+    then fails ("Extra data"/leading-garbage — the envelope's own JSON is no longer the only
+    content), and this function's own fallback returned the RAW merged text unchanged in that
+    case — which then let ``pantheon.verdict.decide()``'s OWN trailing-JSON-extraction still find
+    and parse the outer envelope object (a real, complete JSON document, still the LAST thing in
+    the text), landing on the SAME "verdict JSON missing required keys" UNVERIFIED a genuinely
+    malformed response gets — discarding a perfectly valid, schema-conformant verdict over a
+    harmless stderr line, exactly the class of readonly-tier fragility issue #26 is about. Fixed
+    by reusing the identical rightmost-parseable-`{`-suffix scan ``pantheon.verdict.decide()``
+    already applies to every OTHER provider lane's raw output, applied here FIRST to isolate the
+    envelope object itself before this function's own ``structured_output`` extraction runs —
+    one shared algorithm, not a second copy of the same judgment call."""
+    candidate = verdict.extract_last_json(envelope_text)
+    if not candidate:
+        return envelope_text
     try:
-        envelope = jqjson.loads(envelope_text)
+        envelope = jqjson.loads(candidate)
     except jqjson.JqParseError:
         return envelope_text
     if not isinstance(envelope, dict):

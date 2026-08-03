@@ -204,6 +204,12 @@ if [[ "$IMPL" == "python" ]]; then
 
   accept "git status --short" status --short
   accept "git status -s" status -s
+  accept "git status --porcelain" status --porcelain
+  # NOT "--no-color" -- a self-hosted-gate finding (Artemis, live, PR #28): real `git status`
+  # has no such flag at all (verified live: `git status --no-color` -> `error: unknown option
+  # 'no-color'`, exit 129) -- it must stay off status's own safe-flag allowlist, unlike
+  # diff/show/log (which genuinely do accept it).
+  refuse "git status --no-color (real git status has no such flag -- must stay refused)" status --no-color
   accept "git log --oneline" log --oneline
   accept "git log --oneline HEAD" log --oneline HEAD
   accept "git show --stat HEAD" show --stat HEAD
@@ -341,6 +347,61 @@ fi
 
 rm -f "$HELPER_FIRED_MARKER" "$HELPER_SCRIPT"
 rm -rf "$DRIVER_REPO"
+
+# ---------------------------------------------------------------------------
+# Configured textconv bypass via `log -U<n>` (Codex P1, PR #28 — a live self-hosted-gate finding
+# against issue #26's own safe-flag allowlist). git's own docs: -U<n>/--unified=<n> on `log`
+# IMPLIES --patch, making `log` a second diff-producing subcommand needing the same
+# --no-ext-diff/--no-textconv forcing diff/show already get — missing for `log` in the allowlist's
+# own first landing. Python-port-only (the bash wrapper has no flag allowlist at all).
+# ---------------------------------------------------------------------------
+if [[ "$IMPL" == "python" ]]; then
+  section "Configured textconv bypass via 'log -U<n>' (Codex P1, PR #28)"
+
+  TEXTCONV_REPO="$(mktemp -d)"
+  git -C "$TEXTCONV_REPO" init -q
+  git -C "$TEXTCONV_REPO" config user.email "test@example.com"
+  git -C "$TEXTCONV_REPO" config user.name "test"
+  echo "a" > "$TEXTCONV_REPO/file.evil"
+  git -C "$TEXTCONV_REPO" add file.evil
+  git -C "$TEXTCONV_REPO" commit -q -m "first"
+  echo "b" > "$TEXTCONV_REPO/file.evil"
+  git -C "$TEXTCONV_REPO" commit -q -am "second"
+
+  echo "*.evil diff=pwn" > "$TEXTCONV_REPO/.gitattributes"
+  TEXTCONV_MARKER="$(mktemp -u)"
+  rm -f "$TEXTCONV_MARKER"
+  TEXTCONV_HELPER="$(mktemp)"
+  cat > "$TEXTCONV_HELPER" <<EOF
+#!/bin/sh
+touch "$TEXTCONV_MARKER"
+cat "\$1"
+EOF
+  chmod +x "$TEXTCONV_HELPER"
+  git -C "$TEXTCONV_REPO" config "diff.pwn.textconv" "$TEXTCONV_HELPER"
+
+  # Negative control: RAW git, same fixture repo, same configured textconv driver, MUST fire the
+  # marker via 'log -U0' (proves the fixture is live, and reproduces exactly what the pre-fix
+  # wrapper — which forced no --no-ext-diff/--no-textconv on log at all — forwarded straight to).
+  rm -f "$TEXTCONV_MARKER"
+  ( cd "$TEXTCONV_REPO" && git log -U0 "HEAD~1..HEAD" >/dev/null 2>&1 )
+  if [[ -f "$TEXTCONV_MARKER" ]]; then
+    pass "negative control: RAW git (no wrapper) DOES fire the configured textconv driver via 'log -U0' — fixture is live"
+  else
+    fail "negative control FAILED: raw git did not fire the configured textconv driver via 'log -U0' at all — this fixture is not exercising anything"
+  fi
+
+  rm -f "$TEXTCONV_MARKER"
+  ( cd "$TEXTCONV_REPO" && "${WRAPPER_CMD[@]}" log -U0 "HEAD~1..HEAD" >/dev/null 2>&1 )
+  if [[ -f "$TEXTCONV_MARKER" ]]; then
+    fail "configured textconv driver FIRED via the wrapper's 'log -U0' — --no-ext-diff/--no-textconv regression on log"
+  else
+    pass "configured textconv driver did NOT fire via the wrapper's 'log -U0' — --no-ext-diff/--no-textconv forced on log closes it"
+  fi
+
+  rm -f "$TEXTCONV_MARKER" "$TEXTCONV_HELPER"
+  rm -rf "$TEXTCONV_REPO"
+fi
 
 # ---------------------------------------------------------------------------
 # Index-write hygiene (Codex P2): `git status` performs an optional index refresh that writes

@@ -240,7 +240,7 @@ _JQ_MAX_PARSE_DEPTH = 256
 # jq binary: pure `[`-nesting parses cleanly up to depth D and fails at D+1; pure `{"a":`-nesting
 # parses cleanly up to exactly D/2 and fails at D/2 + 1 -- confirmed on two different jq builds
 # (jq-1.8.2, where D=10000) with the identical 2:1 ratio holding both times, which is what
-# license this port to treat the ratio as a stable property of jq's OWN parser structure rather
+# licenses this port to treat the ratio as a stable property of jq's OWN parser structure rather
 # than a version-specific coincidence. This repo's own CI runs jq-1.7.1 (Ubuntu 24.04's apt
 # package, Dockerfile.smoke) -- the PRE-existing `_JQ_MAX_PARSE_DEPTH = 256` constant was already
 # verified live against that exact binary for ARRAY-only nesting (a 300-level `[`-nesting
