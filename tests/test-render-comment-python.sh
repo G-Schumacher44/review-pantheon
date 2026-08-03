@@ -462,6 +462,308 @@ export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
 assert_byte_identical "nul-in-severity-stripped-before-comparison-not-just-display"
 
 # ---------------------------------------------------------------------------
+# Fixture: repo-root redaction (a coordinator-flagged information-disclosure regression:
+# CRITICAL-1's own fix, adversarial review, exposes the repo's absolute path to the reviewing
+# persona so Read/Grep/Glob still work once the provider no longer launches with the repo
+# checkout as its own cwd — a model can echo that absolute path back into a finding's
+# file/issue/scenario/summary text, which then reaches a POSTED PR comment verbatim: on a CLI-
+# lane run from a maintainer's own machine, that's their real home directory path, published
+# into what may be a public PR). Closed via PANTHEON_REPO_ROOT: every model-controlled display
+# field, AND the machine-tail JSON, must have every occurrence of that path replaced with the
+# stable placeholder `<repo>` before the comment is ever rendered — see
+# pantheon.render.redact_paths's own docstring.
+# ---------------------------------------------------------------------------
+reset_agent_env
+FIXTURE_ABS_REPO_ROOT="/Users/realmaintainer/dev/review-pantheon"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST
+ARTEMIS_TOP="finding under $FIXTURE_ABS_REPO_ROOT/src/gate.sh"
+ARTEMIS_FINDINGS="$(python3 -c "
+import json
+root = '$FIXTURE_ABS_REPO_ROOT'
+print(json.dumps({
+    'agent': 'artemis',
+    'verdict': 'FIX_FIRST',
+    'has_blocker': False,
+    'findings': [{
+        'severity': 'should_fix',
+        'file': root + '/src/gate.sh',
+        'line': 12,
+        'issue': 'leaked path in issue: ' + root + '/src/gate.sh',
+        'scenario': 'leaked path in scenario: ' + root,
+    }],
+    'summary': 'leaked path in summary: ' + root,
+}))
+")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$FIXTURE_ABS_REPO_ROOT"
+
+out="$(render "$HEAD_SHA" artemis)"
+assert_not_contains "repo-root-redaction" "table top-finding cell does not leak the absolute repo root" "$out" "$FIXTURE_ABS_REPO_ROOT"
+assert_not_contains "repo-root-redaction" "finding's file field does not leak the absolute repo root" "$out" "$FIXTURE_ABS_REPO_ROOT/src/gate.sh"
+assert_not_contains "repo-root-redaction" "finding's issue text does not leak the absolute repo root" "$out" "leaked path in issue: $FIXTURE_ABS_REPO_ROOT"
+assert_not_contains "repo-root-redaction" "finding's scenario text does not leak the absolute repo root" "$out" "leaked path in scenario: $FIXTURE_ABS_REPO_ROOT"
+assert_not_contains "repo-root-redaction" "summary text does not leak the absolute repo root" "$out" "leaked path in summary: $FIXTURE_ABS_REPO_ROOT"
+assert_not_contains "repo-root-redaction" "machine-tail raw JSON does not leak the absolute repo root either" "$out" "$FIXTURE_ABS_REPO_ROOT"
+assert_contains "repo-root-redaction" "the redaction placeholder appears in its place" "$out" "<repo>/src/gate.sh"
+
+unset PANTHEON_REPO_ROOT
+
+# Regression-direction guard: WITHOUT PANTHEON_REPO_ROOT set at all, the same fixture must NOT
+# be redacted (redaction is opt-in via that env var — a caller that never set it, or a value
+# that's the empty string, must see the model's real text unchanged; this also proves the
+# assertions above are testing the redaction mechanism, not some unrelated always-on scrub).
+out_no_redact="$(render "$HEAD_SHA" artemis)"
+assert_contains "repo-root-redaction" "without PANTHEON_REPO_ROOT, the absolute path is NOT redacted (opt-in, not always-on)" "$out_no_redact" "$FIXTURE_ABS_REPO_ROOT"
+
+# ---------------------------------------------------------------------------
+# Fixture: repo-root redaction WIDENED (adversarial review, round 2 — coordinator finding). The
+# fixture above only proved the EXACT repo_root string gets redacted; a live finding showed a
+# plain str.replace(repo_root, ...) still leaks real variants a model can produce with no
+# adversarial intent at all: a bare home-directory prefix, a trailing-slash mismatch, a
+# symlink-resolved spelling, or a differently-cased spelling on a case-insensitive filesystem.
+# See pantheon.render.redact_paths's own docstring (the "Widened" section) for the full
+# rationale. Each sub-case below is proven leaking against the ORIGINAL exact-match
+# implementation (verified live via `git stash` while authoring this fixture) before this widened
+# version closes it.
+# ---------------------------------------------------------------------------
+
+# --- Sub-case: parent-path leak (the home-directory prefix alone, no repo suffix at all) -------
+# Uses a scratch $HOME so the fixture is deterministic regardless of the box it runs on: home
+# is only ever treated as an identifying redaction target when it's a real ancestor of
+# repo_root (see _home_directory_redaction_targets's docstring) -- overriding both together
+# keeps that ancestor relationship true without depending on the real operator's own $HOME.
+reset_agent_env
+FAKE_HOME="$(mktemp -d)"
+FIXTURE_PARENT_LEAK_ROOT="$FAKE_HOME/dev/review-pantheon"
+mkdir -p "$FIXTURE_PARENT_LEAK_ROOT"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="see summary"
+ARTEMIS_FINDINGS="$(python3 -c "
+import json
+home = '$FAKE_HOME'
+print(json.dumps({
+    'agent': 'artemis', 'verdict': 'FIX_FIRST', 'has_blocker': False,
+    'findings': [{'severity': 'should_fix', 'file': 'a', 'line': 1,
+                  'issue': 'checkout lives under ' + home, 'scenario': 'y'}],
+    'summary': 'parent-path leak: ' + home,
+}))
+")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$FIXTURE_PARENT_LEAK_ROOT"
+old_home="${HOME:-}"
+export HOME="$FAKE_HOME"
+out="$(render "$HEAD_SHA" artemis)"
+export HOME="$old_home"
+assert_not_contains "repo-root-redaction-parent-leak" "the bare home-directory prefix (no repo suffix) is redacted" "$out" "$FAKE_HOME"
+assert_contains "repo-root-redaction-parent-leak" "the redaction placeholder appears in its place" "$out" "<repo>"
+unset PANTHEON_REPO_ROOT
+rm -rf "$FAKE_HOME"
+
+# --- Sub-case: trailing-slash form mismatch ------------------------------------------------
+# PANTHEON_REPO_ROOT (what ctx.repo_root actually holds) carries a trailing slash; the leaked
+# finding text cites the SAME directory WITHOUT one -- the exact-string implementation this
+# widened version replaces requires the trailing slash to be present in the text too, so it
+# misses this direction entirely.
+reset_agent_env
+FIXTURE_TRAILING_SLASH_ROOT="/Users/realmaintainer/dev/review-pantheon"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="see summary"
+ARTEMIS_FINDINGS="$(python3 -c "
+import json
+root = '$FIXTURE_TRAILING_SLASH_ROOT'
+print(json.dumps({
+    'agent': 'artemis', 'verdict': 'FIX_FIRST', 'has_blocker': False,
+    'findings': [{'severity': 'should_fix', 'file': 'a', 'line': 1,
+                  'issue': 'no-trailing-slash leak: ' + root, 'scenario': 'y'}],
+    'summary': 'no-trailing-slash leak: ' + root,
+}))
+")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$FIXTURE_TRAILING_SLASH_ROOT/"
+out="$(render "$HEAD_SHA" artemis)"
+assert_not_contains "repo-root-redaction-trailing-slash" "a no-trailing-slash leak is redacted even though repo_root itself carries a trailing slash" "$out" "$FIXTURE_TRAILING_SLASH_ROOT"
+unset PANTHEON_REPO_ROOT
+
+# --- Sub-case: symlink-resolved form -------------------------------------------------------
+# ctx.repo_root holds a SYMLINK path (mirroring macOS's own /tmp -> /private/tmp); the leaked
+# finding text cites the REALPATH-RESOLVED spelling instead -- a textually different string
+# naming the identical directory, which a plain string-equality redaction target never matches.
+reset_agent_env
+SYMLINK_SCRATCH="$(mktemp -d)"
+REAL_REPO_DIR="$SYMLINK_SCRATCH/real-repo"
+SYMLINK_REPO_DIR="$SYMLINK_SCRATCH/repo-via-symlink"
+mkdir -p "$REAL_REPO_DIR"
+ln -s "$REAL_REPO_DIR" "$SYMLINK_REPO_DIR"
+RESOLVED_REPO_DIR="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$SYMLINK_REPO_DIR")"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="see summary"
+ARTEMIS_FINDINGS="$(python3 -c "
+import json
+resolved = '$RESOLVED_REPO_DIR'
+print(json.dumps({
+    'agent': 'artemis', 'verdict': 'FIX_FIRST', 'has_blocker': False,
+    'findings': [{'severity': 'should_fix', 'file': 'a', 'line': 1,
+                  'issue': 'symlink-resolved leak: ' + resolved, 'scenario': 'y'}],
+    'summary': 'symlink-resolved leak: ' + resolved,
+}))
+")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$SYMLINK_REPO_DIR"
+out="$(render "$HEAD_SHA" artemis)"
+if [[ "$RESOLVED_REPO_DIR" != "$SYMLINK_REPO_DIR" ]]; then
+  assert_not_contains "repo-root-redaction-symlink" "the realpath-resolved spelling is redacted even though ctx.repo_root holds the symlink path" "$out" "$RESOLVED_REPO_DIR"
+else
+  pass "repo-root-redaction-symlink: skipped (this tmpdir is not actually behind a symlink on this box) — mechanism still exercised by the direct-match assertion below"
+fi
+assert_not_contains "repo-root-redaction-symlink" "the as-given symlink spelling is also redacted (belt-and-suspenders: both forms are targets)" "$out" "$SYMLINK_REPO_DIR"
+unset PANTHEON_REPO_ROOT
+rm -rf "$SYMLINK_SCRATCH"
+
+# --- Sub-case: case variant on a case-insensitive filesystem -------------------------------
+# Platform-conditional both ways: on macOS/Windows (case-insensitive default), a differently-
+# cased spelling of the same path must be redacted; on Linux (case-sensitive), the SAME
+# differently-cased text is a genuinely different, unrelated string and must NOT be redacted --
+# asserting that direction too proves this doesn't over-redact on the platform CI actually runs.
+reset_agent_env
+FIXTURE_CASE_ROOT="/Users/RealMaintainer/Dev/Review-Pantheon"
+FIXTURE_CASE_VARIANT="/users/realmaintainer/dev/review-pantheon"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="see summary"
+ARTEMIS_FINDINGS="$(python3 -c "
+import json
+variant = '$FIXTURE_CASE_VARIANT'
+print(json.dumps({
+    'agent': 'artemis', 'verdict': 'FIX_FIRST', 'has_blocker': False,
+    'findings': [{'severity': 'should_fix', 'file': 'a', 'line': 1,
+                  'issue': 'case-variant leak: ' + variant, 'scenario': 'y'}],
+    'summary': 'case-variant leak: ' + variant,
+}))
+")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$FIXTURE_CASE_ROOT"
+out="$(render "$HEAD_SHA" artemis)"
+CASE_INSENSITIVE_PLATFORM="$(python3 -c "import sys; print('1' if (sys.platform == 'darwin' or sys.platform.startswith('win')) else '0')")"
+if [[ "$CASE_INSENSITIVE_PLATFORM" == "1" ]]; then
+  assert_not_contains "repo-root-redaction-case-variant" "on a case-insensitive platform, a differently-cased spelling is redacted" "$out" "$FIXTURE_CASE_VARIANT"
+else
+  assert_contains "repo-root-redaction-case-variant" "on a case-sensitive platform, a differently-cased spelling is a DIFFERENT path and is correctly NOT redacted (no over-redaction)" "$out" "$FIXTURE_CASE_VARIANT"
+fi
+unset PANTHEON_REPO_ROOT
+
+# --- Sub-case: an ORDERING bug — repo_root containing a JSON-escapable character (adversarial
+# review, round 4, coordinator finding). _machine_tail_text used to JSON-SERIALIZE the parsed
+# findings (jqjson.dumps, which escapes `"`/`\`/control chars) BEFORE redact_paths ever ran
+# on the result — so a repo_root containing a literal `"` or `\` no longer matched its OWN
+# already-escaped form in that serialized text, and leaked into the machine tail untouched. A
+# real path shape, not just theoretical: a POSIX directory name can legally contain a `"`, and
+# Git Bash on Windows checks repos out under paths containing a literal `\`. Fixed by redacting
+# the DATA (the parsed value, and separately the whole findings_obj dict used by the human-
+# readable path) BEFORE any jqjson.dumps/jq_text serialization step, everywhere in this module —
+# see pantheon.render._machine_tail_text's and redact_paths's own docstrings. This
+# fixture's repo_root carries BOTH hazards at once (a `"` AND a `\`), and additionally plants the
+# leak in a JSON field ("machine_tail_only_field") no human-readable display code ever reads by
+# name — the ONLY way it can reach rendered output at all is via the machine tail's full-object
+# dump, isolating exactly the code path this fix touches.
+reset_agent_env
+FIXTURE_HOSTILE_ROOT='/Users/mal"icious\user/dev/review-pantheon'
+HOSTILE_ROOT_FILE="$(mktemp)"
+printf '%s' "$FIXTURE_HOSTILE_ROOT" > "$HOSTILE_ROOT_FILE"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="see summary"
+# Reads the hostile root from a FILE (not a shell-interpolated Python string literal) — the
+# fixture value's own `"`/`\` characters would otherwise be ambiguous to embed directly inside a
+# python3 -c "..." double-quoted argument from bash.
+ARTEMIS_FINDINGS="$(python3 -c "
+import json, sys
+root = open(sys.argv[1], encoding='utf-8').read()
+print(json.dumps({
+    'agent': 'artemis', 'verdict': 'FIX_FIRST', 'has_blocker': False,
+    'findings': [{'severity': 'should_fix', 'file': root + '/src/gate.sh', 'line': 1,
+                  'issue': 'ordering-bug leak: ' + root, 'scenario': 'y'}],
+    'summary': 'ordering-bug leak: ' + root,
+    'machine_tail_only_field': root,
+}))
+" "$HOSTILE_ROOT_FILE")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$FIXTURE_HOSTILE_ROOT"
+out="$(render "$HEAD_SHA" artemis)"
+# The exact JSON-escaped form (`"` -> `\"`, `\` -> `\\`) is what the OLD, pre-fix ordering
+# produced in the machine tail — checked explicitly, not just the raw form, since the raw form
+# alone wouldn't distinguish "redacted correctly" from "coincidentally never appeared escaped".
+ESCAPED_HOSTILE_ROOT="$(python3 -c "
+import json, sys
+root = open(sys.argv[1], encoding='utf-8').read()
+print(json.dumps(root)[1:-1])
+" "$HOSTILE_ROOT_FILE")"
+assert_not_contains "repo-root-redaction-ordering-bug" "human-readable section: the raw hostile repo root does not leak" "$out" "$FIXTURE_HOSTILE_ROOT"
+assert_not_contains "repo-root-redaction-ordering-bug" "machine tail: the raw hostile repo root does not leak" "$out" "$FIXTURE_HOSTILE_ROOT"
+assert_not_contains "repo-root-redaction-ordering-bug" "machine tail: the JSON-ESCAPED form of the hostile repo root does not leak either (the actual ordering bug shape)" "$out" "$ESCAPED_HOSTILE_ROOT"
+assert_contains "repo-root-redaction-ordering-bug" "the redaction placeholder appears in the machine-tail-only field's place" "$out" "\"machine_tail_only_field\": \"<repo>\""
+unset PANTHEON_REPO_ROOT
+rm -f "$HOSTILE_ROOT_FILE"
+
+# --- Sub-case: SIBLING-PATH NON-CORRUPTION (adversarial review, round 5, coordinator finding) ---
+# An UNANCHORED substring match on the home-directory target "/home/alice" also matches (and
+# would mangle) an entirely unrelated SIBLING path like "/home/alice2/service" -- a DIFFERENT
+# user's home directory that merely shares "/home/alice" as a text prefix. redact_paths must
+# require the match to end at a real path boundary (a "/", a non-path-component character, or
+# end of string) before redacting -- proven broken pre-fix (git-stash comparison) below.
+reset_agent_env
+FAKE_HOME_SIBLING="$(mktemp -d)/alice"
+mkdir -p "$FAKE_HOME_SIBLING"
+FAKE_HOME_PARENT="$(dirname "$FAKE_HOME_SIBLING")"
+FIXTURE_SIBLING_REPO_ROOT="$FAKE_HOME_SIBLING/dev/review-pantheon"
+FIXTURE_SIBLING_PATH="$FAKE_HOME_PARENT/alice2/unrelated-service/file.py"
+mkdir -p "$FIXTURE_SIBLING_REPO_ROOT"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="see summary"
+ARTEMIS_FINDINGS="$(python3 -c "
+import json
+target = '$FIXTURE_SIBLING_REPO_ROOT'
+sibling = '$FIXTURE_SIBLING_PATH'
+print(json.dumps({
+    'agent': 'artemis', 'verdict': 'FIX_FIRST', 'has_blocker': False,
+    'findings': [{'severity': 'should_fix', 'file': 'a', 'line': 1,
+                  'issue': 'real leak: ' + target + ' -- unrelated sibling: ' + sibling, 'scenario': 'y'}],
+    'summary': 'real leak: ' + target + ' -- unrelated sibling: ' + sibling,
+}))
+")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$FIXTURE_SIBLING_REPO_ROOT"
+old_home="${HOME:-}"
+export HOME="$FAKE_HOME_SIBLING"
+out="$(render "$HEAD_SHA" artemis)"
+export HOME="$old_home"
+assert_not_contains "repo-root-redaction-sibling-non-corruption" "the real repo_root leak is redacted" "$out" "$FIXTURE_SIBLING_REPO_ROOT"
+assert_contains "repo-root-redaction-sibling-non-corruption" "an unrelated SIBLING path sharing a text prefix with the home-directory target is left completely untouched" "$out" "$FIXTURE_SIBLING_PATH"
+unset PANTHEON_REPO_ROOT
+rm -rf "$FAKE_HOME_PARENT"
+
+# --- Sub-case: escapable-char root leaking through the malformed-JSON FALLBACK path (adversarial
+# review, round 5, coordinator finding — the fallback-path half of the ordering-bug fix). The
+# fixture above proves the NORMAL (parse-succeeds) machine-tail path; this one feeds genuinely
+# malformed (never-parses) JSON that still contains an individually-escaped fragment of the
+# hostile root -- a truncated/malformed document can still hold validly-escaped JSON string
+# content even though the overall document fails to parse. An earlier round's fallback branch
+# only ever searched for the RAW spelling there, missing this shape entirely.
+reset_agent_env
+FIXTURE_FALLBACK_HOSTILE_ROOT='/Users/mal"formed\user/dev/review-pantheon'
+FALLBACK_ROOT_FILE="$(mktemp)"
+printf '%s' "$FIXTURE_FALLBACK_HOSTILE_ROOT" > "$FALLBACK_ROOT_FILE"
+FALLBACK_ESCAPED_ROOT="$(python3 -c "
+import json, sys
+root = open(sys.argv[1], encoding='utf-8').read()
+print(json.dumps(root)[1:-1])
+" "$FALLBACK_ROOT_FILE")"
+# Deliberately malformed as a WHOLE document (truncated, no closing brace) -- jqjson.loads must
+# fail to parse this, forcing _machine_tail_text's raw-text FALLBACK branch, while the escaped
+# root fragment inside it is still individually valid JSON string content.
+ARTEMIS_FINDINGS="not valid json overall: {\"file\": \"${FALLBACK_ESCAPED_ROOT}\", \"truncated"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="see summary"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+export PANTHEON_REPO_ROOT="$FIXTURE_FALLBACK_HOSTILE_ROOT"
+out="$(render "$HEAD_SHA" artemis)"
+unset PANTHEON_REPO_ROOT
+assert_not_contains "repo-root-redaction-fallback-escaped" "the machine tail's raw-text FALLBACK does not leak the raw hostile root" "$out" "$FIXTURE_FALLBACK_HOSTILE_ROOT"
+assert_not_contains "repo-root-redaction-fallback-escaped" "the machine tail's raw-text FALLBACK does not leak the JSON-ESCAPED hostile root either (the actual missed-fallback bug shape)" "$out" "$FALLBACK_ESCAPED_ROOT"
+assert_contains "repo-root-redaction-fallback-escaped" "the redaction placeholder appears in the fallback text's place" "$out" "<repo>"
+rm -f "$FALLBACK_ROOT_FILE"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

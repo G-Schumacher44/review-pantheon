@@ -221,10 +221,10 @@ def test_default_user_scripts_dir_none_when_home_unresolvable(monkeypatch):
 
 
 def test_default_user_scripts_dir_none_when_pwd_module_absent(monkeypatch):
-    # The Windows/no-pwd-module case -- _real_home_dir() itself must return None, never fall
+    # The Windows/no-pwd-module case -- real_home_dir() itself must return None, never fall
     # back to expanduser/HOME.
     monkeypatch.setattr(execution, "pwd", None)
-    assert execution._real_home_dir() is None
+    assert execution.real_home_dir() is None
     assert execution._default_user_scripts_dir() is None
 
 
@@ -384,6 +384,60 @@ def test_live_resolution_of_the_actually_installed_pantheon_git_readonly_script(
 # ---------------------------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------------------------
+# build_readonly_argv()'s '-'-prefix refusal — a medium finding from an adversarial review: this
+# file had ZERO direct unit coverage of the check that any argument starting with '-' (a flag, or
+# a caller-supplied bare '--') is refused for every readonly-tier subcommand — the load-bearing
+# defense the module's own docstring describes at length (EXEC/WRITE-SURFACE MATRIX's "Caller-
+# supplied `--` shifts a validated range into pathspec position" row, among others). Live
+# mutation-test proof: deleting the `if arg.startswith("-"):` branch in
+# pantheon.execution.build_readonly_argv leaves every OTHER existing suite green (15/15 at the
+# time this finding was reported) — this file is the only place that would have caught the
+# regression, and it didn't test this path at all before this fix.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_build_readonly_argv_refuses_a_dash_flag_on_log() -> None:
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["log", "--follow"])
+
+
+def test_build_readonly_argv_refuses_a_short_dash_flag_on_status() -> None:
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["status", "-s"])
+
+
+def test_build_readonly_argv_refuses_a_dash_flag_on_show() -> None:
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["show", "--format=%H"])
+
+
+def test_build_readonly_argv_refuses_a_bare_double_dash_anywhere() -> None:
+    # The '--' pathspec-separator boundary belongs to the wrapper alone (it appends its own
+    # trailing '--' after a validated diff range) — a caller-supplied one must never be accepted,
+    # on any subcommand, not just diff.
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["log", "--"])
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["status", "--"])
+
+
+def test_build_readonly_argv_refuses_a_dash_prefixed_diff_range_looking_argument() -> None:
+    # A '-'-prefixed argument must be refused even when it superficially looks like a valid diff
+    # range (contains '..') — the dash-prefix check runs BEFORE range validation, for every
+    # subcommand uniformly.
+    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+        execution.build_readonly_argv(["diff", "--stat=main..head"])
+
+
+def test_build_readonly_argv_accepts_a_plain_positional_argument_without_a_dash() -> None:
+    # Regression-direction guard: a genuinely plain (non-dash) argument must NOT be refused by
+    # this same check — proves the fixtures above are exercising the dash-prefix branch
+    # specifically, not some other, over-broad refusal.
+    assert execution.build_readonly_argv(["status"]) == ["status"]
+    assert execution.build_readonly_argv(["log", "main"]) == ["log", "main"]
+
+
 def test_forced_env_force_clears_the_python_family_defensively(monkeypatch) -> None:
     monkeypatch.setenv("PYTHONUSERBASE", "/hostile/checkout")
     monkeypatch.setenv("PYTHONPATH", "/hostile/checkout/evil")
@@ -397,3 +451,118 @@ def test_forced_env_force_clears_the_python_family_defensively(monkeypatch) -> N
     assert env["PYTHONHOME"] == ""
     assert env["PYTHONSTARTUP"] == ""
     assert env["PYTHONNOUSERSITE"] == "1"
+
+
+# ---------------------------------------------------------------------------------------------
+# _wrapper_cli()'s `--repo-root <path>` parsing — a real coverage gap flagged by this repo's own
+# self-hosted gate, run live against this PR: CRITICAL-1's fix (providers now launch from a
+# neutral scratch cwd, never the repo checkout — see pantheon.providers' own docstring) needed
+# the readonly wrapper to learn the real repo root some way OTHER than os.getcwd(), since that's
+# now the neutral scratch dir, not the repo. pantheon.cli._wrapper_invocation() bakes
+# `--repo-root <repo_root>` into the wrapper's own fixed Bash-tool prefix; _wrapper_cli() must
+# parse that leading flag itself (a WRAPPER-LEVEL option, never a git subcommand argument) before
+# handing the rest of argv to build_readonly_argv()'s four-subcommand validation, which refuses
+# ANY '-'-prefixed token uniformly, `--repo-root` included.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_wrapper_cli_parses_repo_root_flag_and_uses_it_as_cwd(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_run_readonly_wrapper(argv, cwd=None):
+        captured["argv"] = argv
+        captured["cwd"] = cwd
+
+        class _Result:
+            stdout = b""
+            stderr = b""
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(execution, "run_readonly_wrapper", fake_run_readonly_wrapper)
+
+    rc = execution._wrapper_cli(["--repo-root", "/some/real/repo", "status"])
+
+    assert rc == 0
+    assert captured["cwd"] == "/some/real/repo"
+    # --repo-root and its value are stripped BEFORE reaching build_readonly_argv's own
+    # four-subcommand validation -- only the real git subcommand argv remains.
+    assert captured["argv"] == ["status"]
+
+
+def test_wrapper_cli_falls_back_to_os_getcwd_when_repo_root_flag_absent(monkeypatch, tmp_path) -> None:
+    captured: dict = {}
+
+    def fake_run_readonly_wrapper(argv, cwd=None):
+        captured["argv"] = argv
+        captured["cwd"] = cwd
+
+        class _Result:
+            stdout = b""
+            stderr = b""
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(execution, "run_readonly_wrapper", fake_run_readonly_wrapper)
+    monkeypatch.chdir(tmp_path)
+
+    rc = execution._wrapper_cli(["status"])
+
+    assert rc == 0
+    assert captured["cwd"] == str(tmp_path)
+    assert captured["argv"] == ["status"]
+
+
+def test_wrapper_cli_repo_root_flag_works_with_diff_and_its_range_argument(monkeypatch) -> None:
+    # --repo-root parsing must not consume or otherwise disturb a real subcommand's own
+    # arguments (e.g. diff's one positional range) that happen to follow it.
+    captured: dict = {}
+
+    def fake_run_readonly_wrapper(argv, cwd=None):
+        captured["argv"] = argv
+        captured["cwd"] = cwd
+
+        class _Result:
+            stdout = b""
+            stderr = b""
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(execution, "run_readonly_wrapper", fake_run_readonly_wrapper)
+
+    rc = execution._wrapper_cli(["--repo-root", "/some/real/repo", "diff", "base...head"])
+
+    assert rc == 0
+    assert captured["cwd"] == "/some/real/repo"
+    assert captured["argv"] == ["diff", "base...head"]
+
+
+def test_wrapper_cli_repo_root_flag_end_to_end_live_against_a_real_git_repo(tmp_path) -> None:
+    # Live (non-mocked) proof: --repo-root's value is genuinely used as the git call's own cwd,
+    # not just captured by a mock -- a `status` run against a real repo at that path succeeds
+    # (exit 0) even though this process's OWN cwd (os.getcwd()) is somewhere else entirely.
+    import subprocess
+
+    repo = tmp_path / "real-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("x")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+
+    elsewhere = tmp_path / "neutral-scratch-dir"
+    elsewhere.mkdir()
+
+    original_cwd = os.getcwd()
+    os.chdir(elsewhere)
+    try:
+        rc = execution._wrapper_cli(["--repo-root", str(repo), "status"])
+    finally:
+        os.chdir(original_cwd)
+
+    assert rc == 0

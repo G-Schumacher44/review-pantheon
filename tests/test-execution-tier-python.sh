@@ -258,12 +258,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Part G equivalent (Slice 4) — pantheon.cli's execution= is base-pinned, not working-tree-pinned
-# (the same Codex P1 finding cli/review-gate's own Part G closes) — exercised via real git
-# fixture repos and pantheon.cli's own private helper, the same shape
-# tests/test-prompt-assembly-python.sh's Part P3 uses for the sibling rules/spec-file reads.
+# Part G equivalent (Slice 4, extended by a CRITICAL fix from a later adversarial review) —
+# pantheon.cli's gate.conf keys that shape gate BEHAVIOR (execution=/provider=/rules_file=/
+# spec_file=/agents=) are ALL base-pinned, not working-tree-pinned (the same Codex P1 finding
+# cli/review-gate's own Part G closes for execution= — the adversarial review generalized it to
+# the other four keys, closing docs/CLI.md's own disclosed issue #13 for provider= along the
+# way). Exercised via real git fixture repos and pantheon.cli's own
+# _load_base_pinned_gate_conf() (the single function that now resolves all five keys — see that
+# function's own docstring), the same shape tests/test-prompt-assembly-python.sh's Part P3 uses
+# for the sibling rules/spec-file CONTENT reads (this section covers the file-PATH selection,
+# not the content).
 # ---------------------------------------------------------------------------
-section "Part G equivalent: pantheon.cli's execution= is base-pinned, not working-tree-pinned"
+section "Part G equivalent: pantheon.cli's execution=/provider=/rules_file=/spec_file=/agents= are ALL base-pinned"
 
 if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
   git_fixture_repo_exec() {
@@ -276,62 +282,97 @@ if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
     git -C "$dir" rev-parse HEAD
   }
 
-  py_resolve_execution() {
+  # py_base_conf_field <repo> <base-sha> <field> — reads one BasePinnedGateConfig field.
+  py_base_conf_field() {
     python3 -c "
 import sys
 sys.path.insert(0, '$ROOT')
-from pantheon.cli import _resolve_execution_from_base
-print(_resolve_execution_from_base('$1', '$2'), end='')
+from pantheon.cli import _load_base_pinned_gate_conf
+cfg = _load_base_pinned_gate_conf('$1', '$2')
+print(getattr(cfg, '$3'), end='')
 "
   }
 
-  # G1 — base has execution=readonly committed; a fork PR's head EDITS gate.conf to
-  # execution=trusted. The base-pinned read must see 'readonly', never the working tree's
-  # 'trusted'.
+  # G1 — base has execution=readonly/provider=claude/agents="artemis apollo" committed; a fork
+  # PR's head EDITS gate.conf to weaken ALL FOUR base-pinned keys at once. The base-pinned read
+  # must see the BASE commit's values for every one of them, never the working tree's edits.
   FIXTURE_G1="$(mktemp -d)"
-  echo "execution=readonly" > "$FIXTURE_G1/gate.conf"
+  {
+    echo "execution=readonly"
+    echo "provider=claude"
+    echo "rules_file=REVIEW_RULES.md"
+    echo "spec_file=DESIGN.md"
+    echo "agents=artemis apollo"
+  } > "$FIXTURE_G1/gate.conf"
   FIXTURE_G1_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G1")"
-  echo "execution=trusted" > "$FIXTURE_G1/gate.conf"
-  git -C "$FIXTURE_G1" commit -q -am "fork PR edits gate.conf to execution=trusted"
+  {
+    echo "execution=trusted"
+    echo "provider=attacker-planted-lane"
+    echo "rules_file=nonexistent-file-so-rules-get-silently-skipped.md"
+    echo "spec_file=nonexistent-file-so-spec-gets-silently-skipped.md"
+    echo "agents=socrates"
+  } > "$FIXTURE_G1/gate.conf"
+  git -C "$FIXTURE_G1" commit -q -am "fork PR edits gate.conf to weaken every base-pinned key"
 
-  G1_RESULT="$(py_resolve_execution "$FIXTURE_G1" "$FIXTURE_G1_BASE_SHA")"
-  if [[ "$G1_RESULT" == "readonly" ]]; then
-    pass "base has execution=readonly, PR-edited working tree has execution=trusted -> base-pinned value (readonly) wins"
-  else
-    fail "base-pinning regression: expected 'readonly', got '$G1_RESULT' — the working-tree-edited value leaked through"
-  fi
+  for field_expected in "execution:readonly" "provider:claude" "rules_file:REVIEW_RULES.md" "spec_file:DESIGN.md" "agents:artemis apollo"; do
+    field="${field_expected%%:*}"
+    expected="${field_expected#*:}"
+    result="$(py_base_conf_field "$FIXTURE_G1" "$FIXTURE_G1_BASE_SHA" "$field")"
+    if [[ "$result" == "$expected" ]]; then
+      pass "base-pinned $field=: base has '$expected', fork PR's working-tree edit is ignored -> base-pinned value wins"
+    else
+      fail "base-pinning regression on $field=: expected '$expected' (the base commit's value), got '$result' — the working-tree-edited value leaked through"
+    fi
+  done
   rm -rf "$FIXTURE_G1"
 
   # G2 — a fork PR INTRODUCES gate.conf for the first time (absent at base entirely) with
-  # execution=trusted. Must fall back to readonly, never read the PR-introduced file.
+  # every key set to a hostile value. Must fall back to each field's own DEFAULT, never read the
+  # PR-introduced file.
   FIXTURE_G2="$(mktemp -d)"
   echo "unrelated" > "$FIXTURE_G2/README.md"
   FIXTURE_G2_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G2")"
-  echo "execution=trusted" > "$FIXTURE_G2/gate.conf"
+  {
+    echo "execution=trusted"
+    echo "provider=attacker-planted-lane"
+    echo "agents=socrates"
+  } > "$FIXTURE_G2/gate.conf"
   git -C "$FIXTURE_G2" add gate.conf
-  git -C "$FIXTURE_G2" commit -q -m "fork PR introduces gate.conf with execution=trusted"
+  git -C "$FIXTURE_G2" commit -q -m "fork PR introduces gate.conf with hostile values"
 
-  G2_RESULT="$(py_resolve_execution "$FIXTURE_G2" "$FIXTURE_G2_BASE_SHA")"
-  if [[ "$G2_RESULT" == "readonly" ]]; then
-    pass "gate.conf absent at base, PR introduces execution=trusted -> falls back to readonly, PR-introduced file never read"
-  else
-    fail "base-pinning regression: expected 'readonly' (gate.conf absent at base), got '$G2_RESULT'"
-  fi
+  for field_expected in "execution:readonly" "provider:claude" "agents:artemis apollo"; do
+    field="${field_expected%%:*}"
+    expected="${field_expected#*:}"
+    result="$(py_base_conf_field "$FIXTURE_G2" "$FIXTURE_G2_BASE_SHA" "$field")"
+    if [[ "$result" == "$expected" ]]; then
+      pass "base-pinned $field=: gate.conf absent at base, PR introduces a hostile value -> falls back to '$expected', PR-introduced file never read"
+    else
+      fail "base-pinning regression on $field= (gate.conf absent at base): expected '$expected', got '$result'"
+    fi
+  done
   rm -rf "$FIXTURE_G2"
 
-  # G3 — a LEGITIMATE, already-merged gate.conf at base with execution=trusted must still be
-  # honored — base-pinning isn't "always readonly," it's "trust the base commit, not the PR's own
-  # edits."
+  # G3 — a LEGITIMATE, already-merged gate.conf at base with non-default values must still be
+  # honored — base-pinning isn't "always the default," it's "trust the base commit, not the PR's
+  # own edits."
   FIXTURE_G3="$(mktemp -d)"
-  echo "execution=trusted" > "$FIXTURE_G3/gate.conf"
+  {
+    echo "execution=trusted"
+    echo "provider=gemini"
+    echo "agents=socrates diogenes plato"
+  } > "$FIXTURE_G3/gate.conf"
   FIXTURE_G3_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G3")"
 
-  G3_RESULT="$(py_resolve_execution "$FIXTURE_G3" "$FIXTURE_G3_BASE_SHA")"
-  if [[ "$G3_RESULT" == "trusted" ]]; then
-    pass "execution=trusted legitimately committed AT BASE (not PR-introduced) -> honored"
-  else
-    fail "expected 'trusted' (a legitimately base-committed value), got '$G3_RESULT'"
-  fi
+  for field_expected in "execution:trusted" "provider:gemini" "agents:socrates diogenes plato"; do
+    field="${field_expected%%:*}"
+    expected="${field_expected#*:}"
+    result="$(py_base_conf_field "$FIXTURE_G3" "$FIXTURE_G3_BASE_SHA" "$field")"
+    if [[ "$result" == "$expected" ]]; then
+      pass "base-pinned $field=: '$expected' legitimately committed AT BASE (not PR-introduced) -> honored"
+    else
+      fail "expected '$expected' (a legitimately base-committed value) for $field=, got '$result'"
+    fi
+  done
   rm -rf "$FIXTURE_G3"
 else
   fail "pantheon.cli is NOT importable — cannot run the Part G equivalent"

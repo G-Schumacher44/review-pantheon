@@ -131,6 +131,61 @@ else
   fail "fresh PR + unverified outcome: state file changed unexpectedly ($fresh_after)"
 fi
 
+# ---------------------------------------------------------------------------
+# CRITICAL fix's REFERENCE BASELINE (adversarial review, fixed on the Python port only —
+# pantheon/state.py::update_state()/pantheon/cli.py::run_gate() — this bash implementation is
+# what the fix must MATCH, not something changed here). This suite's own Part above only
+# extracts+sources update_review_gate_state() in isolation, under this TEST SCRIPT's `set -uo
+# pipefail` (deliberately no `-e`, so a failing call here never aborts THIS harness) — that never
+# actually exercised the property real cli/review-gate has: it calls
+# `update_review_gate_state "$OVERALL" ...` as a BARE TOP-LEVEL STATEMENT, under the whole
+# script's `set -euo pipefail`, and that function's own `mv "$tmp_state" "$state_file"` line is
+# NOT inside an if-condition (unlike the `jq ... > "$tmp_state"` redirect immediately before it,
+# which IS an if-condition and so IS errexit-exempt) — so a failing `mv` (a read-only state
+# directory) aborts the WHOLE SCRIPT nonzero right there. This section reproduces THAT exact
+# invocation shape (source the function, then call it as a bare statement under `set -e`) against
+# a real chmod-555 directory, proving the reference baseline the Python port's own fix
+# (tests/test-state-persistence-python.sh's matching fixture) must reproduce. Skipped when
+# running as root (POSIX permission checks are bypassed for root).
+# ---------------------------------------------------------------------------
+section "State-write failure fails closed under set -e (cli/review-gate's real invocation shape)"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "SKIP: running as root — POSIX permission checks are bypassed, precondition unmet"
+else
+  FAILCLOSED_DIR="$(mktemp -d)"
+  FAILCLOSED_STATE="$FAILCLOSED_DIR/state.json"
+  echo '{}' > "$FAILCLOSED_STATE"
+  chmod 555 "$FAILCLOSED_DIR"
+
+  FAILCLOSED_STATUS=0
+  (
+    set -euo pipefail
+    # shellcheck disable=SC1090
+    source "$FUNCS_FILE"
+    # Called indirectly by the sourced update_review_gate_state() (its own `note "..."` calls,
+    # not visible to shellcheck's static analysis of THIS file since the call site lives inside
+    # $FUNCS_FILE, sourced above) -- newer shellcheck (0.11.x, this repo's dev/local version)
+    # reports this as SC2329 ("never invoked"); CI's older shellcheck (0.9.0, Ubuntu's apt
+    # package) reports the identical false positive as SC2317 ("command appears to be
+    # unreachable") instead -- a real version-drift shape difference in which code the same
+    # underlying "no visible caller" heuristic assigns, not two different findings. Both
+    # disabled here, not silently satisfied by whichever version happens to run locally.
+    # shellcheck disable=SC2329,SC2317
+    note() { echo "note: $*" >&2; }
+    update_review_gate_state "green" "42" "deadbeefcafe" "$FAILCLOSED_STATE" "$WORKDIR"
+  ) >/dev/null 2>&1 || FAILCLOSED_STATUS=$?
+
+  chmod 755 "$FAILCLOSED_DIR"  # restore so cleanup below can actually remove it
+  rm -rf "$FAILCLOSED_DIR"
+
+  if [[ "$FAILCLOSED_STATUS" -ne 0 ]]; then
+    pass "cli/review-gate's real invocation shape (bare statement, no if-guard, under set -euo pipefail) aborts NONZERO when the state directory is unwritable for a green verdict — the reference baseline the Python port's own CRITICAL-3 fix matches"
+  else
+    fail "expected a nonzero exit when update_review_gate_state's mv fails under set -e (state dir chmod 555), got 0 — bash's own fail-closed-on-write-failure property is not actually exercised by this suite"
+  fi
+fi
+
 echo
 echo "state-persistence fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

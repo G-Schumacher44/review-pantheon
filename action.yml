@@ -199,6 +199,70 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # CRITICAL finding + resolution history (adversarial review, round 8, live Artemis blocker on
+    # this PR's own self-hosted gate — then a round-9 P2 correction on the fix itself; keep this
+    # whole history, not just the final state, since a future maintainer re-deriving "why is there
+    # no scrub step here" needs the full path, not just the ending):
+    #
+    # CRITICAL-1's original fix (neutral cwd + conditional --bare) only ever covered the CLI
+    # (Python) lane — this composite action's own five `uses: anthropics/claude-code-action` steps
+    # (below) still ran with cwd at the checked-out PR's own working tree, no neutral relocation
+    # available (a `uses:` step can't take a working-directory override the way this action's own
+    # shell steps can). The identical config/MCP/hooks startup auto-discovery vector CRITICAL-1
+    # closed on the CLI lane was open here — on the lane this repo actually recommends for
+    # fork-PR review, with the job's own github_token/CLAUDE_CODE_OAUTH_TOKEN in scope. Worst
+    # case: RCE on the runner via a PR-committed `.mcp.json` MCP server or `.claude/settings.json`
+    # hook, before this action's own `--allowedTools` scoping is ever consulted.
+    #
+    # Round 8's first fix: a hand-rolled `rm -rf .mcp.json .claude CLAUDE.md` step here, plus
+    # unconditional `--bare` in claude_args below. Two bugs surfaced live, in order:
+    #   1. `--bare` broke `--json-schema`-driven structured output on this Action lane
+    #      specifically — a live self-hosted-gate run failed both agents to UNVERIFIED with
+    #      `##[error]--json-schema was provided but Claude did not return structured_output.
+    #      Result subtype: success`. Reverted (not present in claude_args below) — see that
+    #      step's own comment for why the CLI (Python) lane's own `--bare` is unaffected and
+    #      unrelated.
+    #   2. The `rm -rf` scrub step itself was DESTRUCTIVE to a CONSUMING repo's own workspace: any
+    #      repo that legitimately tracks `.claude/`/`CLAUDE.md`/`.mcp.json` and runs build/test/
+    #      deploy steps AFTER this action in the SAME job would find those files permanently
+    #      deleted — destroying adopter content as a side effect of reviewing a PR, the exact
+    #      opposite of this action's own "nothing is copied into the target repo" zero-footprint
+    #      promise. A P2 finding, correctly flagged as more serious than its badge.
+    #
+    # Round 9's fix: REMOVED the scrub step entirely — investigating `anthropics/claude-code-
+    # action`'s own source at this file's EXACT pinned SHA (be7b93b1907a4abad570368f3c74b6fe
+    # 3807510b) found it already has an UNCONDITIONAL, NATIVE mitigation for this identical
+    # vector: `src/entrypoints/run.ts` (that SHA), inside its own `Phase 3: Run Claude` block,
+    # gated only on `isEntityContext(context) && context.isPR` (true for every PR-triggered run,
+    # not behind any input/config this workflow controls) —
+    #
+    #   // On PRs, .claude/ and .mcp.json in the checkout are attacker-controlled.
+    #   // Restore them from the base branch before the CLI reads them.
+    #   ...
+    #   restoreConfigFromBase(restoreBase);
+    #
+    # `restoreConfigFromBase` (`src/github/operations/restore-config.ts`, same SHA) snapshots the
+    # PR's own sensitive-path content into `.claude-pr/` first (so a review agent can still
+    # inspect what the PR changed, without ever executing it), THEN deletes the working-tree
+    # versions, fetches the PR's base branch, and `git checkout`s each sensitive path
+    # (`.claude`, `.mcp.json`, `.claude.json`, `.gitmodules`, `.ripgreprc`, `CLAUDE.md`,
+    # `CLAUDE.local.md`, `.husky`) from that trusted ref — BEFORE the CLI's own startup ever
+    # reads any of them. This is the SAME class of protection the round-8 scrub step tried to add
+    # by hand, already shipped natively, and confirmed FIRING in this repo's own live self-check
+    # run (the exact console line, verbatim): `Restoring .claude, .mcp.json, .claude.json,
+    # .gitmodules, .ripgreprc, CLAUDE.md, CLAUDE.local.md, .husky from origin/dev (PR head is
+    # untrusted)`.
+    #
+    # Net result: no code of THIS repo's own mutates the consuming workspace for this vector at
+    # all — the safest possible fix (option (b) from the round-9 finding: "don't mutate the
+    # workspace... if the vector can be closed by pointing the provider's config/discovery at a
+    # controlled location instead of deleting the workspace's, do that" — here, the underlying
+    # tool already does exactly that, verified against its own pinned source AND a live run, not
+    # assumed). **Do not re-add a scrub step here** — it would be both redundant with an
+    # already-shipped native protection and, if implemented destructively again, would reopen
+    # the exact adopter-data-loss bug round 9 closed. If `claude-code-action`'s pin above is ever
+    # bumped, re-verify `restoreConfigFromBase`'s call site still exists and is still
+    # unconditional for PR events before assuming this protection still holds.
     - name: Assert exactly one auth input is set
       shell: bash
       env:
@@ -415,6 +479,19 @@ runs:
         # git" allowance kept bare `git log`/`git diff` working regardless — see
         # cli/lib/execution.sh's header comment for the fuller writeup (a real Apollo finding,
         # from this PR's own self-review, on this exact composite action).
+        #
+        # NO --bare here, deliberately (adversarial review, round 8 — see the CRITICAL
+        # finding/resolution history comment at the top of this file's `steps:` for the full
+        # writeup, including WHY this lane's CRITICAL-1 config/MCP/hooks vector needs no CLI flag
+        # or workspace mutation of its own — claude-code-action's own pinned source already
+        # restores the sensitive paths from the PR's base branch, unconditionally, before this
+        # step's own invocation ever runs). A first version of THIS fix DID pass --bare
+        # unconditionally here; a live self-hosted-gate run then failed both agents to UNVERIFIED
+        # with `--json-schema was provided but Claude did not return structured_output` — --bare
+        # is empirically incompatible with --json-schema-driven structured output on THIS Action
+        # lane. DO NOT add --bare back here without first proving structured_output survives it
+        # in a live run — no assumption, the same bar this repo's own docs-verification claims
+        # everywhere else already hold to.
         CLAUDE_ARGS="--allowedTools \"$ALLOWED_TOOLS\"
         --permission-mode dontAsk
         --json-schema '$JSON_SCHEMA'"
