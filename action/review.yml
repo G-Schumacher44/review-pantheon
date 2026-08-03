@@ -82,41 +82,47 @@ jobs:
       # ever covered the CLI (Python) lane — this workflow's own "Run review agent" step (below)
       # still ran with cwd at the checked-out PR's own working tree, no neutral relocation
       # available (a `uses: anthropics/claude-code-action` step can't take a working-directory
-      # override the way this workflow's own shell steps can), and until this fix no --bare
-      # either. The identical config/MCP/hooks startup auto-discovery vector CRITICAL-1 closed
-      # on the CLI lane was fully open here — on the lane this repo actually recommends for
-      # fork-PR review, with the job's own github_token/CLAUDE_CODE_OAUTH_TOKEN in scope. Worst
-      # case: RCE on the runner via a PR-committed `.mcp.json` MCP server or
-      # `.claude/settings.json` hook, before this workflow's own `--allowedTools` scoping is
-      # ever consulted.
+      # override the way this workflow's own shell steps can). The identical config/MCP/hooks
+      # startup auto-discovery vector CRITICAL-1 closed on the CLI lane was fully open here — on
+      # the lane this repo actually recommends for fork-PR review, with the job's own
+      # github_token/CLAUDE_CODE_OAUTH_TOKEN in scope. Worst case: RCE on the runner via a
+      # PR-committed `.mcp.json` MCP server or `.claude/settings.json` hook, before this
+      # workflow's own `--allowedTools` scoping is ever consulted.
       #
-      # Closed with two independent layers, since neutral-cwd relocation isn't available here —
-      # see action.yml's own matching "Scrub Claude auto-discovery surface" step for the
-      # identical writeup (kept in sync intentionally, same as every other security fix these
-      # two Action surfaces share):
-      #   1. `--bare` passed UNCONDITIONALLY in the "Run review agent" step's own `claude_args`
-      #      below — Claude Code's own current headless docs (code.claude.com/docs/en/headless,
-      #      verified live before this fix): skips auto-discovery of hooks, skills, plugins, MCP
-      #      servers, auto memory, and CLAUDE.md. The CLI lane's OWN --bare is conditional only
-      #      to preserve a local interactive `claude auth login` keychain session — this
-      #      workflow's auth is ALWAYS the explicit `CLAUDE_CODE_OAUTH_TOKEN` secret (asserted
-      #      present above), exactly the shape --bare requires, so that caveat does not apply.
-      #   2. THIS step: scrubs the actual auto-discovery files from the workspace before any
-      #      agent runs — defense-in-depth for a --bare bug/edge-case/future regression, since
-      #      there is no cwd-relocation backup. Enumerated from Claude Code's own current docs
-      #      (code.claude.com/docs/en/claude-directory, verified live before this fix):
-      #      everything project-specific lives under `.claude/` (`settings.json`/
-      #      `settings.local.json` — hooks are CONFIGURED inside these, no separate `hooks/`
-      #      directory — `rules/`, `skills/`, `commands/`, `agents/`, `workflows/`,
-      #      `agent-memory/`), plus two root-level files: `CLAUDE.md` (also checked at
-      #      `.claude/CLAUDE.md`, both removed by removing the whole directory) and `.mcp.json`
-      #      ("lives at the project root, not inside .claude/", per that same doc). None of
-      #      these are needed for review: the agent reads the diff/rules/spec through
-      #      base-pinned reads and the read-only git wrapper (see "Resolve gate scripts
-      #      (base-pinned)"/"Resolve read-only git wrapper (base-pinned)" below), never the live
-      #      working tree's own config. Fails the whole job CLOSED (not just best-effort
-      #      `rm -rf`) if any path survives — no agent runs against a workspace this step can't
-      #      vouch for.
+      # THIS step is the mitigation — NOT --bare (a first version of this fix DID also pass
+      # --bare in claude_args, unconditionally; a live self-hosted-gate run on this same PR then
+      # failed both agents to UNVERIFIED with `##[error]--json-schema was provided but Claude did
+      # not return structured_output. Result subtype: success` — --bare is INCOMPATIBLE with
+      # --json-schema-driven structured output on this Action lane specifically, empirically, not
+      # theoretically; reverted rather than assumed fixable). The CLI (Python) lane's own --bare
+      # (pantheon/providers.py's _claude lane) is unaffected and stays as-is: that lane parses
+      # the agent's raw text output itself via pantheon.jqjson — it never asks Claude Code for
+      # --json-schema-validated structured_output the way claude-code-action does, so the two
+      # lanes are not interchangeable here. **Do not "harmonize" --bare onto this surface later**
+      # — it silently breaks verdict parsing (both agents read as UNVERIFIED, which fails the
+      # gate closed, so this particular failure mode is at least never a false ACCEPT — but it's
+      # still a functional break, not just a security no-op). See action.yml's own matching
+      # "Scrub Claude auto-discovery surface" step and its own claude_args comment for the
+      # identical writeup (kept in sync intentionally, same as every other security fix these two
+      # Action surfaces share).
+      #
+      # This step alone is the mitigation, scrubbing the actual auto-discovery files from the
+      # workspace before any agent runs — mechanism-independent of the CLI invocation, so it
+      # cannot interfere with --json-schema/structured_output the way a CLI flag can. Enumerated
+      # from Claude Code's own current docs (code.claude.com/docs/en/claude-directory, verified
+      # live before this fix): everything project-specific lives under `.claude/` (`settings.json`/
+      # `settings.local.json` — hooks are CONFIGURED inside these, no separate `hooks/`
+      # directory — `rules/`, `skills/`, `commands/`, `agents/`, `workflows/`,
+      # `agent-memory/`), plus two root-level files: `CLAUDE.md` (also checked at
+      # `.claude/CLAUDE.md`, both removed by removing the whole directory) and `.mcp.json`
+      # ("lives at the project root, not inside .claude/", per that same doc). None of
+      # these are needed for review: the agent reads the diff/rules/spec through
+      # base-pinned reads and the read-only git wrapper (see "Resolve gate scripts
+      # (base-pinned)"/"Resolve read-only git wrapper (base-pinned)" below), never the live
+      # working tree's own config. Runs immediately after checkout, before every other step
+      # (ordering matters — a scrub after an agent has already started is worthless) and fails
+      # the whole job CLOSED (not just best-effort `rm -rf`) if any path survives — no agent runs
+      # against a workspace this step can't vouch for.
       - name: Scrub Claude auto-discovery surface from the workspace
         run: |
           set -euo pipefail
@@ -766,19 +772,18 @@ jobs:
           # waits for input. See cli/lib/execution.sh's header comment for the fuller writeup (a
           # real Apollo finding, from this PR's own self-review of action.yml, which has the
           # identical gap this same fix closes here).
-          # --bare, UNCONDITIONAL (adversarial review, round 8 — see the "Scrub Claude
-          # auto-discovery surface" step above for the full CRITICAL writeup this is layer 1 of).
-          # Verified against Claude Code's current official headless docs before adding, not
-          # assumed: skips auto-discovery of hooks, skills, plugins, MCP servers, auto memory,
-          # and CLAUDE.md. Unlike the CLI (Python) lane's OWN conditional --bare (which exists
-          # specifically to preserve a LOCAL interactive `claude auth login` keychain session
-          # with no token env var), this workflow's auth is ALWAYS the explicit
-          # CLAUDE_CODE_OAUTH_TOKEN secret (asserted present in this job's very first step) — so
-          # the keychain caveat that makes the CLI lane's own flag conditional does not apply
-          # here.
+          # NO --bare here, deliberately (adversarial review, round 8 — see the "Scrub Claude
+          # auto-discovery surface" step above for the full writeup and the live failure that
+          # reverted it). A first version of this fix DID pass --bare unconditionally here; a
+          # live self-hosted-gate run then failed both agents to UNVERIFIED with `--json-schema
+          # was provided but Claude did not return structured_output` — --bare is empirically
+          # incompatible with --json-schema-driven structured output on THIS Action lane. The
+          # scrub step above is this lane's own mitigation instead — mechanism-independent of the
+          # CLI invocation, so it can't interfere with --json-schema the way a flag can. DO NOT
+          # add --bare back here without first proving structured_output survives it in a live
+          # run — no assumption.
           claude_args: |
             --allowedTools "Read,Grep,Glob,Bash(${{ steps.resolve-git-wrapper.outputs.wrapper_path }} *)"
-            --bare
             --permission-mode dontAsk
             --json-schema '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 

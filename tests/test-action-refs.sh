@@ -167,32 +167,36 @@ fi
 # ---------------------------------------------------------------------------------------------
 # CRITICAL fix (adversarial review, round 8, live Artemis blocker on this PR's own self-hosted
 # gate): both Action surfaces invoked claude-code-action with cwd at the checked-out PR's own
-# working tree — no neutral relocation available for a `uses:` step, and (until this fix) no
-# --bare either — leaving the CLI (Python) lane's own already-closed config/MCP/hooks
-# auto-discovery vector fully open on the lane this repo actually recommends for fork-PR review.
-# Structural checks here (a live claude-code-action run isn't reproducible in this repo's own
-# CI — said honestly, not glossed over): --bare is present exactly once per surface (shared by
-# all 5 agents in action.yml via its ONE claude_args-construction step), and a dedicated scrub
-# step exists and runs BEFORE every claude-code-action invocation on both surfaces. The scrub
-# MECHANISM itself (does `rm -rf .mcp.json .claude CLAUDE.md` + the fail-closed existence check
-# actually remove marker files) is separately exercised live, not just grepped for, immediately
-# below.
+# working tree — no neutral relocation available for a `uses:` step — leaving the CLI (Python)
+# lane's own already-closed config/MCP/hooks auto-discovery vector fully open on the lane this
+# repo actually recommends for fork-PR review. Structural checks here (a live claude-code-action
+# run isn't reproducible in this repo's own CI — said honestly, not glossed over): a dedicated
+# scrub step exists and runs BEFORE every claude-code-action invocation on both surfaces. The
+# scrub MECHANISM itself (does `rm -rf .mcp.json .claude CLAUDE.md` + the fail-closed existence
+# check actually remove marker files) is separately exercised live, not just grepped for,
+# immediately below.
+#
+# --bare is DELIBERATELY ABSENT from both Action surfaces (a regression guard, not an oversight):
+# a first version of this fix DID pass --bare unconditionally on both — a live self-hosted-gate
+# run on this same PR then failed both agents to UNVERIFIED with `--json-schema was provided but
+# Claude did not return structured_output` — --bare is empirically incompatible with
+# --json-schema-driven structured output on these Action surfaces specifically. The scrub step
+# is the sole mitigation here instead; the CLI (Python) lane's own --bare (unaffected — it never
+# consumes --json-schema-validated structured_output the way claude-code-action does) stays
+# conditional as before. Asserting ABSENCE here catches a future "harmonize the flags" regression
+# that would silently re-break verdict parsing on both surfaces.
 # ---------------------------------------------------------------------------------------------
 
-# action.yml: exactly one `--bare` in the single shared CLAUDE_ARGS construction (feeds all 5
-# agents via one output — see "Run <agent>" steps' own claude_args: ${{ steps.resolve.outputs.
-# claude_args }} wiring) — not per-agent, since there is only one construction site.
-action_bare_count="$(grep -cE '^\s*--bare\s*$' "$ACTION_YML")"
-if [[ "$action_bare_count" -eq 1 ]]; then
-  pass "action.yml passes --bare exactly once in its shared CLAUDE_ARGS construction"
+if grep -qE '^\s*--bare\s*$' "$ACTION_YML"; then
+  fail "action.yml passes --bare in claude_args — this breaks --json-schema/structured_output on this Action surface (see the 'Scrub Claude auto-discovery surface' step's own comment for the live failure that proved this); the scrub step is this surface's sole mitigation, not --bare"
 else
-  fail "action.yml's --bare count is $action_bare_count, expected exactly 1 (in the shared CLAUDE_ARGS construction)"
+  pass "action.yml does NOT pass --bare (would break --json-schema/structured_output on this Action surface — confirmed live)"
 fi
 
 if grep -qE '^\s*--bare\s*$' "$REVIEW_YML"; then
-  pass "action/review.yml passes --bare in its claude_args"
+  fail "action/review.yml passes --bare in claude_args — this breaks --json-schema/structured_output on this Action surface (see the 'Scrub Claude auto-discovery surface' step's own comment for the live failure that proved this); the scrub step is this surface's sole mitigation, not --bare"
 else
-  fail "action/review.yml MISSING --bare in its claude_args"
+  pass "action/review.yml does NOT pass --bare (would break --json-schema/structured_output on this Action surface — confirmed live)"
 fi
 
 # The scrub step must exist, by name, on both surfaces.
@@ -227,15 +231,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-# Live exercise of the scrub MECHANISM itself (fixture (3) from the coordinator's own ask): a
-# fixture workspace with marker .mcp.json/.claude/settings.json (with a hook)/CLAUDE.md files —
-# prove the actual `rm -rf` + fail-closed-existence-check shell logic both surfaces now run
-# removes them. This is the honest limit of what's locally reproducible: it proves the SCRUB
-# step's own shell logic works and that a Claude Code startup CAN'T find these files afterward
-# (they're gone), not that a live claude-code-action run's own --bare flag behaves as documented
-# — that half is verified against Claude Code's own official docs instead (this file's own
-# comment above, and action.yml's/action/review.yml's own header comments, cite the exact quote
-# and URL checked live before relying on it).
+# Live exercise of the scrub MECHANISM itself: a fixture workspace with marker
+# .mcp.json/.claude/settings.json (with a hook)/CLAUDE.md files — prove the actual `rm -rf` +
+# fail-closed-existence-check shell logic both surfaces now run removes them. This is the honest
+# limit of what's locally reproducible: it proves the SCRUB step's own shell logic works and that
+# a Claude Code startup CAN'T find these files afterward (they're gone) — a live
+# claude-code-action run itself (including confirming --json-schema/structured_output survives
+# with the scrub as the sole mitigation) isn't reproducible in this repo's own CI until the repo
+# is public; this repo's own self-hosted gate run on this PR IS that live confirmation in
+# practice (it's the run that caught --bare breaking structured_output in the first place, and
+# subsequently the run this fix is verified against).
 # ---------------------------------------------------------------------------------------------
 SCRUB_FIXTURE="$(mktemp -d)"
 mkdir -p "$SCRUB_FIXTURE/.claude"
