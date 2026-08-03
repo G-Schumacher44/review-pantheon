@@ -783,26 +783,31 @@ if [[ "$raw_which_out" == "$PATHINJ_REPO/bin/git" ]]; then
   pass "negative control: raw PATH resolution (command -v git) DOES select the PR-committed impostor when its absolute dir is prepended to PATH — fixture is live"
 else
   fail "negative control FAILED: raw PATH resolution did not select the impostor (got '$raw_which_out') — this fixture is not exercising anything"
-
-  # The wrapper itself must NOT execute the impostor (marker absent) and must still successfully
-  # run the real git (exit 0, real output) — TRUSTED_GIT_DIRS is consulted instead of PATH.
-  rm -f "$PATHINJ_MARKER"
-  pathinj_out="$(cd "$PATHINJ_REPO" && PATH="$PATHINJ_REPO/bin:$PATH" "${WRAPPER_CMD[@]}" status 2>&1)"
-  pathinj_status=$?
-  if [[ ! -f "$PATHINJ_MARKER" ]]; then
-    pass "wrapper did NOT execute the PATH-injected impostor (marker absent) even with its absolute dir prepended to PATH"
-  else
-    fail "wrapper EXECUTED the PATH-injected impostor (marker present) — TRUSTED_GIT_DIRS regression, the read-only boundary is bypassed"
-  fi
-  if [[ $pathinj_status -eq 0 ]] && ! grep -q '^pantheon-git-readonly:' <<<"$pathinj_out"; then
-    pass "wrapper still ran the REAL git successfully (exit 0) despite the PATH-injection attempt"
-  else
-    fail "wrapper did not run the real git successfully under PATH injection (status=$pathinj_status, output: $pathinj_out)"
-  fi
-
-  rm -f "$PATHINJ_MARKER"
-  rm -rf "$PATHINJ_REPO"
 fi
+
+# The wrapper itself must NOT execute the impostor (marker absent) and must still successfully
+# run the real git (exit 0, real output) — TRUSTED_GIT_DIRS is consulted instead of PATH.
+# Unconditional (not gated on the negative control above): these are the real, load-bearing
+# assertions this whole fixture exists for, and must run on every invocation regardless of
+# whether the negative control itself passed or failed — a structural bug once left them
+# stranded inside the negative control's own `else` branch, so they silently never ran on the
+# (normal, expected) success path. See this repo's own git history for the incident.
+rm -f "$PATHINJ_MARKER"
+pathinj_out="$(cd "$PATHINJ_REPO" && PATH="$PATHINJ_REPO/bin:$PATH" "${WRAPPER_CMD[@]}" status 2>&1)"
+pathinj_status=$?
+if [[ ! -f "$PATHINJ_MARKER" ]]; then
+  pass "wrapper did NOT execute the PATH-injected impostor (marker absent) even with its absolute dir prepended to PATH"
+else
+  fail "wrapper EXECUTED the PATH-injected impostor (marker present) — TRUSTED_GIT_DIRS regression, the read-only boundary is bypassed"
+fi
+if [[ $pathinj_status -eq 0 ]] && ! grep -q '^pantheon-git-readonly:' <<<"$pathinj_out"; then
+  pass "wrapper still ran the REAL git successfully (exit 0) despite the PATH-injection attempt"
+else
+  fail "wrapper did not run the real git successfully under PATH injection (status=$pathinj_status, output: $pathinj_out)"
+fi
+
+rm -f "$PATHINJ_MARKER"
+rm -rf "$PATHINJ_REPO"
 
 echo
 echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
