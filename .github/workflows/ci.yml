@@ -188,7 +188,14 @@ jobs:
       - name: DESIGN.md contains no fix-round narrative markers
         run: |
           set -uo pipefail
-          hits="$(grep -noE 'Round [0-9]+|first attempt|the fix was|previously we' DESIGN.md)"
+          # `|| true` is load-bearing, not decoration: GitHub Actions runs `run:` blocks under
+          # `bash -e` by default (`shell: bash` resolves to `bash --noprofile --norc -eo
+          # pipefail {0}`), and grep exits 1 when it finds NO match — the everyday "DESIGN.md is
+          # clean" case. Without this, the clean case aborts the step right here, before the
+          # `if` below ever runs, so the check could never go green on any input (planted-marker
+          # AND clean both "fail," just for different reasons) — caught by the coordinator after
+          # a real CI run on this exact step failed with zero markers actually present.
+          hits="$(grep -noE 'Round [0-9]+|first attempt|the fix was|previously we' DESIGN.md || true)"
           if [[ -n "$hits" ]]; then
             echo "::error::DESIGN.md contains fix-round narrative marker(s) — a contract describes current-state behavior only; fix-round history belongs in git (commit messages, PR descriptions), never the doc. See CONTRIBUTING.md's design-constraints section."
             echo "$hits"
