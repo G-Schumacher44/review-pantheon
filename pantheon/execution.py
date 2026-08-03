@@ -25,9 +25,17 @@ docs/PYTHON-PORT.md §4 to target this module via ``python -m pantheon.execution
 
 ARGV VALIDATION (the caller's argv — build_readonly_argv()):
   - subcommand (argv[0]) must be exactly one of: diff, show, log, status.
-  - every remaining argument must be a plain value (a ref, a path, a range like
-    ``base...head``). NO flag of any kind is permitted, and NOT the bare ``--`` pathspec
-    separator either — the wrapper owns the ``--`` boundary itself (see below).
+  - every remaining argument is either a PLAIN VALUE (a ref, a path, a range like
+    ``base...head`` — never ``-``-prefixed) or a flag on that subcommand's own SAFE-FLAG
+    ALLOWLIST (:data:`SAFE_FLAGS_FOR_SUBCOMMAND` / :data:`_UNIFIED_CONTEXT_RE`) — issue #26: a
+    blanket "no flags of any kind" rule closed every option-injection vector but also closed
+    the feature itself (an agent reaching for ``--stat``/``--name-only``/``-U0``/``--oneline``
+    got refused every time and gave up, emitting prose instead of a verdict). The allowlist is
+    still DEFAULT-DENY — any ``-``-prefixed token not on the relevant subcommand's own set
+    (``-c``, ``--exec*``, ``--output*``, ``--ext-diff``, ``--textconv``, ``--upload-pack``, and
+    every other flag not enumerated) is refused exactly as before. The bare ``--`` pathspec
+    separator is STILL never permitted from the caller, on any subcommand — the wrapper owns
+    that boundary itself (see below); it is not, and can never become, an "allowed flag".
   - ``diff`` additionally requires its one positional argument to be a real revision range
     (``A..B`` or ``A...B``) where BOTH sides independently resolve via
     ``git rev-parse --verify --quiet <side>^{commit}`` — containing the substring ``..`` is
@@ -54,12 +62,15 @@ row. "PY" column names the exact mechanism in this module that closes it.
   `..`-substring range spoofed by a    each side resolved via rev-parse    validate_diff_range()/
     same-named path                      --verify --quiet <side>^{commit}    _verify_commit(): real revspec
                                                                               check, not a substring test
-  Caller-supplied `--` shifts a        caller can never supply `--`;       build_readonly_argv(): any
-    validated range into pathspec       diff takes exactly one positional   '-'-prefixed arg (incl. bare
-    position                                                                '--') refused for every
-                                                                              subcommand; diff capped at
-                                                                              len(args) == 1; wrapper's own
-                                                                              trailing "--" appended on exec
+  Caller-supplied `--` shifts a        caller can never supply `--`;       build_readonly_argv(): a bare
+    validated range into pathspec       diff takes exactly one positional   '--' is refused for every
+    position                                                                subcommand, unconditionally,
+                                                                              before the safe-flag allowlist
+                                                                              (issue #26) is even consulted;
+                                                                              diff capped at
+                                                                              len(positionals) == 1;
+                                                                              wrapper's own trailing "--"
+                                                                              appended on exec
   core.fsmonitor (hook pathname)       -c core.fsmonitor=false             GLOBAL_OVERRIDES tuple
   Optional index-lock write            GIT_OPTIONAL_LOCKS=0                _forced_env(): env["GIT_OPTIONAL_LOCKS"]="0"
   Partial-clone lazy fetch             GIT_NO_LAZY_FETCH=1 (forced env)    _forced_env(): env["GIT_NO_LAZY_FETCH"]="1"
@@ -113,6 +124,7 @@ Slice 4.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import sysconfig
@@ -126,6 +138,7 @@ except ImportError:  # pragma: no cover — no Windows CI leg in this port's own
 __all__ = [
     "WrapperRefused",
     "READONLY_SUBCOMMANDS",
+    "SAFE_FLAGS_FOR_SUBCOMMAND",
     "GLOBAL_OVERRIDES",
     "run_git",
     "build_readonly_argv",
@@ -150,6 +163,56 @@ class WrapperRefused(Exception):
 # subcommand (argv[0]) must be exactly one of these four — DESIGN.md rule 1's own set, unchanged
 # from cli/lib/pantheon-git-readonly.sh's case statement.
 READONLY_SUBCOMMANDS: tuple[str, ...] = ("diff", "show", "log", "status")
+
+# --------------------------------------------------------------------------------------------
+# Per-subcommand safe-flag allowlist (issue #26) — every flag here is READ-ONLY (no
+# write/exec/config surface of its own; each one only changes how the ALREADY-restricted diff/
+# log/status output is FORMATTED) and is a flag agents genuinely reach for when reviewing a
+# diff. Anything not listed here is refused exactly like before — this widens the allowlist, it
+# does not relax the "no flag reaches real git unless this module names it" default-deny
+# posture. Every existing attack fixture in tests/test-git-readonly-wrapper.sh stays refused
+# (none of the historically-refused flags — -c, --exec-path, --output=, --ext-diff, --textconv,
+# --pager=, --upload-pack, ... — are added to any set below).
+#
+# Flags shared by every diff-shaped subcommand (diff/show/log all print a diff body): pure
+# output-formatting toggles, nothing that spawns a helper, writes a file, or touches config.
+_DIFFSTAT_FLAGS: frozenset[str] = frozenset(
+    {
+        "--stat", # summary of insertions/deletions per file
+        "--numstat", # machine-readable version of --stat
+        "--name-only", # changed paths only
+        "--name-status", # changed paths + A/M/D status
+        "--no-color", # disables ANSI color codes (never a write/exec surface)
+        "--find-renames", # rename detection heuristic — read-only, no external helper
+    }
+)
+
+# -U<n> / --unified=<n> (context-line count) — value is BAKED INTO the flag token itself (never
+# a separate argv slot), so there is no "is the next token the value or a new positional"
+# ambiguity for build_readonly_argv() to resolve; validated the same way every other single-
+# purpose refusal in this module is, by regex, not by consuming an adjacent argv slot.
+_UNIFIED_CONTEXT_RE = re.compile(r"^-U\d+$|^--unified=\d+$")
+
+SAFE_FLAGS_FOR_SUBCOMMAND: dict[str, frozenset[str]] = {
+    "diff": _DIFFSTAT_FLAGS,
+    "show": _DIFFSTAT_FLAGS,
+    "log": _DIFFSTAT_FLAGS | frozenset({"--oneline"}),
+    "status": frozenset({"--short", "-s", "--porcelain", "--no-color"}),
+}
+
+# Subcommands whose diff body -U<n>/--unified=<n> is meaningful ("show" and "log" both print a
+# diff body when the underlying commit has one; "status" never prints a diff body at all).
+_UNIFIED_CONTEXT_SUBCOMMANDS: frozenset[str] = frozenset({"diff", "show", "log"})
+
+
+def _is_safe_flag(subcommand: str, arg: str) -> bool:
+    """True if `arg` (already known to be `-`-prefixed) is on `subcommand`'s own safe-flag
+    allowlist above. The caller-supplied bare `--` pathspec separator is deliberately NEVER
+    matched here — see build_readonly_argv()'s own handling of it, which refuses it before this
+    function is ever consulted."""
+    if arg in SAFE_FLAGS_FOR_SUBCOMMAND.get(subcommand, frozenset()):
+        return True
+    return subcommand in _UNIFIED_CONTEXT_SUBCOMMANDS and bool(_UNIFIED_CONTEXT_RE.match(arg))
 
 # GLOBAL_OVERRIDES are ``-c key=value`` pairs THIS MODULE writes and controls itself — distinct
 # from the caller's argv (which build_readonly_argv() has already rejected any '-'-prefixed
@@ -353,6 +416,15 @@ def build_readonly_argv(argv: Sequence[str], cwd: str | None = None) -> list[str
     EXEC/WRITE-SURFACE MATRIX in this module's docstring, and returns the argv to hand to
     ``run_git()`` for the real invocation (excluding the git binary and GLOBAL_OVERRIDES — those
     are ``run_git``'s job). Raises WrapperRefused on any refusal.
+
+    Every ``-``-prefixed token is split into two buckets: a POSITIONAL never starts with ``-``
+    (a ref, a path, a range) and a FLAG must be on ``subcommand``'s own safe-flag allowlist
+    (:func:`_is_safe_flag`, issue #26) — anything ``-``-prefixed that ISN'T on that allowlist is
+    refused exactly like the pre-#26 "no flags at all" behavior, including the caller-supplied
+    bare ``--`` pathspec separator, which is refused UNCONDITIONALLY, on every subcommand, before
+    the allowlist check even runs (the wrapper owns the ``--`` boundary itself — see the module
+    docstring's "Caller-supplied `--`" matrix row; it is not, and can never become, an "allowed
+    flag" the way ``--stat``/``-U<n>`` now are).
     """
     if not argv:
         raise WrapperRefused("no subcommand given (expected one of: diff, show, log, status)")
@@ -362,24 +434,36 @@ def build_readonly_argv(argv: Sequence[str], cwd: str | None = None) -> list[str
     if subcommand not in READONLY_SUBCOMMANDS:
         raise WrapperRefused(f"subcommand '{subcommand}' is not on the read-only allowlist (diff, show, log, status)")
 
+    flags: list[str] = []
+    positionals: list[str] = []
     for arg in rest:
-        if arg.startswith("-"):
+        if arg == "--":
             raise WrapperRefused(
-                f"argument '{arg}' is not permitted — this wrapper allows plain refs/paths/"
-                "ranges only, no flags of any kind, and no caller-supplied '--' pathspec "
-                "separator either (the wrapper owns the '--' boundary itself)"
+                "the '--' pathspec separator is never permitted from the caller, on any "
+                "subcommand — the wrapper owns the '--' boundary itself"
             )
+        if arg.startswith("-"):
+            if _is_safe_flag(subcommand, arg):
+                flags.append(arg)
+                continue
+            raise WrapperRefused(
+                f"argument '{arg}' is not on the safe-flag allowlist for '{subcommand}' (see "
+                "SAFE_FLAGS_FOR_SUBCOMMAND) — this wrapper allows plain refs/paths/ranges plus "
+                "a fixed set of read-only formatting flags only, and no caller-supplied '--' "
+                "pathspec separator either"
+            )
+        positionals.append(arg)
 
     if subcommand == "diff":
-        validated_range = validate_diff_range(rest, cwd=cwd)
+        validated_range = validate_diff_range(positionals, cwd=cwd)
         # The wrapper's OWN trailing '--', never a caller-influenced one — see the module
         # docstring's "Caller-supplied `--`" matrix row.
-        return ["diff", "--no-ext-diff", "--no-textconv", validated_range, "--"]
+        return ["diff", *flags, "--no-ext-diff", "--no-textconv", validated_range, "--"]
 
     if subcommand == "show":
-        return ["show", "--no-ext-diff", "--no-textconv", *rest]
+        return ["show", *flags, "--no-ext-diff", "--no-textconv", *positionals]
 
-    return [subcommand, *rest]
+    return [subcommand, *flags, *positionals]
 
 
 def run_readonly_wrapper(argv: Sequence[str], cwd: str | None = None) -> subprocess.CompletedProcess:
@@ -431,13 +515,17 @@ def execution_context_note(tier: str, wrapper_path: str) -> str:
     return (
         "- Execution: readonly — Bash is restricted to a read-only git wrapper this run, not "
         "raw `git`.\n"
-        f"  Use `{wrapper_path} diff|show|log|status <plain refs/paths/ranges, no flags>` in "
-        "place of\n"
+        f"  Use `{wrapper_path} diff|show|log|status <plain refs/paths/ranges>` in place of\n"
         "  `git diff|show|log|status` (e.g. "
-        f"`{wrapper_path} diff <range>`, `{wrapper_path} show <ref>:<path>`)\n"
-        "  — the wrapper refuses any flag/option and any other subcommand, so this is the only "
-        "Bash\n"
-        "  invocation available. No other command execution is possible this run.\n"
+        f"`{wrapper_path} diff <range>`, `{wrapper_path} show <ref>:<path>`).\n"
+        "  A small set of read-only formatting flags is also allowed, e.g. "
+        f"`{wrapper_path} diff --stat <range>`,\n"
+        f"  `{wrapper_path} diff --name-only <range>`, `{wrapper_path} diff -U0 <range>`, "
+        f"`{wrapper_path} log --oneline`,\n"
+        f"  `{wrapper_path} status --short` — every OTHER flag, and any other subcommand, is "
+        "refused, so this is\n"
+        "  the only Bash invocation available. No other command execution is possible this "
+        "run.\n"
     )
 
 

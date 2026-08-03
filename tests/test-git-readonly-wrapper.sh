@@ -195,6 +195,27 @@ accept "git log (bare, no flags)" log
 accept "git log HEAD (bare ref, no flags)" log HEAD
 accept "git show HEAD:README.md (ref:path)" show "HEAD:README.md"
 
+# Safe-flag allowlist (issue #26) — Python-port-only. The bash wrapper (cli/lib/
+# pantheon-git-readonly.sh) is a deprecated, one-release compat shim (docs/CLI.md) scheduled for
+# removal; its own "no flags of any kind" behavior is deliberately UNCHANGED — the allowlist
+# lands in pantheon/execution.py, the canonical implementation, only.
+if [[ "$IMPL" == "python" ]]; then
+  section "Safe-flag allowlist (issue #26) — legit invocations agents actually reach for"
+
+  accept "git status --short" status --short
+  accept "git status -s" status -s
+  accept "git log --oneline" log --oneline
+  accept "git log --oneline HEAD" log --oneline HEAD
+  accept "git show --stat HEAD" show --stat HEAD
+  accept "git show --name-only HEAD" show --name-only HEAD
+  accept "git show --no-color HEAD" show --no-color HEAD
+
+  refuse "git status --stat (a diff-shaped flag, not on status's own allowlist)" status --stat
+  refuse "git log --exec-path=/tmp (still refused — not on the safe-flag allowlist)" log --exec-path=/tmp
+  refuse "git status -c core.pager=curl (still refused — not on status's own allowlist)" status -c core.pager=curl
+  refuse "git show --output=/tmp/pantheon-wrapper-test-pwned3 (still refused)" show --output=/tmp/pantheon-wrapper-test-pwned3 HEAD
+fi
+
 # Range-based fixtures (`HEAD~1...HEAD`) run against a dedicated two-commit scratch repo, not
 # $ROOT — see accept_in()'s own comment for why $ROOT's checkout depth can't be relied on here.
 SCRATCH_REPO="$(mktemp -d)"
@@ -208,6 +229,36 @@ echo "second" >> "$SCRATCH_REPO/file.txt"
 git -C "$SCRATCH_REPO" commit -q -am "second commit"
 
 accept_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD (bare range)" diff "HEAD~1...HEAD"
+
+if [[ "$IMPL" == "python" ]]; then
+  section "Safe-flag allowlist (issue #26) — diff with a real range"
+
+  accept_in "$SCRATCH_REPO" "git diff --stat HEAD~1...HEAD" diff --stat "HEAD~1...HEAD"
+  accept_in "$SCRATCH_REPO" "git diff --numstat HEAD~1...HEAD" diff --numstat "HEAD~1...HEAD"
+  accept_in "$SCRATCH_REPO" "git diff --name-only HEAD~1...HEAD" diff --name-only "HEAD~1...HEAD"
+  accept_in "$SCRATCH_REPO" "git diff --name-status HEAD~1...HEAD" diff --name-status "HEAD~1...HEAD"
+  accept_in "$SCRATCH_REPO" "git diff -U0 HEAD~1...HEAD" diff -U0 "HEAD~1...HEAD"
+  accept_in "$SCRATCH_REPO" "git diff --unified=0 HEAD~1...HEAD" diff --unified=0 "HEAD~1...HEAD"
+  accept_in "$SCRATCH_REPO" "git diff --find-renames HEAD~1...HEAD" diff --find-renames "HEAD~1...HEAD"
+  accept_in "$SCRATCH_REPO" "git diff --stat --no-color HEAD~1...HEAD (multiple safe flags together)" \
+    diff --stat --no-color "HEAD~1...HEAD"
+
+  refuse_in_scratch() {
+    local name="$1"; shift
+    local out status
+    out="$(cd "$SCRATCH_REPO" && "${WRAPPER_CMD[@]}" "$@" 2>&1)"
+    status=$?
+    if [[ $status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$out"; then
+      pass "$name: refused ($out)"
+    else
+      fail "$name: NOT refused (status=$status, output: $out)"
+    fi
+  }
+  refuse_in_scratch "git diff --stat -- HEAD~1...HEAD (a safe flag does not license a caller-supplied '--')" \
+    diff --stat -- "HEAD~1...HEAD"
+  refuse_in_scratch "git diff --ext-diff HEAD~1...HEAD (still refused even alongside a real range)" \
+    diff --ext-diff "HEAD~1...HEAD"
+fi
 
 # Round 2 (Codex, issue #7): the 'range + -- pathspec separator + path' form this suite used to
 # accept is now REFUSED outright — diff takes exactly one argument and the caller can never supply
