@@ -18,9 +18,9 @@
 #                RELEASING.md's dev->main promotion ceremony was actually followed, not a stray
 #                tag cut from dev or elsewhere), AND the tag must match pyproject.toml's own
 #                `version` field (RELEASING.md's "bump version to match the tag before tagging"
-#                ceremony step, port slice 5 — fail loud on mismatch rather than publish a
-#                tarball/wheel whose own `pantheon --version`-adjacent metadata disagrees with the
-#                tag it shipped under).
+#                ceremony step — fail loud on mismatch rather than publish a tarball/wheel whose
+#                own `pantheon --version`-adjacent metadata disagrees with the tag it shipped
+#                under).
 #   2. build-and-publish — stages the CLI surface (explicit file list, no globs — see the step
 #                below for why), tars it as review-pantheon-<tag>.tar.gz, generates SHA256SUMS,
 #                and creates the GitHub Release with `gh release create`, notes auto-generated.
@@ -82,8 +82,8 @@ jobs:
       - name: Verify tag matches pyproject.toml's version (RELEASING.md's ceremony step)
         run: |
           set -euo pipefail
-          # RELEASING.md's checklist now requires bumping pyproject.toml's `version` (PEP 440,
-          # no "v" prefix) to match the tag BEFORE tagging — port slice 5. Without this gate, a
+          # RELEASING.md's checklist requires bumping pyproject.toml's `version` (PEP 440,
+          # no "v" prefix) to match the tag BEFORE tagging. Without this gate, a
           # forgotten bump would publish a tarball/wheel whose own package metadata (and, once a
           # `pantheon --version`-style surface reads it, the CLI's own self-report) disagrees
           # with the tag it shipped under, silently.
@@ -121,7 +121,7 @@ jobs:
           while IFS= read -r -d '' f; do
             echo "bash -n $f"
             bash -n "$f" || status=1
-          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
           exit "$status"
 
       - name: shellcheck on every shell script
@@ -131,7 +131,7 @@ jobs:
           while IFS= read -r -d '' f; do
             echo "shellcheck $f"
             shellcheck "$f" || status=1
-          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
           exit "$status"
 
       - name: py_compile every Python file
@@ -156,54 +156,34 @@ jobs:
           "
 
       - name: Run verdict-decision fixture tests
-        run: bash tests/test-verdict-decision.sh
-
-      - name: Run verdict-decision fixture tests (Python port, docs/PYTHON-PORT.md)
         run: bash tests/test-verdict-decision-python.sh
 
-      - name: Run base-pinned-read fixture tests (symlink-safe resolution)
-        run: bash tests/test-base-pinned-read.sh
-
-      - name: Run base-pinned-read Python-port migration-exam fixture tests (pantheon.basepin)
+      - name: Run base-pinned-read fixture tests (pantheon.basepin)
         run: bash tests/test-base-pinned-read-python.sh
 
       - name: Run combined-comment renderer fixture tests
-        run: bash tests/test-render-comment.sh
-
-      - name: Run combined-comment renderer fixture tests (Python port, docs/PYTHON-PORT.md)
         run: bash tests/test-render-comment-python.sh
 
-      - name: Run JSON-boundary fixture tests (pantheon.jqjson, docs/PYTHON-PORT.md)
+      - name: Run JSON-boundary fixture tests (pantheon.jqjson)
         run: bash tests/test-json-boundary.sh
 
       - name: Run install.sh fixture tests
         run: bash tests/test-install.sh
 
-      - name: Run prompt-assembly fixture tests
-        run: bash tests/test-prompt-assembly.sh
-
-      - name: Run state-persistence fixture tests
-        run: bash tests/test-state-persistence.sh
-
-      - name: Run state-persistence Python-port migration-exam fixture tests (pantheon.state)
-        run: bash tests/test-state-persistence-python.sh
-
-      - name: Run prompt-assembly Python-port migration-exam fixture tests (pantheon.cli)
+      - name: Run prompt-assembly fixture tests (pantheon.cli)
         run: bash tests/test-prompt-assembly-python.sh
 
-      - name: Run git-readonly-wrapper fixture tests
+      - name: Run state-persistence fixture tests (pantheon.state)
+        run: bash tests/test-state-persistence-python.sh
+
+      - name: Run git-readonly-wrapper fixture tests (pantheon.execution)
         run: bash tests/test-git-readonly-wrapper.sh
 
-      - name: Run git-readonly-wrapper fixture tests against the Python port (pantheon.execution)
-        env:
-          PANTHEON_EXECUTION_IMPL: python
-        run: bash tests/test-git-readonly-wrapper.sh
-
-      - name: Run execution-tier fixture tests
-        run: bash tests/test-execution-tier.sh
-
-      - name: Run execution-tier Python-port migration-exam fixture tests (pantheon.execution)
+      - name: Run execution-tier fixture tests (pantheon.execution)
         run: bash tests/test-execution-tier-python.sh
+
+      - name: Run action/lib execution-context-note fixture tests (cwd-shadow-import resistance)
+        run: bash tests/test-action-lib-execution-note.sh
 
       - name: Run bootstrap release/checksum fixture tests
         run: bash tests/test-bootstrap-release.sh
@@ -214,14 +194,11 @@ jobs:
       - name: Run release.yml tag-validation gate fixture tests
         run: bash tests/test-release-tag-gates.sh
 
-      - name: Install the pantheon package + ruff/mypy/pytest (build-time-only tooling, docs/PYTHON-PORT.md)
+      - name: Install the pantheon package + ruff/mypy/pytest (build-time-only tooling)
         run: pip install --quiet -e . ruff mypy pytest
 
       - name: pantheon console script smoke check (--help exits 0)
         run: pantheon --help
-
-      - name: review-gate compat-shim console script smoke check (--help exits 0)
-        run: review-gate --help
 
       - name: ruff check pantheon/ (lint)
         run: ruff check pantheon/ tests/test_*.py
@@ -232,7 +209,7 @@ jobs:
       - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config)
         run: mypy
 
-      - name: pytest (jqjson matrix + pure-function seams, docs/PYTHON-PORT.md)
+      - name: pytest (jqjson matrix + pure-function seams)
         run: pytest -q
 
       - name: Assert CONTRIBUTING.md's canonical test table matches tests/*.sh exactly
@@ -278,16 +255,16 @@ jobs:
 
           # Explicit, enumerated CLI-surface manifest — deliberately NOT a glob (`cp -R ./*` or
           # similar) so an untracked or build-only file sitting in the checkout can never leak
-          # into a release tarball. This list is the "review-gate CLI surface" contract: the
-          # runner, the personas, the canonical skills, both installers, and the example
+          # into a release tarball. This list is the "pantheon CLI surface" contract: the
+          # package, the personas, the canonical skills, both installers, and the example
           # config/rules/license/readme a fresh install needs. Keep it in sync by hand if that
           # surface changes.
           #
-          # action/decide_verdict.py and action/review.yml (only those two — NOT action/lib/,
-          # which is action.yml's composite-action runtime, not something install.sh reads) are
-          # included because install.sh's default (no --user) mode requires them at
-          # $SCRIPT_DIR/action/... and dies loud if they're missing (a Codex P1 finding on this
-          # PR: without them, install.sh from an extracted release tarball always failed).
+          # action/review.yml (NOT action/lib/, which is action.yml's composite-action runtime,
+          # not something install.sh reads) is included because install.sh's default (no --user)
+          # mode requires it at $SCRIPT_DIR/action/review.yml and dies loud if it's missing (a
+          # Codex P1 finding on this repo's history: without it, install.sh from an extracted
+          # release tarball always failed).
           #
           # skills/ is included for the identical reason: install.sh unconditionally requires
           # $SCRIPT_DIR/skills to exist (the four canonical Claude Code skills — gate, counsel,
@@ -295,13 +272,12 @@ jobs:
           # tarball missing it breaks install.sh from an extracted release the same way a missing
           # action/ did before that Codex finding.
           #
-          # pantheon/ and pyproject.toml (port slice 5) are included because bootstrap.sh's
-          # remote-fetch path now `pip install`s the package FROM the fetched/extracted tarball
-          # (see bootstrap.sh's own header comment) — a release tarball missing either one would
-          # make `bootstrap.sh --version vX.Y.Z` (the curl-pipe, no-local-checkout install path)
-          # fail with "no pyproject.toml found" the same class of failure the action/ and skills/
+          # pantheon/ and pyproject.toml are included because bootstrap.sh's remote-fetch path
+          # `pip install`s the package FROM the fetched/extracted tarball (see bootstrap.sh's own
+          # header comment) — a release tarball missing either one would make
+          # `bootstrap.sh --version vX.Y.Z` (the curl-pipe, no-local-checkout install path) fail
+          # with "no pyproject.toml found" the same class of failure the action/ and skills/
           # additions above were fixing for install.sh.
-          cp -R cli "$STAGE/cli"
           cp -R agents "$STAGE/agents"
           cp -R skills "$STAGE/skills"
           cp -R pantheon "$STAGE/pantheon"
@@ -309,7 +285,6 @@ jobs:
           cp bootstrap.sh "$STAGE/bootstrap.sh"
           cp install.sh "$STAGE/install.sh"
           mkdir -p "$STAGE/action"
-          cp action/decide_verdict.py "$STAGE/action/decide_verdict.py"
           cp action/review.yml "$STAGE/action/review.yml"
           cp REVIEW_RULES.example.md "$STAGE/REVIEW_RULES.example.md"
           cp gate.conf.example "$STAGE/gate.conf.example"

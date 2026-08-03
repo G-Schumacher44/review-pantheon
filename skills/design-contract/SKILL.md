@@ -10,6 +10,12 @@ fail-closed gates, findings discipline), see the `spec-driven` skill. Worked exa
 this repo's own
 [`DESIGN.md`](https://github.com/G-Schumacher44/review-pantheon/blob/main/DESIGN.md) (a GitHub
 link, not relative — this file is copied into `.claude/skills/design-contract/` on install).
+Starting from scratch? Copy
+[`docs/DESIGN.template.md`](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/DESIGN.template.md)
+— a skeleton with the section shape below already laid out (hard rules, data/verdict contract +
+validation surface, security posture with honest limits, deliberately-absent, layout) — and fill
+it in against your own system, rather than reverse-engineering the shape from DESIGN.md's filled
+example each time.
 
 ## When to write one
 
@@ -43,9 +49,14 @@ contract; don't draft a contract around an approach that hasn't been chosen yet.
 
 ## What a contract excludes (the hard-won part)
 
-- **Incident history / changelogs.** Extract them to a separate doc (this repo's
-  `docs/HARDENING-HISTORY.md`). Density kills a contract — if every rule carries its own origin
-  story, the doc stops being scannable as a checklist and a reviewer stops reading it as one.
+- **Fix-round history / changelogs — binding, not a style preference.** No "Round N", "the first
+  attempt was...", "the fix was X", "previously we Y" narrative anywhere in the contract. That
+  history lives in git — commit messages, PR descriptions — never in the doc itself. Density
+  kills a contract: if every rule carries its own origin story, the doc stops being scannable as
+  a checklist and a reviewer stops reading it as one. review-pantheon's own CI enforces this on
+  its `DESIGN.md` with a doc-lint step that fails the build on those markers (see
+  `.github/workflows/ci.yml` and `CONTRIBUTING.md`'s design-constraints section) — adopt the same
+  check on your own contract doc if you want it enforced, not just followed by convention.
 - **Duplicated inventories that fork.** One canonical home per enumerable list, everything else
   points at it. `DESIGN.md`'s "Layout" section explicitly declines to re-list the test suite
   (`CONTRIBUTING.md`'s table is canonical) — two lists of the same thing is how they drift.

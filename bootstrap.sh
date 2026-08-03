@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# bootstrap.sh — user-level, repo-independent install of the review-gate CLI.
+# bootstrap.sh — user-level, repo-independent install of the `pantheon` CLI.
 #
 # Usage:
 #   bootstrap.sh [--prefix ~/.review-pantheon] [--version vX.Y.Z]
 #
 # install.sh vendors review-pantheon's files INTO a target repo (so its CI checkout can see
-# them). This script is the other lane: it puts the review-gate CLI itself somewhere on your
-# machine ONCE — no footprint in any target repo — and you point PATH at it. From then on,
-# `review-gate --pr <n>` works from inside any repo with a gh-authenticated remote, same as
-# the in-repo `cli/review-gate` does. It does not touch your shell rc file; it prints the one
-# line you add yourself.
+# them). This script is the other lane: it installs the `pantheon` package (a Python venv)
+# somewhere on your machine ONCE — no footprint in any target repo — and you point PATH at it.
+# From then on, `pantheon gate --pr <n>` works from inside any repo with a gh-authenticated
+# remote. It does not touch your shell rc file; it prints the one line you add yourself.
 #
 # Two ways to run this:
 #   1. From a local checkout:  ./bootstrap.sh [--prefix ...]
@@ -33,22 +32,21 @@
 #
 # Idempotent: re-running with the same --prefix only touches files that changed. Same cmp-and-
 # skip contract as install.sh's install_file — a destination file that differs from the
-# shipped source (looks hand-edited) is left alone and reported skipped, never clobbered. The
-# `pantheon` package install below (see "Install the pantheon package" section) is idempotent by
-# a DIFFERENT mechanism — `python3 -m venv`/`pip install` are themselves no-ops (or fast,
-# in-place upgrades) on an unchanged source tree, so this script doesn't need to hand-roll its
-# own cmp-and-skip logic for that step the way install_file() does for the vendored bash files.
+# shipped source (looks hand-edited) is left alone and reported skipped, never clobbered, for
+# the vendored `agents/*.md` this script also installs. The `pantheon` package install itself
+# (see "Install the pantheon package" section) is idempotent by a DIFFERENT mechanism —
+# `python3 -m venv`/`pip install` are themselves no-ops (or fast, in-place upgrades) on an
+# unchanged source tree, so this script doesn't need to hand-roll its own cmp-and-skip logic for
+# that step.
 #
 # No new dependencies beyond curl/tar (remote-fetch path only, unchanged) and sha256sum OR
 # shasum for checksum verification — every mainstream platform ships at least one of those two
 # (GNU coreutils sha256sum on Linux, shasum on stock macOS/BSD); both are handled, neither is a
-# new install requirement. **New as of port slice 5:** `python3` (>=3.9, stdlib `venv` module) is
-# now required too — the `pantheon` package (docs/PYTHON-PORT.md) has no runtime dependency
-# beyond the standard library, but installing it at all needs an interpreter and `pip`, same as
-# any Python package. This script still installs the bash CLI (`cli/review-gate`, `cli/lib/`,
-# `cli/providers/`) alongside it, unchanged, for the deprecation window docs/PYTHON-PORT.md
-# section 7 describes — see the "Install the pantheon package" section below for why a venv
-# UNDER --prefix, not `pip install --user`, is the shape this script picked.
+# new install requirement. `python3` (>=3.9, stdlib `venv` module) is required too — the
+# `pantheon` package has no runtime dependency beyond the standard library, but installing it at
+# all needs an interpreter and `pip`, same as any Python package — see the "Install the pantheon
+# package" section below for why a venv UNDER --prefix, not `pip install --user`, is the shape
+# this script picked.
 set -euo pipefail
 
 die() { echo "bootstrap.sh: $*" >&2; exit 1; }
@@ -59,9 +57,9 @@ usage() {
 Usage: bootstrap.sh [--prefix /abs/path] [--version vX.Y.Z]
   (default prefix: ~/.review-pantheon; default version: none — tracks dev HEAD)
 
-Installs the review-gate CLI (cli/review-gate, cli/lib/, cli/providers/, agents/) into the
-prefix directory, independent of any target repo's checkout. Prints the one PATH line to add
-yourself — this script never edits your shell rc.
+Installs the `pantheon` package (a Python venv) and agents/ into the prefix directory,
+independent of any target repo's checkout. Prints the one PATH line to add yourself — this
+script never edits your shell rc.
 
 --version vX.Y.Z pins the remote-fetch (curl | bash, no local checkout) path to a tagged,
 checksummed release instead of dev's current HEAD — see this script's header comment.
@@ -72,14 +70,13 @@ REPO_OWNER="G-Schumacher44"
 REPO_NAME="review-pantheon"
 
 # ---------------------------------------------------------------------------
-# Symlink-safe directory resolution — shared shape with the fix in cli/review-gate. Plain
-# `dirname "${BASH_SOURCE[0]}"` breaks if this script is itself invoked through a symlink
-# (e.g. run from a symlinked clone); this follows the link chain to the real file first.
-# Deliberately not GNU `readlink -f` / coreutils `realpath` — neither ships on stock macOS.
+# Symlink-safe directory resolution. Plain `dirname "${BASH_SOURCE[0]}"` breaks if this script
+# is itself invoked through a symlink (e.g. run from a symlinked clone); this follows the link
+# chain to the real file first. Deliberately not GNU `readlink -f` / coreutils `realpath` —
+# neither ships on stock macOS.
 #
-# This is a DELIBERATE copy of cli/review-gate's resolver. bootstrap.sh must remain a single
-# self-contained file because the curl|bash path fetches it alone, so it cannot source a
-# shared lib — keep the two copies in sync by hand when either changes.
+# bootstrap.sh must remain a single self-contained file because the curl|bash path fetches it
+# alone, so it cannot source a shared lib.
 # ---------------------------------------------------------------------------
 resolve_real_dir() {
   local src="$1"
@@ -99,15 +96,15 @@ resolve_real_dir() {
 }
 
 # detect_local_src — prints the repo root IF this script is running from inside a real
-# review-pantheon checkout (cli/ and agents/ present as siblings). Fails (no output, nonzero)
-# when read from a pipe (curl | bash leaves BASH_SOURCE[0] unset) or when run standalone
-# without those directories alongside it.
+# review-pantheon checkout (pantheon/, agents/, and pyproject.toml present as siblings). Fails
+# (no output, nonzero) when read from a pipe (curl | bash leaves BASH_SOURCE[0] unset) or when
+# run standalone without those alongside it.
 detect_local_src() {
   local src="${BASH_SOURCE[0]:-}"
   [[ -n "$src" && -f "$src" ]] || return 1
   local dir
   dir="$(resolve_real_dir "$src")" || return 1
-  [[ -d "$dir/cli" && -d "$dir/agents" && -f "$dir/cli/review-gate" ]] || return 1
+  [[ -d "$dir/pantheon" && -d "$dir/agents" && -f "$dir/pyproject.toml" ]] || return 1
   printf '%s' "$dir"
 }
 
@@ -158,8 +155,8 @@ fetch_tarball() {
 
   local extracted
   extracted="$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-  if [[ -z "$extracted" || ! -d "$extracted/cli" || ! -d "$extracted/agents" ]]; then
-    echo "bootstrap.sh: fetched tarball did not contain the expected cli/ and agents/ directories" >&2
+  if [[ -z "$extracted" || ! -d "$extracted/pantheon" || ! -d "$extracted/agents" ]]; then
+    echo "bootstrap.sh: fetched tarball did not contain the expected pantheon/ and agents/ directories" >&2
     return 1
   fi
 
@@ -305,8 +302,8 @@ fetch_release_tarball() {
 
   local extracted
   extracted="$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-  if [[ -z "$extracted" || ! -d "$extracted/cli" || ! -d "$extracted/agents" ]]; then
-    echo "bootstrap.sh: fetched release tarball did not contain the expected cli/ and agents/ directories" >&2
+  if [[ -z "$extracted" || ! -d "$extracted/pantheon" || ! -d "$extracted/agents" ]]; then
+    echo "bootstrap.sh: fetched release tarball did not contain the expected pantheon/ and agents/ directories" >&2
     return 1
   fi
 
@@ -386,50 +383,19 @@ main() {
     note "installing from fetched tarball (tracking dev): $SRC_ROOT"
   fi
 
-  [[ -f "$SRC_ROOT/cli/review-gate" ]] || die "missing $SRC_ROOT/cli/review-gate"
-  [[ -f "$SRC_ROOT/cli/lib/verdict.sh" ]] || die "missing $SRC_ROOT/cli/lib/verdict.sh"
-  [[ -f "$SRC_ROOT/cli/lib/render_comment.sh" ]] || die "missing $SRC_ROOT/cli/lib/render_comment.sh"
-  [[ -f "$SRC_ROOT/cli/lib/execution.sh" ]] || die "missing $SRC_ROOT/cli/lib/execution.sh"
-  [[ -f "$SRC_ROOT/cli/lib/pantheon-git-readonly.sh" ]] || die "missing $SRC_ROOT/cli/lib/pantheon-git-readonly.sh"
-  [[ -f "$SRC_ROOT/cli/lib/pantheon-base-pin.sh" ]] || die "missing $SRC_ROOT/cli/lib/pantheon-base-pin.sh"
-  [[ -d "$SRC_ROOT/cli/providers" ]] || die "missing $SRC_ROOT/cli/providers"
   [[ -d "$SRC_ROOT/agents" ]] || die "missing $SRC_ROOT/agents"
   [[ -f "$SRC_ROOT/pyproject.toml" ]] || die "missing $SRC_ROOT/pyproject.toml"
   [[ -d "$SRC_ROOT/pantheon" ]] || die "missing $SRC_ROOT/pantheon"
 
   # -------------------------------------------------------------------------
-  # Install — mirrors the source layout under $PREFIX (cli/review-gate, cli/lib/verdict.sh,
-  # cli/lib/render_comment.sh, cli/lib/execution.sh, cli/lib/pantheon-git-readonly.sh,
-  # cli/lib/pantheon-base-pin.sh, cli/providers/*.sh, agents/*.md) so review-gate's own
-  # PANTHEON_ROOT-relative path resolution
-  # (agents/ and cli/providers/ next to it) works unmodified from the prefix, exactly as it does
-  # from an in-repo checkout.
-  #
-  # This manifest (the required-file checks above and the install_file calls below) is
-  # hand-maintained and has already gone stale once — cli/lib/execution.sh landed without being
-  # added here, so every bootstrap install broke at `source cli/lib/execution.sh` until a
-  # follow-up commit caught it (a Codex P1 finding on this PR). tests/test-setup-smoke.sh's
-  # Stage 4a now derives its own expected file list directly from cli/review-gate's `source`
-  # lines (never hand-copied) and asserts every one of them landed in a fresh bootstrap prefix, so
-  # the NEXT new cli/lib/*.sh file this repo adds fails CI here instead of silently recurring.
+  # Install agents/*.md under $PREFIX for anything that wants them as plain files (the `pantheon`
+  # package installed below also ships them as package data — see pyproject.toml's
+  # [tool.setuptools.package-data] — but a bare $PREFIX/agents copy is cheap and doesn't require
+  # inspecting an installed wheel to read a persona).
   # -------------------------------------------------------------------------
   SKIPPED=()
 
-  mkdir -p "$PREFIX/cli/lib" "$PREFIX/cli/providers" "$PREFIX/agents"
-
-  install_file "$SRC_ROOT/cli/review-gate" "$PREFIX/cli/review-gate"
-  chmod +x "$PREFIX/cli/review-gate"
-
-  install_file "$SRC_ROOT/cli/lib/verdict.sh" "$PREFIX/cli/lib/verdict.sh"
-  install_file "$SRC_ROOT/cli/lib/render_comment.sh" "$PREFIX/cli/lib/render_comment.sh"
-  install_file "$SRC_ROOT/cli/lib/execution.sh" "$PREFIX/cli/lib/execution.sh"
-  install_file "$SRC_ROOT/cli/lib/pantheon-git-readonly.sh" "$PREFIX/cli/lib/pantheon-git-readonly.sh"
-  chmod +x "$PREFIX/cli/lib/pantheon-git-readonly.sh"
-  install_file "$SRC_ROOT/cli/lib/pantheon-base-pin.sh" "$PREFIX/cli/lib/pantheon-base-pin.sh"
-
-  for f in "$SRC_ROOT"/cli/providers/*.sh; do
-    install_file "$f" "$PREFIX/cli/providers/$(basename "$f")"
-  done
+  mkdir -p "$PREFIX/agents"
 
   for f in "$SRC_ROOT"/agents/*.md; do
     install_file "$f" "$PREFIX/agents/$(basename "$f")"
@@ -443,8 +409,8 @@ main() {
   fi
 
   # -------------------------------------------------------------------------
-  # Install the pantheon package (port slice 5, docs/PYTHON-PORT.md) — a venv UNDER $PREFIX,
-  # not `pip install --user`. Three reasons this shape, not that one:
+  # Install the pantheon package — a venv UNDER $PREFIX, not `pip install --user`. Three reasons
+  # this shape, not that one:
   #   1. Respects --prefix. bootstrap.sh's whole contract is "everything lands under one
   #      directory YOU chose, nothing scattered elsewhere on your machine, point PATH at it" —
   #      `pip install --user` writes into a fixed, PREFIX-independent location (~/.local or
@@ -483,26 +449,23 @@ main() {
   cat <<EOF
 
 review-pantheon installed to $PREFIX
-  - bash CLI (deprecated, kept for the transition — docs/PYTHON-PORT.md section 7): $PREFIX/cli
-  - pantheon package (the current CLI, port slice 5): $PREFIX/venv/bin
+  - pantheon package (the CLI): $PREFIX/venv/bin
+  - agents/ (personas, as plain files): $PREFIX/agents
 
-Add both to your PATH (this script does not edit your shell rc for you):
+Add it to your PATH (this script does not edit your shell rc for you):
 
-  export PATH="$PREFIX/venv/bin:$PREFIX/cli:\$PATH"
+  export PATH="$PREFIX/venv/bin:\$PATH"
 
 Then, from inside any repo with a gh-authenticated remote:
 
   pantheon gate --pr <number> --dry-run
 
-(the deprecated \`review-gate\` compat shim — same flags, same behavior, a one-line deprecation
-note on stderr — still works too, from \$PREFIX/cli, for anything not yet moved to \`pantheon\`.)
-
 That runs entirely offline of any provider — it fetches real PR metadata, builds the real
 prompts, and prints the would-be provider command and comment without calling a model or
 posting anything. See docs/SETUP.md in review-pantheon for the full walkthrough.
 
-Note: gate.conf and REVIEW_RULES.md are read from the TARGET repo you run pantheon/review-gate
-in, not from $PREFIX — copy gate.conf.example there yourself if you want non-default settings.
+Note: gate.conf and REVIEW_RULES.md are read from the TARGET repo you run pantheon gate in, not
+from $PREFIX — copy gate.conf.example there yourself if you want non-default settings.
 EOF
 }
 

@@ -50,16 +50,14 @@ T1="$(mktemp -d)"
 "$INSTALL" "$T1" >/dev/null
 
 assert_file "default install: personas copied to .github/review-agents" "$T1/.github/review-agents/artemis.md"
-assert_file "default install: decide_verdict.py copied" "$T1/.github/review-agents/decide_verdict.py"
 assert_file "default install: review.yml workflow copied" "$T1/.github/workflows/review.yml"
 
-# The verdict decider's real implementation, vendored as a package (port slice 5's absorption,
-# DESIGN.md's "Two runtimes, one rule") — action/review.yml's "Resolve gate scripts
-# (base-pinned)" step base-pin-reads exactly these three files at
-# .github/review-agents/pantheon/{__init__,jqjson,verdict}.py; missing any one of them is a dead
-# reference at gate-run time, the same class of failure the pantheon-git-readonly.sh check below
-# already guards for the wrapper.
-for pyfile in __init__.py jqjson.py verdict.py; do
+# The verdict decider's real implementation, vendored as a package — action/review.yml's
+# "Resolve gate scripts (base-pinned)" step base-pin-reads exactly these three files at
+# .github/review-agents/pantheon/{__init__,jqjson,verdict}.py; "Resolve read-only git wrapper
+# (base-pinned)" base-pin-reads pantheon/execution.py. Missing any one of them is a dead
+# reference at gate-run time.
+for pyfile in __init__.py jqjson.py verdict.py execution.py; do
   assert_file "default install: pantheon/$pyfile copied" "$T1/.github/review-agents/pantheon/$pyfile"
   if cmp -s "$ROOT/pantheon/$pyfile" "$T1/.github/review-agents/pantheon/$pyfile"; then
     pass "default install: pantheon/$pyfile matches pantheon/$pyfile verbatim"
@@ -72,8 +70,8 @@ done
 # run would — not just "the right bytes landed," but "this is a real, self-contained package a
 # base-pinned $PYTHONPATH can run standalone." Invoked by pantheon/verdict.py's own absolute
 # path, matching action/review.yml's own fixed invocation shape (never `python3 -m
-# pantheon.verdict` — a Codex P1 finding on this port's own PR: `-m` prepends the caller's cwd to
-# sys.path[0] before PYTHONPATH, which would shadow this exact vendored copy with any
+# pantheon.verdict` — a Codex P1 finding on this repo's history: `-m` prepends the caller's cwd
+# to sys.path[0] before PYTHONPATH, which would shadow this exact vendored copy with any
 # same-named pantheon/verdict.py sitting in cwd; see action/review.yml's "Decide verdict" step
 # comment for the full rationale).
 VENDORED_RAW="$(mktemp)"
@@ -86,22 +84,21 @@ else
 fi
 rm -f "$VENDORED_RAW"
 
-# pantheon-git-readonly.sh — action/review.yml's claude_args hardcodes this exact vendored path
-# as the readonly tier's sole Bash prefix (Codex P1 finding: a bare `Bash(git diff *)`-style
-# pattern can't tell a read-only git subcommand from the same subcommand carrying a
-# writing/execution-capable flag). Must land AND be executable, or the vendored workflow's
-# `readonly` tier is a dead reference on install.
-assert_file "default install: pantheon-git-readonly.sh copied" "$T1/.github/review-agents/pantheon-git-readonly.sh"
-if [[ -x "$T1/.github/review-agents/pantheon-git-readonly.sh" ]]; then
-  pass "default install: pantheon-git-readonly.sh is executable"
+# pantheon/execution.py — action/review.yml's claude_args hardcodes a base-pinned invocation of
+# this exact vendored module as the readonly tier's sole Bash prefix (Codex P1 finding: a bare
+# `Bash(git diff *)`-style pattern can't tell a read-only git subcommand from the same subcommand
+# carrying a writing/execution-capable flag). Must land, or the vendored workflow's `readonly`
+# tier is a dead reference on install. Live proof it's actually invokable the same way
+# action/review.yml invokes it (`python3 <path> wrapper <subcommand> ...`), from a scratch git
+# repo so a real `status` call has something to run against.
+WRAPPER_SCRATCH_REPO="$(mktemp -d)"
+git -C "$WRAPPER_SCRATCH_REPO" init -q
+if wrapper_out="$(cd "$WRAPPER_SCRATCH_REPO" && python3 "$T1/.github/review-agents/pantheon/execution.py" wrapper status 2>&1)"; then
+  pass "default install: vendored pantheon/execution.py wrapper runs and accepts a legit 'status' call ($wrapper_out)"
 else
-  fail "default install: pantheon-git-readonly.sh landed but is NOT executable"
+  fail "default install: vendored pantheon/execution.py wrapper failed on a legit 'status' call: $wrapper_out"
 fi
-if cmp -s "$ROOT/cli/lib/pantheon-git-readonly.sh" "$T1/.github/review-agents/pantheon-git-readonly.sh"; then
-  pass "default install: pantheon-git-readonly.sh matches cli/lib/pantheon-git-readonly.sh verbatim"
-else
-  fail "default install: pantheon-git-readonly.sh differs from cli/lib/pantheon-git-readonly.sh"
-fi
+rm -rf "$WRAPPER_SCRATCH_REPO"
 
 if [[ ! -e "$T1/.claude" && ! -e "$T1/.cursor" && ! -e "$T1/.agents" && ! -e "$T1/.gemini" ]]; then
   pass "default install: no editor/CLI dirs created without flags"
@@ -306,7 +303,6 @@ FIXTURE_ROOT="$(mktemp -d)"
 mkdir -p "$FIXTURE_ROOT/agents"
 cp "$INSTALL" "$FIXTURE_ROOT/install.sh"
 ln -s "$ROOT/action" "$FIXTURE_ROOT/action"
-ln -s "$ROOT/cli" "$FIXTURE_ROOT/cli"
 ln -s "$ROOT/skills" "$FIXTURE_ROOT/skills"
 ln -s "$ROOT/pantheon" "$FIXTURE_ROOT/pantheon"
 cp "$ROOT/REVIEW_RULES.example.md" "$FIXTURE_ROOT/REVIEW_RULES.example.md"

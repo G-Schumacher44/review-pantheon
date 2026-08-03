@@ -1,24 +1,17 @@
 # CLI guide — `pantheon`
 
 The CLI-surface reference: every flag, every `gate.conf` key, the execution tiers, the
-follow-up-mode state model, exit codes, and worked examples. For install steps and the
-zero-token first run, see [SETUP.md](SETUP.md). For the binding contract (verdict schema,
-security posture, the full read-provenance matrix), see [DESIGN.md](../DESIGN.md). Everything
-below is grounded in `pantheon`'s own `--help` output and the `pantheon` package
-(docs/PYTHON-PORT.md) — if this doc and the code ever disagree, that's DESIGN.md rule 5's bug,
-not a judgment call.
+follow-up-mode state model, exit codes, and worked examples. This is the doc you come back to
+once `pantheon` is installed and working — for install steps and the zero-token first run, see
+[SETUP.md](SETUP.md) instead; it points back here for flag detail rather than re-explaining it.
+For the binding contract (verdict schema, security posture, the full read-provenance matrix),
+see [DESIGN.md](../DESIGN.md). Everything below is grounded in `pantheon`'s own `--help` output
+and the `pantheon` package — if this doc and the code ever disagree, that's DESIGN.md rule 5's
+bug, not a judgment call.
 
-**`pantheon` is the current CLI (port slice 5, [docs/PYTHON-PORT.md](PYTHON-PORT.md)).**
-`pantheon gate` / `pantheon counsel` replace the bash `cli/review-gate` documented here in
-earlier versions of this file. `review-gate` still works as a **deprecated, one-release compat
-shim** — same flags, same `gate.conf` keys, same exit codes, byte-compatible with everything
-below, plus a one-line deprecation note on stderr — but it forwards straight into `pantheon gate`
-and is removed in the release after this one; switch now, don't wait for the forced removal. The
-bash implementation (`cli/review-gate`, `cli/lib/*.sh`, `cli/providers/*.sh`) is likewise
-deprecated and present only for this same transition window — see that script's own header
-comment and [docs/PYTHON-PORT.md](PYTHON-PORT.md)'s Slice-5 status section for the removal plan.
-Install: `pipx install <built pantheon artifact>` (or `pip install` into a venv) — see
-[SETUP.md](SETUP.md).
+`pantheon` is the CLI — `pantheon gate` runs the standard twin-agent gate,
+`pantheon counsel` runs the counsel panel. Install: `pipx install <built pantheon artifact>`
+(or `pip install` into a venv) — see [SETUP.md](SETUP.md).
 
 ## Command reference
 
@@ -27,13 +20,10 @@ pantheon gate --pr <number> [--provider <lane>] [--agents "artemis apollo"]
               [--execution readonly|trusted] [--dry-run]
 ```
 
-(`review-gate --pr <number> ...` — the deprecated compat shim — accepts the identical flags and
-forwards to the above.)
-
 | Flag | Required | Default | What it does |
 |---|---|---|---|
 | `--pr <number>` | yes | — | The PR to review. Digits only — anything else fails closed before any network call. |
-| `--provider <lane>` | no | `gate.conf`'s `provider=`, else `claude` | Provider lane in `cli/providers/` (`claude`, `codex`, `gemini`, `cursor`). Unknown lane name fails fast. |
+| `--provider <lane>` | no | `gate.conf`'s `provider=`, else `claude` | Provider lane in `pantheon.providers` (`claude`, `codex`, `gemini`, `cursor`). Unknown lane name fails fast. |
 | `--agents "a b c"` | no | `gate.conf`'s `agents=`, else `"artemis apollo"` | Space-separated agent list. Each name must be one of `artemis apollo diogenes plato socrates`; an empty resolved list is a hard error. |
 | `--execution <tier>` | no | `gate.conf`'s `execution=` (base-pinned — see below), else `readonly` | `readonly` restricts Bash to the read-only git wrapper; `trusted` restores full Bash. See [Execution tiers](#execution-tiers-readonly-vs-trusted). |
 | `--dry-run` | no | off | Builds prompts and prints the would-be comment; calls no provider, posts nothing, records no `reviewed_sha` for the PR. Can still bootstrap an empty `.review-gate-state.json` — see [caveat below](#the-state--follow-up-model). |
@@ -54,7 +44,7 @@ you — copy [`gate.conf.example`](../gate.conf.example) yourself.
 
 | Key | Default | Notes |
 |---|---|---|
-| `provider` | `claude` | Lane in `cli/providers/` (without `.sh`). |
+| `provider` | `claude` | Lane in `pantheon.providers` (`claude`, `codex`, `gemini`, `cursor`). |
 | `model` | *(empty)* | Lane-specific model id; empty means "let the lane pick its own default." |
 | `base_branch` | `main` | Merge base for the review diff — overridden by the PR's own `baseRefName` when `gh pr view` reports one. |
 | `rules_file` | `REVIEW_RULES.md` | Path (relative to target repo root) to the house-rules file. See [REVIEW_RULES.example.md](../REVIEW_RULES.example.md). |
@@ -62,33 +52,28 @@ you — copy [`gate.conf.example`](../gate.conf.example) yourself.
 | `agents` | `artemis apollo` | Space-separated panel for the standard gate. |
 | `execution` | `readonly` | `readonly` or `trusted` — see below. |
 
-**One key is read differently from the rest, deliberately — and one more probably should be.**
-Every key above except `execution` is read straight from the target repo's checked-out working
-tree. `execution=` is read from the PR's **base commit** (`git show $BASE_SHA:gate.conf`)
-instead — never the working tree — because a maintainer who runs `gh pr checkout <n>` before
-invoking `pantheon gate` (a common local-review habit) would otherwise have a hostile PR's own
-`execution=trusted` silently restore full Bash before the gate inspects anything. This is the
-CLI-surface instance of the same base-pinned-provenance rule DESIGN.md's security posture applies to
+**Two keys are read differently from the rest, deliberately.** `execution=`/`provider=`/
+`rules_file=`/`spec_file=`/`agents=` — every key that shapes gate BEHAVIOR — are read from the
+PR's **base commit** (`git show $BASE_SHA:gate.conf`, one read for all five) instead of the
+target repo's checked-out working tree; only `model=`/`base_branch=` are working-tree-sourced,
+since neither affects tool-execution breadth or which file is trusted as a judgment boundary.
+This closes a maintainer's `gh pr checkout <n>`-before-invoking-`pantheon gate` habit: a hostile
+PR's own working-tree `gate.conf` can't silently restore full Bash (`execution=trusted`), swap
+which provider CLI's judgment gates the merge (`provider=`), redirect `rules_file=`/`spec_file=`
+at a path absent at base, or swap the enforcing panel (`agents=`). This is the CLI-surface
+instance of the same base-pinned-provenance rule DESIGN.md's security posture applies to
 personas, the verdict decider, and the read-only wrapper itself — see DESIGN.md's ["Security
-posture"](../DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design) for the full
-read-provenance matrix.
-
-**`model`/`base_branch`/`rules_file`/`spec_file`/`agents` genuinely don't need the same
-treatment — `provider` is a different story.** `pantheon gate` validates `provider` only by
-checking that `$PROVIDERS_DIR/$PROVIDER.sh` exists, then unconditionally `source`s it — no
-character-class or enumeration check the way `--agents` gets one. A working-tree-sourced
-`provider=` value under the same `gh pr checkout` scenario `execution=` is base-pinned against
-could, in principle, be crafted to source an attacker-controlled file. **Tracked as
-[issue #13](https://github.com/G-Schumacher44/review-pantheon/issues/13) — not fixed as of this
-writing.** Until it lands, treat `provider=` in a hostile PR's `gate.conf` with the same suspicion
-as `execution=`.
+posture"](../DESIGN.md#security-posture) for the full read-provenance matrix. `provider=` is
+additionally validated against a fixed, enumerated lane list (`claude`/`codex`/`gemini`/
+`cursor`) rather than resolved as a path to source — an unknown lane name fails fast, with no
+file-execution vector to worry about in the first place.
 
 ## Execution tiers: readonly vs trusted
 
-`readonly` is the default on every surface that invokes Claude — the CLI (`cli/providers/
-claude.sh`), the published action (`action.yml`), and the vendored workflow
+`readonly` is the default on every surface that invokes Claude — the CLI (`pantheon.providers`'
+claude lane), the published action (`action.yml`), and the vendored workflow
 (`action/review.yml`). All three configure the identical `Bash(<wrapper path> *)` allowlist plus
-`--permission-mode dontAsk`, routing every Bash call through `cli/lib/pantheon-git-readonly.sh`
+`--permission-mode dontAsk`, routing every Bash call through `pantheon/execution.py`'s wrapper
 instead of a bare `git` prefix pattern (a prefix match can't distinguish `git diff` from `git
 diff --output=tracked-file`, which git's own docs describe as a write).
 
@@ -110,8 +95,8 @@ diff --output=tracked-file`, which git's own docs describe as a write).
   `GIT_NO_LAZY_FETCH=1` (closes a partial clone's lazy-fetch-and-write on a missing object).
 
 Full vector-by-vector matrix, live-verification notes, and the fixtures that reproduce each one
-against the unpatched wrapper before asserting the fix: `cli/lib/pantheon-git-readonly.sh`'s own
-header comment and `tests/test-git-readonly-wrapper.sh`.
+against the unpatched wrapper before asserting the fix: `pantheon/execution.py`'s own module
+docstring and `tests/test-git-readonly-wrapper.sh`.
 
 </details>
 
@@ -124,9 +109,9 @@ optional index refresh, and a bare object read in a partial clone can still lazy
 side effects, not eliminated by this tier. See [SECURITY.md](../SECURITY.md#scope-notes--read-before-assuming-a-finding-is-new)
 for the full honest scope note.
 
-**Provider-lane caveat.** This tiering is Claude-specific. `cli/providers/{codex,gemini,
-cursor}.sh` invoke their own CLIs directly and never consume `PANTHEON_ALLOWED_TOOLS` or the
-wrapper — Codex, Gemini, and Cursor have no equivalent tool-scoping mechanism in their own CLIs
+**Provider-lane caveat.** This tiering is Claude-specific. `pantheon.providers`' codex/gemini/
+cursor lanes invoke their own CLIs directly and never consume the wrapper — Codex, Gemini, and
+Cursor have no equivalent tool-scoping mechanism in their own CLIs
 as of v1. Running one of those lanes against a hostile fork PR gets the same fail-closed verdict
 handling every lane gets (schema validation, the blocker invariant, `UNVERIFIED` on anything
 malformed) but **no tool-call boundary at all**. Disclosed, not silently assumed closed — see

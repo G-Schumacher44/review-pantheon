@@ -1,9 +1,7 @@
 # Dockerfile.smoke — clean-machine, real-Linux smoke test for review-pantheon's setup story.
 #
 # Proves the dependency list in docs/SETUP.md's Prerequisites table is complete, and exercises
-# real GNU coreutils behavior (e.g. cli/review-gate's run_with_timeout uses the real `timeout`
-# binary here, not its manual TERM/KILL fallback for stock macOS, which is the only path this
-# repo's macOS-based development can exercise directly).
+# real GNU coreutils/Linux behavior this repo's macOS-based development can't exercise directly.
 #
 # No --platform pin here on purpose: built natively for whatever arch runs `docker build`
 # (arm64 on Apple Silicon dev machines, amd64 on this repo's GitHub Actions runners).
@@ -43,6 +41,6 @@ RUN apt-get update \
 WORKDIR /review-pantheon
 COPY . .
 
-RUN chmod +x install.sh bootstrap.sh cli/review-gate tests/*.sh
+RUN chmod +x install.sh bootstrap.sh tests/*.sh
 
 ENTRYPOINT ["tests/test-setup-smoke.sh"]

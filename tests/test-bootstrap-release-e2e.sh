@@ -10,8 +10,8 @@
 # reached the success branch of fetch_release_tarball with a passing checksum).
 #
 # Builds its fixture "release" tarball the SAME way .github/workflows/release.yml does — the
-# identical explicit, enumerated CLI-surface file list (no globs) — so this also cross-checks
-# that manifest still matches what bootstrap.sh's main() actually requires on disk.
+# identical explicit, enumerated file list (no globs) — so this also cross-checks that manifest
+# still matches what bootstrap.sh's main() actually requires on disk.
 #
 # No test framework — plain bash, `bash tests/test-bootstrap-release-e2e.sh` is the whole
 # invocation (wired into .github/workflows/ci.yml).
@@ -36,7 +36,7 @@ TARBALL_NAME="${NAME}.tar.gz"
 
 # ---------------------------------------------------------------------------
 # Build the fixture release tarball — same explicit manifest as release.yml's "Build versioned
-# tarball" step (cli/, agents/, skills/, pantheon/, pyproject.toml, bootstrap.sh, install.sh,
+# tarball" step (agents/, skills/, pantheon/, pyproject.toml, bootstrap.sh, install.sh,
 # REVIEW_RULES.example.md, gate.conf.example, LICENSE, README.md), staged under a top-level
 # review-pantheon-<tag>/ dir.
 # ---------------------------------------------------------------------------
@@ -45,7 +45,6 @@ section "Build fixture release tarball (release.yml's manifest, verbatim)"
 STAGE_ROOT="$WORKDIR/stage"
 STAGE="$STAGE_ROOT/$NAME"
 mkdir -p "$STAGE"
-cp -R "$ROOT/cli" "$STAGE/cli"
 cp -R "$ROOT/agents" "$STAGE/agents"
 cp -R "$ROOT/skills" "$STAGE/skills"
 cp -R "$ROOT/pantheon" "$STAGE/pantheon"
@@ -53,7 +52,6 @@ cp "$ROOT/pyproject.toml" "$STAGE/pyproject.toml"
 cp "$ROOT/bootstrap.sh" "$STAGE/bootstrap.sh"
 cp "$ROOT/install.sh" "$STAGE/install.sh"
 mkdir -p "$STAGE/action"
-cp "$ROOT/action/decide_verdict.py" "$STAGE/action/decide_verdict.py"
 cp "$ROOT/action/review.yml" "$STAGE/action/review.yml"
 cp "$ROOT/REVIEW_RULES.example.md" "$STAGE/REVIEW_RULES.example.md"
 cp "$ROOT/gate.conf.example" "$STAGE/gate.conf.example"
@@ -78,10 +76,10 @@ fi
 pass "generated real SHA256SUMS for the fixture tarball"
 
 # ---------------------------------------------------------------------------
-# Regression check for a Codex P1 finding on this PR: install.sh's default (no --user) mode
-# reads $SCRIPT_DIR/action/decide_verdict.py and $SCRIPT_DIR/action/review.yml and dies loud if
-# either is missing — a release tarball that ships install.sh without action/ ships a broken
-# installer. Runs install.sh straight from the STAGED tree (pre-tar, same layout a real
+# Regression check for a Codex P1 finding on this repo's history: install.sh's default
+# (no --user) mode reads $SCRIPT_DIR/action/review.yml and the vendored pantheon/ package, and
+# dies loud if either is missing — a release tarball that ships install.sh without them ships a
+# broken installer. Runs install.sh straight from the STAGED tree (pre-tar, same layout a real
 # extraction produces) against a fresh scratch target, proving the manifest above is not just
 # "the files are present" but "the shipped install.sh actually works."
 # ---------------------------------------------------------------------------
@@ -95,15 +93,16 @@ else
   fail "packaged install.sh exited nonzero: $install_out"
 fi
 
-if [[ -f "$SCRATCH_TARGET/.github/review-agents/decide_verdict.py" && -f "$SCRATCH_TARGET/.github/workflows/review.yml" ]]; then
-  pass "packaged install.sh installed decide_verdict.py and review.yml from the packaged action/ files"
+if [[ -f "$SCRATCH_TARGET/.github/review-agents/pantheon/verdict.py" && -f "$SCRATCH_TARGET/.github/workflows/review.yml" ]]; then
+  pass "packaged install.sh installed the vendored pantheon package and review.yml from the packaged action/ files"
 else
   fail "packaged install.sh did not install the expected gate files: $install_out"
 fi
 
 # ---------------------------------------------------------------------------
-# Standalone copy of bootstrap.sh (no sibling cli/agents dirs) — forces detect_local_src() to
-# fail, exactly like the real curl|bash no-checkout case, so the remote-fetch path is what runs.
+# Standalone copy of bootstrap.sh (no sibling agents/pantheon dirs) — forces detect_local_src()
+# to fail, exactly like the real curl|bash no-checkout case, so the remote-fetch path is what
+# runs.
 # ---------------------------------------------------------------------------
 STANDALONE="$WORKDIR/standalone"
 mkdir -p "$STANDALONE"
@@ -153,48 +152,24 @@ else
   fail "--version $TAG: missing checksum-verified message: $happy_out"
 fi
 
-for f in \
-  "cli/review-gate" \
-  "cli/lib/verdict.sh" \
-  "cli/lib/render_comment.sh" \
-  "cli/lib/execution.sh" \
-  "cli/lib/pantheon-git-readonly.sh" \
-  "cli/lib/pantheon-base-pin.sh" \
-  "cli/providers/claude.sh" \
-  "agents/artemis.md"
-do
-  if [[ -f "$PREFIX_OK/$f" ]]; then
-    pass "--version $TAG: $f landed in prefix"
-  else
-    fail "--version $TAG: $f MISSING from prefix"
-  fi
-done
-
-if [[ -x "$PREFIX_OK/cli/review-gate" ]]; then
-  pass "--version $TAG: cli/review-gate is executable in prefix"
+if [[ -f "$PREFIX_OK/agents/artemis.md" ]]; then
+  pass "--version $TAG: agents/artemis.md landed in prefix"
 else
-  fail "--version $TAG: cli/review-gate is NOT executable in prefix"
+  fail "--version $TAG: agents/artemis.md MISSING from prefix"
 fi
 
-# Prove it's actually usable from the prefix, same shape as test-setup-smoke.sh's Stage 4 check.
+# Prove the venv install is actually usable from the prefix, same shape as
+# test-setup-smoke.sh's Stage 4 check.
 NEUTRAL_DIR="$WORKDIR/neutral"
 mkdir -p "$NEUTRAL_DIR"
-help_out="$(cd "$NEUTRAL_DIR" && "$PREFIX_OK/cli/review-gate" --help 2>&1)"
-help_status=$?
-if [[ $help_status -eq 0 ]] && grep -q "^Usage: review-gate --pr" <<<"$help_out"; then
-  pass "--version $TAG: installed review-gate --help resolves its lib/providers from the prefix and runs"
-else
-  fail "--version $TAG: installed review-gate --help failed (status=$help_status): $help_out"
-fi
 
 # ---------------------------------------------------------------------------
-# The pantheon package venv (port slice 5, docs/PYTHON-PORT.md §8) — bootstrap.sh now ALSO
-# creates a venv under --prefix and pip-installs the package fetched/extracted above into it,
-# alongside the bash CLI checked above (kept during the deprecation window). Proves the whole
-# real path: a venv landed under the prefix, `pantheon`/`pantheon-git-readonly`/`review-gate`
-# console scripts exist there, `pantheon --help` actually runs, and pantheon.execution's own
-# wrapper-adjacency resolution (issue #21 P1) finds pantheon-git-readonly correctly from this
-# real, non-mocked install (no sys.executable monkeypatching here — this is the real thing).
+# The pantheon package venv — bootstrap.sh creates a venv under --prefix and pip-installs the
+# package fetched/extracted above into it. Proves the whole real path: a venv landed under the
+# prefix, `pantheon`/`pantheon-git-readonly` console scripts exist there, `pantheon --help`
+# actually runs, and pantheon.execution's own wrapper-adjacency resolution (issue #21 P1) finds
+# pantheon-git-readonly correctly from this real, non-mocked install (no sys.executable
+# monkeypatching here — this is the real thing).
 # ---------------------------------------------------------------------------
 section "--version $TAG: the pantheon package venv installs under --prefix and runs"
 
@@ -216,14 +191,6 @@ if [[ $pantheon_help_status -eq 0 ]] && grep -q "^usage: pantheon " <<<"$pantheo
   pass "--version $TAG: installed pantheon --help runs from the prefix venv"
 else
   fail "--version $TAG: installed pantheon --help failed (status=$pantheon_help_status): $pantheon_help_out"
-fi
-
-pantheon_review_gate_out="$(cd "$NEUTRAL_DIR" && "$PREFIX_OK/venv/bin/review-gate" --help 2>&1)"
-pantheon_review_gate_status=$?
-if [[ $pantheon_review_gate_status -eq 0 ]] && grep -q "DEPRECATED" <<<"$pantheon_review_gate_out"; then
-  pass "--version $TAG: installed review-gate compat shim runs from the prefix venv and prints its deprecation note"
-else
-  fail "--version $TAG: installed review-gate compat shim failed or is missing its deprecation note (status=$pantheon_review_gate_status): $pantheon_review_gate_out"
 fi
 
 # Persona resolution from the REAL, non-editable venv install -- a Codex review finding on this

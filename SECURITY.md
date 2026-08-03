@@ -5,18 +5,16 @@
 review-pantheon runs read-only reviewer agents against untrusted content (a PR diff, including
 fork PRs) by design — the gate's whole job is to survive being handed attacker-controlled input.
 The default `execution=readonly` tier is the relevant guarantee: see DESIGN.md's ["Security
-posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design) section for the
-full read-provenance matrix (which files are base-pinned or read from a trusted checkout, and
-why) and, within that same section, "Tiered tool execution" for the wrapper's exec-surface
-matrix — what `pantheon-git-readonly.sh` validates in a Bash call and what it deliberately
-rejects.
+posture"](DESIGN.md#security-posture) section for the full read-provenance matrix (which files
+are base-pinned or read from a trusted checkout, and why) and, within that same section, "Tiered
+tool execution" for the wrapper's exec-surface matrix — what `pantheon/execution.py` validates in
+a Bash call and what it deliberately rejects.
 
 Supported: the CLI — `pantheon gate`/`pantheon counsel` (the `pantheon` Python package,
-`pantheon/*.py`, is the current implementation as of port slice 5) plus the deprecated
-`cli/review-gate`/`review-gate` compat shim, which still works this release — the published
-action (`action.yml`), and the vendored workflow (`action/review.yml`) as shipped from
-`dev`/`main` on this repo. A fork with local modifications, or an older pinned SHA of the
-published action, is outside this policy's scope — report against the current `dev` first.
+`pantheon/*.py`) — the published action (`action.yml`), and the vendored workflow
+(`action/review.yml`) as shipped from `dev`/`main` on this repo. A fork with local
+modifications, or an older pinned SHA of the published action, is outside this policy's scope —
+report against the current `dev` first.
 
 ## Reporting a vulnerability
 
@@ -38,21 +36,20 @@ instead of silently closed.
 ## Scope notes — read before assuming a finding is new
 
 Canonical detail for everything below lives in DESIGN.md's ["Security
-posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design) section (the full
-read-provenance matrix, the wrapper's exec-surface matrix, and the round-by-round hardening
-history in [docs/HARDENING-HISTORY.md](docs/HARDENING-HISTORY.md)) — what follows is a scoped
-summary of what matters when triaging a report, not a second full retelling.
+posture"](DESIGN.md#security-posture) section (the full read-provenance matrix and the wrapper's
+exec-surface matrix; fix-round history lives in this repo's git history, not in a doc) — what
+follows is a scoped summary of what matters when triaging a report, not a second full retelling.
 
 ### `readonly` only tool-scopes three Claude surfaces
 
 `execution=readonly` (the default) restricts Bash on exactly three surfaces, all of them
-invoking Claude: the CLI (`cli/providers/claude.sh`), the published action (`action.yml`), and
-the vendored workflow (`action/review.yml`) — each configures the same `Bash(<wrapper path> *)`
-allowlist plus `--permission-mode dontAsk`. `cli/providers/{codex,gemini,cursor}.sh` invoke their
-own CLIs directly and never consume the wrapper: Codex, Gemini, and Cursor have no equivalent
-tool-scoping mechanism in their own CLIs as of v1, so a best-effort lane carries **no tool
-restriction at all** — its only guard against a hostile fork PR is the same fail-closed verdict
-handling every lane gets, not a tool-call boundary.
+invoking Claude: the CLI (`pantheon.providers`' claude lane), the published action (`action.yml`),
+and the vendored workflow (`action/review.yml`) — each configures the same
+`Bash(<wrapper path> *)` allowlist plus `--permission-mode dontAsk`. The codex/gemini/cursor
+lanes in `pantheon.providers` invoke their own CLIs directly and never consume the wrapper:
+Codex, Gemini, and Cursor have no equivalent tool-scoping mechanism in their own CLIs as of v1,
+so a best-effort lane carries **no tool restriction at all** — its only guard against a hostile
+fork PR is the same fail-closed verdict handling every lane gets, not a tool-call boundary.
 
 ### Bypassing the wrapper is not the same as having no side effects
 
@@ -61,9 +58,8 @@ commands (plain `git diff`/`show`/`log`/`status`, no flags) never reaches the wr
 any tier. Don't read "expected, allowed by Claude Code" as "genuinely read-only": the wrapper
 forces `GIT_OPTIONAL_LOCKS=0` and `GIT_NO_LAZY_FETCH=1` specifically because plain git doesn't
 default to either, so a bare `git status` outside the wrapper can still write `.git/index`, and a
-bare object read in a partial clone can still lazy-fetch — real, reproduced side effects (see
-[docs/HARDENING-HISTORY.md](docs/HARDENING-HISTORY.md): Round 3 for the index-write reproduction,
-Round 7 for the partial-clone lazy-fetch reproduction) this policy doesn't treat as gate-defeating.
+bare object read in a partial clone can still lazy-fetch — real, reproduced side effects this
+policy doesn't treat as gate-defeating.
 
 ### What `readonly` closes, and its honest limit
 

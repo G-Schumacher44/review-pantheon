@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
-# tests/test-base-pinned-read-python.sh — Python-native black-box equivalent of
-# tests/test-base-pinned-read.sh, per docs/PYTHON-PORT.md §4's disposition for that suite:
-# "Bash-internal — sources cli/lib/pantheon-base-pin.sh directly... Needs a black-box/
-# Python-native equivalent against the basepin module." Sourcing a `.py` file the way the bash
-# original sources a `.sh` file is not the right shape (§4) — this instead drives
-# pantheon/basepin.py's own CLI entry point (`python -m pantheon.basepin read|normalize ...`) as
-# a real subprocess, mirroring cli/lib/pantheon-base-pin.sh's exact
-# `pantheon_base_pinned_read <base-sha> <path> <dest-file> [repo-dir]` contract and its 0/1/2
+# tests/test-base-pinned-read-python.sh — black-box fixture test for pantheon/basepin.py, the
+# symlink-safe base-pinned file reader. Drives pantheon/basepin.py's own CLI entry point
+# (`python -m pantheon.basepin read|normalize ...`) as a real subprocess, mirroring
+# `pantheon_base_pinned_read <base-sha> <path> <dest-file> [repo-dir]`'s contract and its 0/1/2
 # return-code semantics.
-#
-# Every fixture (Parts A-H) is carried over from the bash original UNCHANGED in what it asserts —
-# same repos, same symlink shapes, same escape/chain-depth/trailing-slash scenarios — only the
-# invocation shape (a subprocess CLI call instead of a sourced shell function call) differs, per
-# docs/PYTHON-PORT.md §4's "same assertions, adapted invocation shape" standard.
 #
 # No test framework — plain bash, `bash tests/test-base-pinned-read-python.sh` is the whole
 # invocation.
@@ -383,24 +374,6 @@ if grep -q "REGULAR-PERSONA-CONTENT" "$I_OUT" 2>/dev/null; then
   pass "issue #10: the doubled-separator path resolves to the correct file content"
 else
   fail "issue #10: the doubled-separator path did not resolve to the correct content"
-fi
-
-# Negative control: the BASH original genuinely has this gap (issue #10's own text) — proving
-# this fixture is live, not asserting a difference that was never real.
-BASH_LIB="$ROOT/cli/lib/pantheon-base-pin.sh"
-if [[ -f "$BASH_LIB" ]]; then
-  BASH_OUT="$WORKDIR/bash-i-out.txt"
-  BASH_RC=0
-  (
-    # shellcheck disable=SC1090
-    source "$BASH_LIB"
-    cd "$FIXTURE_B" && pantheon_base_pinned_read "$FIXTURE_B_SHA" "agents//artemis.md" "$BASH_OUT"
-  ) 2>/dev/null || BASH_RC=$?
-  if [[ "$BASH_RC" -eq 2 ]]; then
-    pass "negative control: the bash original misreads 'agents//artemis.md' as ORDINARY ABSENCE (rc=2) — issue #10 is a real, live gap the Python port closes"
-  else
-    echo "NOTE bash original returned rc=$BASH_RC (not the expected rc=2) for the doubled-separator path — issue #10 may already be independently addressed on this branch; the Python port's own closure (asserted above) still holds regardless"
-  fi
 fi
 
 echo
