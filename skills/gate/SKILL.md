@@ -5,11 +5,8 @@ description: Operate review-pantheon's review gate (Artemis + Apollo) from a Cla
 
 # Operating the gate
 
-review-pantheon's gate is `pantheon gate` (the current CLI, port slice 5 — installed via
-`pipx`/`pip`, or on `PATH` via a Way-B install) run against one PR. The deprecated
-`cli/review-gate`/`review-gate` compat shim still works this release — identical flags, same
-`gate.conf` keys, same exit codes — but is on notice for removal; everything below applies
-identically to it, substitute the binary name. Full flag/`gate.conf` reference:
+review-pantheon's gate is `pantheon gate` (installed via `pipx`/`pip`, or on `PATH` via a Way-B
+install) run against one PR. Full flag/`gate.conf` reference:
 [docs/CLI.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/CLI.md). The
 verdict schema and combined-comment shape are the binding contract:
 [DESIGN.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/DESIGN.md#verdict-contract).
@@ -28,8 +25,7 @@ itself. `pantheon` only ends up on `PATH` via a real `pipx`/`pip install`, or vi
 2. Look for a sibling review-pantheon checkout with a venv (e.g.
    `../review-pantheon` with `pip install -e .` run into its own venv) — a Way-A install still
    runs the CLI from that checkout, not from the target repo.
-3. Check the default Way-B prefix directly: `~/.review-pantheon/venv/bin/pantheon` (or
-   `~/.review-pantheon/cli/review-gate` for the deprecated shim, also vendored there).
+3. Check the default Way-B prefix directly: `~/.review-pantheon/venv/bin/pantheon`.
 4. None of those resolve? Tell the user the CLI surface isn't installed yet and point at
    [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/SETUP.md)'s
    three install ways — don't try to run a command that

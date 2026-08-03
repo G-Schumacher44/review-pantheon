@@ -1,6 +1,6 @@
 # Review rules (example)
 
-This is the file `cli/review-gate` and `action/review.yml` pass to Artemis and Apollo as
+This is the file `pantheon gate` and `action/review.yml` pass to Artemis and Apollo as
 blocker-class checks, in addition to whatever they find on their own. Copy this to
 `REVIEW_RULES.md` at your repo root (or point `rules_file=` in `gate.conf` at wherever you keep
 it) and edit it to match your team's actual rules. Each rule below is a blocker: a violation

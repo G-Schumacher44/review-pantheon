@@ -1,7 +1,6 @@
-# CI for review-pantheon itself — "the review tool must survive its own review" (see
-# tests/test-verdict-decision.sh's header). Syntax-checks and lints every shell script, byte-
-# compiles the Python decision script, and runs the verdict-decision and combined-comment-
-# renderer fixture tests.
+# CI for review-pantheon itself — "the review tool must survive its own review". Syntax-checks
+# and lints every shell script, byte-compiles every Python module, and runs the verdict-decision
+# and combined-comment-renderer fixture tests.
 #
 # The review.yml gate (lint-and-test/setup-smoke) does NOT run against itself — that requires
 # CLAUDE_CODE_OAUTH_TOKEN and REVIEW_GATE_ENABLED, which this repo doesn't set for its own CI.
@@ -45,7 +44,7 @@ jobs:
           while IFS= read -r -d '' f; do
             echo "bash -n $f"
             bash -n "$f" || status=1
-          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
           exit "$status"
 
       - name: shellcheck on every shell script
@@ -55,7 +54,7 @@ jobs:
           while IFS= read -r -d '' f; do
             echo "shellcheck $f"
             shellcheck "$f" || status=1
-          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
           exit "$status"
 
       - name: py_compile every Python file
@@ -80,54 +79,34 @@ jobs:
           "
 
       - name: Run verdict-decision fixture tests
-        run: bash tests/test-verdict-decision.sh
-
-      - name: Run verdict-decision fixture tests (Python port, docs/PYTHON-PORT.md)
         run: bash tests/test-verdict-decision-python.sh
 
-      - name: Run base-pinned-read fixture tests (symlink-safe resolution)
-        run: bash tests/test-base-pinned-read.sh
-
-      - name: Run base-pinned-read Python-port migration-exam fixture tests (pantheon.basepin)
+      - name: Run base-pinned-read fixture tests (pantheon.basepin)
         run: bash tests/test-base-pinned-read-python.sh
 
       - name: Run combined-comment renderer fixture tests
-        run: bash tests/test-render-comment.sh
-
-      - name: Run combined-comment renderer fixture tests (Python port, docs/PYTHON-PORT.md)
         run: bash tests/test-render-comment-python.sh
 
-      - name: Run JSON-boundary fixture tests (pantheon.jqjson, docs/PYTHON-PORT.md)
+      - name: Run JSON-boundary fixture tests (pantheon.jqjson)
         run: bash tests/test-json-boundary.sh
 
       - name: Run install.sh fixture tests
         run: bash tests/test-install.sh
 
-      - name: Run prompt-assembly fixture tests
-        run: bash tests/test-prompt-assembly.sh
-
-      - name: Run state-persistence fixture tests
-        run: bash tests/test-state-persistence.sh
-
-      - name: Run state-persistence Python-port migration-exam fixture tests (pantheon.state)
-        run: bash tests/test-state-persistence-python.sh
-
-      - name: Run prompt-assembly Python-port migration-exam fixture tests (pantheon.cli)
+      - name: Run prompt-assembly fixture tests (pantheon.cli)
         run: bash tests/test-prompt-assembly-python.sh
 
-      - name: Run git-readonly-wrapper fixture tests
+      - name: Run state-persistence fixture tests (pantheon.state)
+        run: bash tests/test-state-persistence-python.sh
+
+      - name: Run git-readonly-wrapper fixture tests (pantheon.execution)
         run: bash tests/test-git-readonly-wrapper.sh
 
-      - name: Run git-readonly-wrapper fixture tests against the Python port (pantheon.execution)
-        env:
-          PANTHEON_EXECUTION_IMPL: python
-        run: bash tests/test-git-readonly-wrapper.sh
-
-      - name: Run execution-tier fixture tests
-        run: bash tests/test-execution-tier.sh
-
-      - name: Run execution-tier Python-port migration-exam fixture tests (pantheon.execution)
+      - name: Run execution-tier fixture tests (pantheon.execution)
         run: bash tests/test-execution-tier-python.sh
+
+      - name: Run action/lib execution-context-note fixture tests (cwd-shadow-import resistance)
+        run: bash tests/test-action-lib-execution-note.sh
 
       - name: Run bootstrap release/checksum fixture tests
         run: bash tests/test-bootstrap-release.sh
@@ -138,14 +117,11 @@ jobs:
       - name: Run release.yml tag-validation gate fixture tests
         run: bash tests/test-release-tag-gates.sh
 
-      - name: Install the pantheon package + ruff/mypy/pytest (build-time-only tooling, docs/PYTHON-PORT.md)
+      - name: Install the pantheon package + ruff/mypy/pytest (build-time-only tooling)
         run: pip install --quiet -e . ruff mypy pytest
 
       - name: pantheon console script smoke check (--help exits 0)
         run: pantheon --help
-
-      - name: review-gate compat-shim console script smoke check (--help exits 0)
-        run: review-gate --help
 
       - name: ruff check pantheon/ (lint)
         run: ruff check pantheon/ tests/test_*.py
@@ -156,7 +132,7 @@ jobs:
       - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config)
         run: mypy
 
-      - name: pytest (jqjson matrix + pure-function seams, docs/PYTHON-PORT.md)
+      - name: pytest (jqjson matrix + pure-function seams)
         run: pytest -q
 
       - name: Assert CONTRIBUTING.md's canonical test tables + prose counts match tests/* exactly
@@ -205,10 +181,35 @@ jobs:
 
           exit "$status"
 
+      # DESIGN.md is a current-state contract, not a changelog (CONTRIBUTING.md's "Fix-round
+      # history goes in git" rule, skills/design-contract/SKILL.md's matching exclusion) — fails
+      # the build if fix-round narrative creeps back in. Deliberately narrow, case-insensitive
+      # markers rather than a broad "history"/"before"/"used to" sweep, which would false-positive
+      # on ordinary present-tense prose (e.g. this file's own "before any tool call" phrasing
+      # elsewhere in DESIGN.md) — these four are the actual shapes a round-by-round retelling
+      # takes, verified against the narrative this check was written to keep out.
+      - name: DESIGN.md contains no fix-round narrative markers
+        run: |
+          set -uo pipefail
+          # `|| true` is load-bearing, not decoration: GitHub Actions runs `run:` blocks under
+          # `bash -e` by default (`shell: bash` resolves to `bash --noprofile --norc -eo
+          # pipefail {0}`), and grep exits 1 when it finds NO match — the everyday "DESIGN.md is
+          # clean" case. Without this, the clean case aborts the step right here, before the
+          # `if` below ever runs, so the check could never go green on any input (planted-marker
+          # AND clean both "fail," just for different reasons) — caught by the coordinator after
+          # a real CI run on this exact step failed with zero markers actually present.
+          hits="$(grep -noE 'Round [0-9]+|first attempt|the fix was|previously we' DESIGN.md || true)"
+          if [[ -n "$hits" ]]; then
+            echo "::error::DESIGN.md contains fix-round narrative marker(s) — a contract describes current-state behavior only; fix-round history belongs in git (commit messages, PR descriptions), never the doc. See CONTRIBUTING.md's design-constraints section."
+            echo "$hits"
+            exit 1
+          fi
+          echo "DESIGN.md: no fix-round narrative markers found"
+
   setup-smoke:
     # Clean-machine, real-Linux run of the setup story (see Dockerfile.smoke's header): required
     # binaries, both fixture suites above, install.sh and bootstrap.sh against fresh scratch
-    # targets, and — only with a working token — one tokened `review-gate --pr <n> --dry-run`
+    # targets, and — only with a working token — one tokened `pantheon gate --pr <n> --dry-run`
     # against a real, pinned public PR. Separate job from lint-and-test so a setup-story
     # regression doesn't get muddled with a lint/fixture failure in the CI summary.
     runs-on: ubuntu-latest
@@ -279,7 +280,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           post_comment: "true" # let the twins' verdict comment land on this repo's own PRs — this
-          # IS the acceptance proof for the combined-comment renderer (cli/lib/render_comment.sh):
+          # IS the acceptance proof for the combined-comment renderer (pantheon.render):
           # a real composite-action run, on a real PR, posting the new human-first format. Was
           # "false" (mechanics-only, no comment) before the renderer existed to prove out.
           execution: trusted # this IS the own-repo/trusted-author case execution=readonly's own

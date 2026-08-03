@@ -94,7 +94,7 @@ End your output with exactly one JSON object and nothing after it:
   "findings": [
     {
       "severity": "should_fix",
-      "file": "cli/providers/claude.sh",
+      "file": "pantheon/providers.py",
       "line": 1,
       "issue": "existing provider-lane seam already supports this without a new dispatch mechanism",
       "scenario": "building a parallel dispatcher means two places to fix the next provider bug instead of one"

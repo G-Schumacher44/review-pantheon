@@ -47,7 +47,7 @@ while IFS= read -r rel; do
   fi
 done <<< "$refs"
 
-# Every referenced action/lib/*.sh and action/decide_verdict.py file must be executable-by-bash
+# Every referenced action/lib/*.sh file must be executable-by-bash
 # (bash -n) — belt and suspenders on top of ci.yml's repo-wide bash -n/shellcheck job, scoped
 # to exactly the files this action depends on at runtime.
 while IFS= read -r rel; do

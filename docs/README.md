@@ -2,11 +2,10 @@
 
 | Doc | Description |
 |---|---|
-| [DESIGN.md](../DESIGN.md) | The contract. Hard rules, the verdict schema, security posture, configuration keys, and the surface-differences table every agent and provider lane is required to follow. |
-| [HARDENING-HISTORY.md](HARDENING-HISTORY.md) | The security wrapper's round-by-round hardening history (Round 1–8) — moved out of DESIGN.md's main flow to keep the contract itself readable. DESIGN.md's "Security posture" section is still canonical for current-state behavior; this is the changelog. |
-| [PYTHON-PORT.md](PYTHON-PORT.md) | The binding spec for the Python CLI port (v2 track) — packaging, CLI surface, the migration exam against the existing fixture suites, security-core carryover, module layout, and the slice plan. To the port what DESIGN.md is to the gate. |
-| [SETUP.md](SETUP.md) | Install (three ways), the zero-token `--dry-run` demo, first live run, and troubleshooting (draft skips, UNVERIFIED causes, timeouts, force-push fallback). |
-| [CLI.md](CLI.md) | The full `pantheon` CLI reference: every flag, every `gate.conf` key, the execution tiers, the follow-up-mode state model, exit codes, reading a verdict comment, and worked examples. (The deprecated `cli/review-gate`/`review-gate` shim still works this release — same flags, same exit codes.) |
+| [DESIGN.md](../DESIGN.md) | The contract. Hard rules, the verdict schema, security posture, configuration keys, and the surface-differences table every agent and provider lane is required to follow. Fix-round history lives in git, not here. |
+| [DESIGN.template.md](DESIGN.template.md) | The skeleton the `design-contract` skill points at when authoring a new binding contract doc — hard rules, data/verdict contract, security posture, deliberately-absent, layout. |
+| [SETUP.md](SETUP.md) | Install, the zero-token `--dry-run` demo, first live run, and troubleshooting (draft skips, UNVERIFIED causes, timeouts, force-push fallback). Points into CLI.md for flag reference rather than re-explaining it. |
+| [CLI.md](CLI.md) | The full `pantheon` CLI reference: every flag, every `gate.conf` key, the execution tiers, the follow-up-mode state model, exit codes, reading a verdict comment, and worked examples. |
 | [RELEASING.md](../RELEASING.md) | The operator's release ceremony — dev→main promotion, tagging, moving the `v1` major tag, and the release gate `.github/workflows/release.yml` runs before publishing. |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Ground rules (PRs only, the review-loop contract), dev setup, the test suites, shellcheck/container-verify expectations, and design constraints contributors must respect. |
 | [SECURITY.md](../SECURITY.md) | Supported surface, how to report a vulnerability privately (GitHub security advisories), and the honest scope notes on the `readonly`/`trusted` execution tiers. |

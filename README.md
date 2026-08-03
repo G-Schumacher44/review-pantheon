@@ -49,10 +49,8 @@ pantheon gate --pr <number> --dry-run
 ```
 
 runs the real thing — real diff, real prompts — right up to calling a provider, then prints
-exactly what it *would* post. `pantheon` is the current CLI (docs/CLI.md) — the bash
-`cli/review-gate`/`review-gate` compat shim still work during the port's deprecation window
-(docs/PYTHON-PORT.md) but are on notice for removal. Prefer a vendored install, or the CLI only?
-Full walkthrough for every path: [docs/SETUP.md](docs/SETUP.md).
+exactly what it *would* post. `pantheon` is the CLI (docs/CLI.md). Prefer a vendored install, or
+the CLI only? Full walkthrough for every path: [docs/SETUP.md](docs/SETUP.md).
 
 ## The panel
 
@@ -93,7 +91,7 @@ Full persona definitions, verdict vocabulary, and the gate-flow diagram: [DESIGN
   verdict — cross-review by a second agent is the real backstop, not a guarantee.
 
 Full technical detail, honestly scoped: [SECURITY.md](SECURITY.md) and DESIGN.md's ["Security
-posture"](DESIGN.md#security-posture-kept-from-the-private-ancestor-by-design).
+posture"](DESIGN.md#security-posture).
 
 ## Works with Conductor
 

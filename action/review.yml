@@ -10,16 +10,15 @@
 # read->provenance matrix): every file below that shapes what the gate DOES, not just its
 # judgment content, is resolved from the PR's BASE commit via `git show` into $RUNNER_TEMP, not
 # read from $GITHUB_WORKSPACE (the PR's own checkout) — the read-only git wrapper, the
-# persona (.md) the agent runs as, and the verdict decider it's graded by. Port slice 5's
-# absorption (DESIGN.md's "Two runtimes, one rule") moved the verdict decider from a single
-# standalone `decide_verdict.py` file to the `pantheon.verdict` MODULE, which itself depends on
-# `pantheon.jqjson` — so "the verdict decider" is now THREE base-pinned files
-# (`pantheon/__init__.py`, `pantheon/jqjson.py`, `pantheon/verdict.py`), each resolved by the
-# identical base-pinned mechanism, into a package-shaped `$RUNNER_TEMP` directory the "Decide
-# verdict" step below points `PYTHONPATH` at — same provenance guarantee as the single-file
-# version, just resolving the (small) dependency closure `import`ing that module actually needs
-# rather than one file. Only REVIEW_RULES.md/DESIGN.md (judgment CONTENT, not gate behavior)
-# remain a documented exception on this one lane — see DESIGN.md's "Lane differences".
+# persona (.md) the agent runs as, and the verdict decider it's graded by. The verdict decider is
+# the `pantheon.verdict` module, which itself depends on `pantheon.jqjson` — so "the verdict
+# decider" is TWO base-pinned files (`pantheon/__init__.py`, `pantheon/jqjson.py`, plus
+# `pantheon/verdict.py` itself: three files total), each resolved by the identical base-pinned
+# mechanism, into a package-shaped `$RUNNER_TEMP` directory the "Decide verdict" step below
+# points `PYTHONPATH` at. The read-only git wrapper (`pantheon/execution.py`) is resolved the
+# same way, separately — see "Resolve read-only git wrapper (base-pinned)" below. Only
+# REVIEW_RULES.md/DESIGN.md (judgment CONTENT, not gate behavior) remain a documented exception
+# on this one lane — see DESIGN.md's "Lane differences".
 #
 # PIN NOTE: `anthropics/claude-code-action` is pinned below to v1.0.183's full commit SHA
 # (be7b93b1907a4abad570368f3c74b6fe3807510b — https://github.com/anthropics/claude-code-action/
@@ -137,9 +136,9 @@ jobs:
 
       # Codex P1 finding (round 2 on the tiered-execution PR): this workflow's Checkout step
       # above pulls the PR's OWN tree — on a fork PR, `$GITHUB_WORKSPACE/.github/review-agents/
-      # pantheon-git-readonly.sh` is content the PR author controls. Pointing --allowedTools at
+      # pantheon/execution.py` is content the PR author controls. Pointing --allowedTools at
       # that working-tree path (as this lane originally did) means a PR can simply REPLACE the
-      # wrapper script with an arbitrary executable while the exact same permission-rule path
+      # wrapper module with an arbitrary executable while the exact same permission-rule path
       # still authorizes running it — the readonly tier would authorize its own replacement.
       # Fixed the same way this repo already closes the identical class for REVIEW_RULES.md/
       # DESIGN.md base-pinning (DESIGN.md's "Security posture" — "Base-SHA-pinned context file
@@ -161,15 +160,25 @@ jobs:
       # base-pinned read of the wrapper was STILL a bare `git show "${BASE_SHA}:path"` — the
       # exact class this whole PR exists to close, on the one file that gates command execution
       # itself, not just prompt content (a symlinked, base-committed
-      # `.github/review-agents/pantheon-git-readonly.sh` would previously have made $WRAPPER_DEST
-      # hold a link-target pathname string instead of the wrapper script, then get chmod+x'd and
-      # --allowedTools-authorized anyway). Routed through pantheon_base_pinned_read below, the
-      # same symlink-safe helper `cli/lib/pantheon-base-pin.sh` implements — inlined here (a
-      # second copy within THIS file, not just one) because GitHub Actions gives every step's
-      # `run:` block its own fresh shell; a function defined in one step's script does not exist
-      # in the next step's. Both inline copies in this file (this step's and "Resolve gate
-      # scripts (base-pinned)" below) must be kept byte-identical by hand, same as either one
-      # against the external library.
+      # `.github/review-agents/pantheon/execution.py` would previously have made $WRAPPER_DEST
+      # hold a link-target pathname string instead of the wrapper module, then get
+      # --allowedTools-authorized anyway). Routed through pantheon_base_pinned_read below (the
+      # same symlink-safe algorithm `pantheon/basepin.py` implements) — inlined here (a second
+      # copy within THIS file, not just one) because GitHub Actions gives every step's `run:`
+      # block its own fresh shell; a function defined in one step's script does not exist in the
+      # next step's. Both inline copies in this file (this step's and "Resolve gate scripts
+      # (base-pinned)" below) must be kept byte-identical by hand, same as either one against the
+      # external library.
+      #
+      # The wrapper itself is now a Python module (`pantheon/execution.py`, replacing the former
+      # `pantheon-git-readonly.sh` shell script — `pantheon` is the CLI, there is no bash
+      # implementation left to keep in sync). It is invoked by its OWN ABSOLUTE PATH, never
+      # `python3 -m pantheon.execution` — the identical `-m`-prepends-cwd-to-sys.path shadow
+      # vector `pantheon.execution.resolve_console_script`'s own docstring describes (see the
+      # "Decide verdict" step's comment below for the same reasoning applied to `verdict.py`).
+      # `wrapper_path` below is therefore the FULL invocation string (`python3 <path> wrapper`),
+      # not a bare file path — every downstream `--allowedTools`/prompt reference embeds it
+      # as-is, the same shape `pantheon.cli._wrapper_invocation()` returns for the local CLI lane.
       - name: Resolve read-only git wrapper (base-pinned)
         id: resolve-git-wrapper
         env:
@@ -177,7 +186,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # ---- BEGIN inlined copy of cli/lib/pantheon-base-pin.sh — keep in sync by hand ----
+          # ---- BEGIN inlined copy of pantheon/basepin.py's algorithm — keep in sync by hand ----
           pantheon_normalize_repo_path() {
             local input="$1"
             case "$input" in
@@ -278,28 +287,33 @@ jobs:
               fi
             done
           }
-          # ---- END inlined copy of cli/lib/pantheon-base-pin.sh ----
+          # ---- END inlined copy of pantheon/basepin.py's algorithm ----
 
-          WRAPPER_DEST="$RUNNER_TEMP/pantheon-git-readonly.sh"
+          WRAPPER_DEST="$RUNNER_TEMP/pantheon-git-readonly/pantheon/execution.py"
+          mkdir -p "$(dirname "$WRAPPER_DEST")"
           wrapper_rc=0
-          pantheon_base_pinned_read "$BASE_SHA" ".github/review-agents/pantheon-git-readonly.sh" "$WRAPPER_DEST" || wrapper_rc=$?
+          pantheon_base_pinned_read "$BASE_SHA" ".github/review-agents/pantheon/execution.py" "$WRAPPER_DEST" || wrapper_rc=$?
           if [ "$wrapper_rc" -eq 1 ]; then
-            echo "::error::refused to resolve .github/review-agents/pantheon-git-readonly.sh at base commit ${BASE_SHA} — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
+            echo "::error::refused to resolve .github/review-agents/pantheon/execution.py at base commit ${BASE_SHA} — see the ::error:: line above (a symlink escaping the repository, or a chain exceeding the depth bound)."
             exit 1
           elif [ "$wrapper_rc" -eq 2 ]; then
-            echo "::error::missing .github/review-agents/pantheon-git-readonly.sh at base commit ${BASE_SHA}. Two possible causes: (1) install.sh hasn't been run in this repo yet — run it, commit the result, and re-push; or (2) this IS the PR that first runs install.sh and adds this workflow — the wrapper exists at this PR's head but not yet at base, and base-pinning correctly refuses to read a PR-introduced file from PR content rather than falling back unsafely. For (2): merge this bootstrap PR via another path (manual review, or temporarily unset the REVIEW_GATE_ENABLED repo variable for just this PR) — every PR after it will be gated normally, since the wrapper will then exist at base."
+            echo "::error::missing .github/review-agents/pantheon/execution.py at base commit ${BASE_SHA}. Two possible causes: (1) install.sh hasn't been run in this repo yet — run it, commit the result, and re-push; or (2) this IS the PR that first runs install.sh and adds this workflow — the wrapper exists at this PR's head but not yet at base, and base-pinning correctly refuses to read a PR-introduced file from PR content rather than falling back unsafely. For (2): merge this bootstrap PR via another path (manual review, or temporarily unset the REVIEW_GATE_ENABLED repo variable for just this PR) — every PR after it will be gated normally, since the wrapper will then exist at base."
             exit 1
           fi
-          chmod +x "$WRAPPER_DEST"
-          echo "wrapper_path=$WRAPPER_DEST" >> "$GITHUB_OUTPUT"
+          # No chmod +x — this is a Python module invoked via `python3 <path> wrapper`, not a
+          # standalone executable. The full invocation string (not a bare file path) is what
+          # every downstream --allowedTools/prompt reference embeds, so the model's typed command
+          # only ever matches through this one fixed prefix — see this step's own header comment.
+          echo "wrapper_path=python3 $WRAPPER_DEST wrapper" >> "$GITHUB_OUTPUT"
 
       # Issue #6's class-close: the same base-pinning gap the wrapper-resolution step above
       # closes existed for two more files this workflow reads out of the PR's own checkout — a
       # fork PR reviewing itself with its own reviewers:
       #   - Codex P1 (action/review.yml:190 on PR #5): "Decide verdict" ran
-      #     $GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py, the PR's own head copy —
-      #     a fork PR could replace it to run arbitrary Python and emit a fake green verdict
-      #     regardless of what the reviewer actually found.
+      #     $GITHUB_WORKSPACE/.github/review-agents/decide_verdict.py (a standalone script, since
+      #     retired — its logic now lives in `pantheon.verdict`), the PR's own head copy — a fork
+      #     PR could replace it to run arbitrary Python and emit a fake green verdict regardless
+      #     of what the reviewer actually found.
       #   - Codex P1 (agents/artemis.md:33 on PR #5): "Build prompt" read
       #     $GITHUB_WORKSPACE/.github/review-agents/${AGENT_NAME}.md, the PR's own head copy —
       #     a fork PR could rewrite its own reviewing agent's instructions (soften the hunt list,
@@ -317,9 +331,10 @@ jobs:
       # `.github/review-agents/` uses a symlinked persona (a legitimate pattern) would get a
       # pathname instead of persona Markdown, breaking what a plain checkout-based read
       # previously handled correctly. pantheon_base_pinned_read below is this workflow's own
-      # inlined copy of cli/lib/pantheon-base-pin.sh's function (same logic, same return-code
-      # contract — see that file's header comment for the full rationale) — this lane can't
-      # `source` it: a target repo never gets a copy of cli/lib/ (see DESIGN.md's "Published
+      # inlined copy of pantheon/basepin.py's algorithm (same logic, same return-code contract —
+      # see that module's own docstring for the full rationale) — this lane can't `import` it:
+      # a target repo never gets a copy of pantheon/ except as a base-pinned $RUNNER_TEMP read
+      # (see DESIGN.md's "Published
       # action"/"Lane differences"), the same reason this workflow already hand-syncs its
       # prompt-build/comment-post logic instead of sourcing action/lib/*.sh.
       - name: Resolve gate scripts (base-pinned)
@@ -330,7 +345,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # ---- BEGIN inlined copy of cli/lib/pantheon-base-pin.sh — keep in sync by hand ----
+          # ---- BEGIN inlined copy of pantheon/basepin.py's algorithm — keep in sync by hand ----
           pantheon_normalize_repo_path() {
             local input="$1"
             case "$input" in
@@ -431,10 +446,10 @@ jobs:
               fi
             done
           }
-          # ---- END inlined copy of cli/lib/pantheon-base-pin.sh (round 3 — component-walk
-          # symlink resolution, not just leaf-symlink; see the library file's own header for
-          # why a single ls-tree on the whole path silently misses a symlinked intermediate
-          # directory component) ----
+          # ---- END inlined copy of pantheon/basepin.py's algorithm (component-walk symlink
+          # resolution, not just leaf-symlink; see that module's own docstring for why a single
+          # ls-tree on the whole path silently misses a symlinked intermediate directory
+          # component) ----
 
           PERSONA_DEST="$RUNNER_TEMP/${AGENT_NAME}.md"
           persona_rc=0
@@ -448,7 +463,7 @@ jobs:
           fi
           echo "persona_path=$PERSONA_DEST" >> "$GITHUB_OUTPUT"
 
-          # The verdict decider — port slice 5's absorption (this file's own header comment):
+          # The verdict decider (this file's own header comment):
           # `pantheon.verdict` plus the one module it depends on for JSON parsing
           # (`pantheon.jqjson`) plus the package's own `__init__.py`, base-pinned into a
           # PACKAGE-SHAPED directory ($RUNNER_TEMP/pantheon-verdict/pantheon/*.py) so the
@@ -576,9 +591,9 @@ jobs:
             exit 1
           fi
 
-          # Per-render anti-collision fence marker — mirrors cli/review-gate's own
-          # pantheon_fence_id()/pantheon_fence_id_for() (and action/lib/build_prompt.sh's
-          # identical mechanism) exactly: unpredictable per render, so content authored in
+          # Per-render anti-collision fence marker — mirrors action/lib/build_prompt.sh's
+          # identical pantheon_fence_id()/pantheon_fence_id_for() mechanism exactly:
+          # unpredictable per render, so content authored in
           # advance (a fork PR's own REVIEW_RULES.md/DESIGN.md, base-pinned or not; a crafted PR
           # title) cannot know the marker in advance to spoof a fake close. A CRITICAL-adjacent
           # (medium) fix: this step previously had NO fence mechanism at all (it never embedded
@@ -721,8 +736,7 @@ jobs:
           # comment) — the tool allowlist travels inside `claude_args` as `--allowedTools`
           # instead. `--json-schema` is the verdict-contract shape (DESIGN.md), structural
           # only — NOT each agent's own verdict vocabulary, which stays sole-sourced in
-          # `pantheon.verdict` (port slice 5's absorption — see DESIGN.md's "Two runtimes, one
-          # rule").
+          # `pantheon.verdict` (the one verdict-decision implementation every lane calls).
           #
           # Bash is routed through the wrapper resolved by "Resolve read-only git wrapper
           # (base-pinned)" above — NOT a path under $GITHUB_WORKSPACE (HIGH-1 fix, Codex P1
@@ -736,8 +750,8 @@ jobs:
           # REVIEW_RULES.md/DESIGN.md base-pinning elsewhere. (Round 1 of this same fix replaced
           # a bare `Bash(git diff *)`-style prefix pattern, which can't tell a read-only git
           # subcommand from the same subcommand carrying a writing/execution-capable flag like
-          # `--output=`/`--ext-diff` — see cli/lib/pantheon-git-readonly.sh's own header comment
-          # for that finding.) Unlike action.yml (the published composite action, which exposes
+          # `--output=`/`--ext-diff` — see pantheon/execution.py's own module docstring for that
+          # finding.) Unlike action.yml (the published composite action, which exposes
           # an `execution` input), this vendored workflow has no config/input surface at all by
           # design (see DESIGN.md's "Lane differences" — provider/config are hardcoded here the
           # same way REVIEW_RULES.md/DESIGN.md's paths are) — readonly is not overridable from
@@ -749,9 +763,9 @@ jobs:
           # --allowedTools still goes through a permission decision that nothing can answer
           # outside an interactive terminal — `dontAsk` is documented as the mode for
           # "locked-down CI and scripts": it auto-denies anything not pre-approved and never
-          # waits for input. See cli/lib/execution.sh's header comment for the fuller writeup (a
-          # real Apollo finding, from this PR's own self-review of action.yml, which has the
-          # identical gap this same fix closes here).
+          # waits for input. See pantheon/execution.py's own module docstring for the fuller
+          # writeup (a real Apollo finding, from this PR's own self-review of action.yml, which
+          # has the identical gap this same fix closes here).
           # NO --bare here, deliberately (adversarial review, round 8 — see the CRITICAL
           # finding/resolution history comment above the "Checkout" step for the full writeup,
           # including WHY this lane's CRITICAL-1 config/MCP/hooks vector needs no CLI flag or
@@ -778,9 +792,8 @@ jobs:
           RAW_OUTPUT: ${{ steps.run-agent.outputs.structured_output }}
         run: printf '%s\n' "$RAW_OUTPUT" > "$RUNNER_TEMP/${AGENT_NAME}-raw.txt"
 
-      # Same decision rule as every other lane, now the SAME CODE, not just the same rule
-      # (port slice 5's absorption, DESIGN.md's "Two runtimes, one rule") — `pantheon.verdict`,
-      # resolved base-pinned above into a package-shaped $RUNNER_TEMP directory.
+      # Same decision rule as every other lane, the SAME CODE — `pantheon.verdict`, resolved
+      # base-pinned above into a package-shaped $RUNNER_TEMP directory.
       #
       # Invoked by its OWN ABSOLUTE PATH, deliberately NOT `python3 -m pantheon.verdict` (a
       # Codex P1 finding on this port's own PR): `-m` prepends the CURRENT WORKING DIRECTORY to

@@ -341,35 +341,11 @@ out="$(render "$HEAD_SHA" artemis)"
 assert_contains "multi-byte-truncation" "the table cell keeps the boundary character whole" "$out" "${MB_PREFIX_88}→…"
 
 # ---------------------------------------------------------------------------
-# Additional Python-port regression coverage (beyond the 1:1 bash-suite mirror above) — the
-# repo's own self-hosted gate (Codex) found these four divergences on this PR, each proven
-# failing pre-fix against a live repro (bash vs. Python, byte-diffed) before the corresponding
-# pantheon/render.py fix landed. Asserted here as direct byte-identity checks against the real
-# bash renderer (cli/lib/render_comment.sh, sourced fresh per case), not string-contains checks,
-# since "byte-identical output" is the exact property each of these gaps violated.
+# JSON-boundary regression coverage — nine divergences a bash-vs-Python byte-diff originally
+# caught (bash is retired; these are now asserted directly against pantheon.render's own
+# documented-correct output, per pantheon.jqjson's JSON-boundary contract, not by diffing
+# against a second implementation that no longer exists).
 # ---------------------------------------------------------------------------
-
-# bash_render <head_sha> <agent...> — the bash-side counterpart to render(), used only in this
-# section for direct byte-identity comparison against the same command-substitution capture
-# shape render() already uses (both sides losing a trailing newline the same way is fine; what
-# matters is comparing like-for-like).
-bash_render() {
-  # shellcheck disable=SC1091
-  (source "$ROOT/cli/lib/render_comment.sh" && pantheon_render_comment "$@")
-}
-
-assert_byte_identical() {
-  local case_name="$1"
-  local bash_out py_out
-  bash_out="$(bash_render "$HEAD_SHA" artemis)"
-  py_out="$(render "$HEAD_SHA" artemis)"
-  if [[ "$bash_out" == "$py_out" ]]; then
-    pass "$case_name: byte-identical to cli/lib/render_comment.sh"
-  else
-    fail "$case_name: byte-identical to cli/lib/render_comment.sh" "outputs differ (see diff below)"
-    diff <(printf '%s' "$bash_out") <(printf '%s' "$py_out") | head -20
-  fi
-}
 
 # Divergence 1: NaN in a display field must print jq's "null" (jq's own print form for its NaN
 # coercion), not Python's re-emitted literal "NaN" token.
@@ -377,16 +353,19 @@ reset_agent_env
 ARTEMIS_COLOR=green ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="no findings"
 ARTEMIS_FINDINGS='{"summary":NaN,"findings":[]}'
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
-assert_byte_identical "nan-in-summary-prints-jq-null"
+out="$(render "$HEAD_SHA" artemis)"
+assert_contains "nan-in-summary-prints-jq-null" "machine tail prints null, not NaN" "$out" $'"summary": null,'
+assert_not_contains "nan-in-summary-prints-jq-null" "no literal NaN token anywhere" "$out" "NaN"
 
-# Divergence 2: a completely UNSET FINDINGS env var must reproduce bash's own
-# `${!findings_var:-\{\}}` default-value quirk (the literal 3-char string `\{}`, invalid JSON) in
-# the machine tail's raw-text fallback — not a "clean" `{}`.
+# Divergence 2: a completely UNSET FINDINGS env var must reproduce the documented default-value
+# quirk (the literal 3-char string `\{}`, invalid JSON) in the machine tail's raw-text fallback —
+# not a "clean" `{}`.
 reset_agent_env
 ARTEMIS_COLOR=green ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="no findings"
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP
 unset ARTEMIS_FINDINGS
-assert_byte_identical "unset-findings-var-machine-tail-matches-bash-quirk"
+out="$(render "$HEAD_SHA" artemis)"
+assert_contains "unset-findings-var-machine-tail-matches-bash-quirk" "machine tail shows the literal \\{} fallback" "$out" $'```json\n\\{}\n```'
 
 # Divergence 3: FINDINGS set to valid JSON that ISN'T an object (a bare array) — the machine tail
 # must pretty-print the parsed array (matching jq's `.` filter, which doesn't care that it's not
@@ -395,7 +374,8 @@ reset_agent_env
 ARTEMIS_COLOR=green ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="no findings"
 ARTEMIS_FINDINGS='[1,2,3]'
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
-assert_byte_identical "non-object-json-findings-pretty-prints-in-machine-tail"
+out="$(render "$HEAD_SHA" artemis)"
+assert_contains "non-object-json-findings-pretty-prints-in-machine-tail" "array pretty-printed, not collapsed to {}" "$out" $'[\n  1,\n  2,\n  3\n]'
 
 # Divergence 4: Infinity in a display field must render as jq's coerced max-double text, not
 # Python's re-emitted literal "Infinity" token (also not valid JSON in the machine tail).
@@ -403,29 +383,32 @@ reset_agent_env
 ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="x"
 ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"note","file":"a","line":1,"issue":"x","scenario":"y"}],"summary":Infinity}'
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
-assert_byte_identical "infinity-in-summary-prints-jq-max-double"
+out="$(render "$HEAD_SHA" artemis)"
+assert_contains "infinity-in-summary-prints-jq-max-double" "jq's coerced max-double text appears" "$out" "1.7976931348623157e+308"
+assert_not_contains "infinity-in-summary-prints-jq-max-double" "no literal Infinity token anywhere" "$out" "Infinity"
 
-# Divergence 5 (docs/PYTHON-PORT.md's "JSON boundary" section, pantheon/jqjson.py): a numeric
-# literal that overflows Python's IEEE double during parsing (e.g. 1e400) must print jq's own
-# canonicalized, still-exact number text (1E+400) in the machine tail, not silently lose
-# precision to a bare "Infinity" token the way an un-fixed float('inf') round-trip would (which
-# also isn't valid JSON — RFC 8259 has no such literal).
+# Divergence 5 (pantheon/jqjson.py's "JSON boundary"): a numeric literal that overflows Python's
+# IEEE double during parsing (e.g. 1e400) must print jq's own canonicalized, still-exact number
+# text (1E+400) in the machine tail, not silently lose precision to a bare "Infinity" token the
+# way an un-fixed float('inf') round-trip would (which also isn't valid JSON — RFC 8259 has no
+# such literal).
 reset_agent_env
 ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="x"
 ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"note","file":"a","line":1,"issue":"x","scenario":"y"}],"summary":"s","extra":1e400}'
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
-assert_byte_identical "1e400-overflow-preserves-jq-canonical-number-in-machine-tail"
+out="$(render "$HEAD_SHA" artemis)"
+assert_contains "1e400-overflow-preserves-jq-canonical-number-in-machine-tail" "canonical exact number text preserved" "$out" $'"extra": 1E+400'
+assert_not_contains "1e400-overflow-preserves-jq-canonical-number-in-machine-tail" "no lossy Infinity token" "$out" "Infinity"
 
-# Divergence 6 (pantheon.jqjson's second boundary — display-TEXT, jqjson.subst): bash's
-# `summary="$(jq -r '.summary // empty' <<<"$findings_json")"` runs through a $(...) command
-# substitution, which strips ALL trailing newlines from the captured text BEFORE bash's own
-# `[ -n "$summary" ]` emptiness check ever runs. A summary of exactly a trailing newline ("\n")
-# must therefore be treated as EMPTY and fall through to $top — not render as a blank line.
+# Divergence 6 (pantheon.jqjson's second boundary — display-TEXT, jqjson.subst): a summary of
+# exactly a trailing newline ("\n") must be treated as EMPTY and fall through to $top — not
+# render as a blank line.
 reset_agent_env
 ARTEMIS_COLOR=green ARTEMIS_VERDICT=SHIP ARTEMIS_TOP="fallback-top-text"
 ARTEMIS_FINDINGS='{"summary":"\n","findings":[]}'
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
-assert_byte_identical "trailing-newline-only-summary-falls-through-to-top"
+out="$(render "$HEAD_SHA" artemis)"
+assert_contains "trailing-newline-only-summary-falls-through-to-top" "falls through to the top-finding text" "$out" $'\nfallback-top-text\n'
 
 # Divergence 7 (pantheon.jqjson's parse-side boundary, _parse_float): jq's number handling is
 # arbitrary-precision decimal, not IEEE double -- a literal that UNDERFLOWS a double to 0.0
@@ -436,7 +419,9 @@ reset_agent_env
 ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP=x
 ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"note","file":"a","line":1,"issue":"x","scenario":"y"}],"summary":"s","extra1":1e-400,"extra2":1.234567890123456789}'
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
-assert_byte_identical "underflow-and-precision-loss-preserved-exactly-in-machine-tail"
+out="$(render "$HEAD_SHA" artemis)"
+assert_contains "underflow-and-precision-loss-preserved-exactly-in-machine-tail" "underflowed literal preserved exactly" "$out" $'"extra1": 1E-400,'
+assert_contains "underflow-and-precision-loss-preserved-exactly-in-machine-tail" "high-precision literal preserved exactly (not rounded)" "$out" "1.234567890123456789"
 
 # Divergence 8 (pantheon.jqjson.dumps's _RawBigNumber placeholder-splice mechanism): a genuine
 # string field equal to the placeholder's own text pattern must NOT be corrupted into the
@@ -447,19 +432,19 @@ reset_agent_env
 ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP=x
 ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"FIX_FIRST","has_blocker":false,"findings":[{"severity":"note","file":"a","line":1,"issue":"jqjson-raw-0","scenario":"y"}],"summary":"s","extra":1e400}'
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
-assert_byte_identical "raw-number-placeholder-text-as-genuine-content-not-corrupted"
+out="$(render "$HEAD_SHA" artemis)"
+assert_contains "raw-number-placeholder-text-as-genuine-content-not-corrupted" "the placeholder-shaped issue text survives untouched" "$out" $'"issue": "jqjson-raw-0",'
+assert_contains "raw-number-placeholder-text-as-genuine-content-not-corrupted" "the real overflow number is still preserved exactly, unconfused with the placeholder text" "$out" $'"extra": 1E+400'
 
-# Divergence 9 (pantheon.jqjson.subst): bash's $(...) command substitution drops ALL NUL bytes
-# from the captured text -- not just trailing newlines -- and does so BEFORE bash's own variable
-# holds the value, i.e. before any comparison against it. A severity of "blocker\x00" must
-# therefore still match the "blocker" case (bash already stripped the NUL by comparison time),
-# not fall through to the unrecognized-severity fallback the way a NUL left unstripped until
-# final display would.
+# Divergence 9 (pantheon.jqjson.subst): a severity of "blocker\x00" (embedded NUL) must still
+# match the "blocker" case, not fall through to the unrecognized-severity fallback the way a NUL
+# left unstripped until final display would.
 reset_agent_env
 ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP=x
 ARTEMIS_FINDINGS="$(python3 -c 'import json; print(json.dumps({"agent":"artemis","verdict":"FIX_FIRST","has_blocker":False,"findings":[{"severity":"blocker\x00","file":"a.py","line":1,"issue":"x","scenario":"y"}],"summary":"s"}))')"
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
-assert_byte_identical "nul-in-severity-stripped-before-comparison-not-just-display"
+out="$(render "$HEAD_SHA" artemis)"
+assert_contains "nul-in-severity-stripped-before-comparison-not-just-display" "NUL-suffixed severity still recognized as a real blocker" "$out" $'- **blocker** `a.py:1` — x'
 
 # ---------------------------------------------------------------------------
 # Fixture: repo-root redaction (a coordinator-flagged information-disclosure regression:
