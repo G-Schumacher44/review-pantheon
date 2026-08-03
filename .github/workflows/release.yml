@@ -182,6 +182,9 @@ jobs:
       - name: Run execution-tier fixture tests (pantheon.execution)
         run: bash tests/test-execution-tier-python.sh
 
+      - name: Run action/lib execution-context-note fixture tests (cwd-shadow-import resistance)
+        run: bash tests/test-action-lib-execution-note.sh
+
       - name: Run bootstrap release/checksum fixture tests
         run: bash tests/test-bootstrap-release.sh
 

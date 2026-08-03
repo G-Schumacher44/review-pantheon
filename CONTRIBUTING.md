@@ -30,7 +30,7 @@ Prerequisites (bash, git, jq, gh, python3, one provider CLI): see
 [docs/SETUP.md](docs/SETUP.md#prerequisites) for the full table and what each one gates.
 
 Run the suites — each is a standalone fixture test, no runner needed. **This table is the
-canonical, complete list of the bash fixture suites (14 files; verified against `git ls-tree -r tests/*.sh`)**
+canonical, complete list of the bash fixture suites (15 files; verified against `git ls-tree -r tests/*.sh`)**
 — DESIGN.md's "Layout" section points here instead of re-listing them, see DESIGN.md rule 5 on
 the two staying in sync. A separate pytest unit layer (8 files, `tests/test_*.py`; verified
 against `git ls-tree -r tests/*.py`) is its own documented category below — CI's sync-check
@@ -49,6 +49,7 @@ closed instead of rotting silently:
 | `tests/test-state-persistence-python.sh` | `pantheon.state` — `update_state()`'s follow-up-mode scenarios (driven via `python -m pantheon.state update ...`), plus `load_state`/`reviewed_sha_for`/`is_ancestor` coverage. |
 | `tests/test-git-readonly-wrapper.sh` | `pantheon.execution`'s read-only git wrapper (the argv-validating, EXEC/WRITE-SURFACE-MATRIX-driven `python -m pantheon.execution wrapper ...` CLI entry point) — every hostile-shape/live-fire negative-control fixture. |
 | `tests/test-execution-tier-python.sh` | `pantheon.execution`'s tier-resolution functions and structural hardening guards, plus a real `pantheon gate --execution bogus-tier` invocation, `--permission-mode dontAsk` in `pantheon/providers.py`, and `pantheon.cli`'s `execution=` base-pinning. |
+| `tests/test-action-lib-execution-note.sh` | `action/lib/build_prompt.sh`'s `pantheon_execution_context_note()` and its `action/lib/execution_context_note.py` driver — proves the driver resolves the trusted `pantheon.execution` module by absolute path, immune to a cwd-shadow-import attack, plus a full `build_prompt.sh` integration run. |
 | `tests/test-action-refs.sh` | Every `github.action_path` reference in `action.yml` resolves, plus SHA-pin checks. |
 | `tests/test-setup-smoke.sh` | Clean-machine setup story — runs inside `Dockerfile.smoke` in CI, see below. |
 | `tests/test-bootstrap-release.sh` | `bootstrap.sh`'s `--version`/release-fetch, unit-level: URL builders, checksum verify (happy + mismatch), offline flag validation. |
