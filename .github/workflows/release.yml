@@ -177,8 +177,6 @@ jobs:
         run: bash tests/test-state-persistence-python.sh
 
       - name: Run git-readonly-wrapper fixture tests (pantheon.execution)
-        env:
-          PANTHEON_EXECUTION_IMPL: python
         run: bash tests/test-git-readonly-wrapper.sh
 
       - name: Run execution-tier fixture tests (pantheon.execution)

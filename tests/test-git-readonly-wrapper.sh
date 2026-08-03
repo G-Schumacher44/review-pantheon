@@ -1,44 +1,22 @@
 #!/usr/bin/env bash
-# tests/test-git-readonly-wrapper.sh — fixture test for cli/lib/pantheon-git-readonly.sh, the
-# argv-validating read-only git wrapper (Codex P1 finding on the tiered-execution PR: a bare
-# `Bash(git diff *)`-style permission-rule prefix has no understanding of git's own argument
-# grammar, so it also permits `git diff --output=file` and `git diff --ext-diff` — neither
-# read-only in any meaningful sense). This wrapper is the actual boundary; this test proves it
-# refuses every hostile shape named in that finding (plus the general class it belongs to — any
-# flag at all) and still accepts every legit invocation the personas are told to make.
+# tests/test-git-readonly-wrapper.sh — fixture test for pantheon/execution.py's `wrapper` CLI
+# entry point (`python -m pantheon.execution wrapper ...`), the argv-validating read-only git
+# wrapper (Codex P1 finding on the tiered-execution PR: a bare `Bash(git diff *)`-style
+# permission-rule prefix has no understanding of git's own argument grammar, so it also permits
+# `git diff --output=file` and `git diff --ext-diff` — neither read-only in any meaningful
+# sense). This wrapper is the actual boundary; this test proves it refuses every hostile shape
+# named in that finding (plus the general class it belongs to — any flag at all) and still
+# accepts every legit invocation the personas are told to make.
 #
 # No test framework — plain bash, `bash tests/test-git-readonly-wrapper.sh` is the whole
 # invocation (wired into .github/workflows/ci.yml and tests/test-setup-smoke.sh).
-#
-# Migration-exam parameterization (docs/PYTHON-PORT.md §4, Slice 3): this suite was already
-# black-box in shape (invokes the wrapper as a real subprocess with real argv, never sources
-# it), so it is adapted in place rather than forked into a second file — set
-# PANTHEON_EXECUTION_IMPL=python to target `python -m pantheon.execution wrapper ...` (the
-# pantheon/execution.py module's own CLI entry point, added purely to keep this fixture's
-# black-box shape) instead of the bash script. Every behavioral assertion below is byte-identical
-# between the two IMPLs — only WRAPPER_CMD (what gets exec'd) and the two source-text structural
-# checks (which necessarily read a different file, in a different language) differ.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-IMPL="${PANTHEON_EXECUTION_IMPL:-bash}"
-case "$IMPL" in
-  bash)
-    WRAPPER="$ROOT/cli/lib/pantheon-git-readonly.sh"
-    WRAPPER_CMD=("$WRAPPER")
-    SRC_FILE="$WRAPPER"
-    ;;
-  python)
-    WRAPPER_CMD=(python3 -m pantheon.execution wrapper)
-    SRC_FILE="$ROOT/pantheon/execution.py"
-    export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
-    ;;
-  *)
-    echo "unknown PANTHEON_EXECUTION_IMPL '$IMPL' (expected bash or python)" >&2
-    exit 2
-    ;;
-esac
+WRAPPER_CMD=(python3 -m pantheon.execution wrapper)
+SRC_FILE="$ROOT/pantheon/execution.py"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 PASS=0
 FAIL=0
@@ -48,41 +26,24 @@ fail() { echo "FAIL $1"; FAIL=$((FAIL + 1)); }
 
 section() { echo; echo "== $1 =="; }
 
-section "Wrapper implementation itself ($IMPL)"
+section "Wrapper implementation itself"
 
-if [[ "$IMPL" == "bash" ]]; then
-  if [[ -f "$WRAPPER" ]]; then
-    pass "cli/lib/pantheon-git-readonly.sh exists"
-  else
-    fail "cli/lib/pantheon-git-readonly.sh MISSING — cannot run any further checks"
-    echo
-    echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
-    exit 1
-  fi
-
-  if [[ -x "$WRAPPER" ]]; then
-    pass "cli/lib/pantheon-git-readonly.sh is executable"
-  else
-    fail "cli/lib/pantheon-git-readonly.sh is NOT executable"
-  fi
+if [[ -f "$SRC_FILE" ]]; then
+  pass "pantheon/execution.py exists"
 else
-  if [[ -f "$SRC_FILE" ]]; then
-    pass "pantheon/execution.py exists"
-  else
-    fail "pantheon/execution.py MISSING — cannot run any further checks"
-    echo
-    echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
-    exit 1
-  fi
+  fail "pantheon/execution.py MISSING — cannot run any further checks"
+  echo
+  echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
+  exit 1
+fi
 
-  if python3 -c "import pantheon.execution" >/dev/null 2>&1; then
-    pass "pantheon.execution is importable (python -m pantheon.execution wrapper ... is a valid CLI target)"
-  else
-    fail "pantheon.execution is NOT importable — cannot run any further checks"
-    echo
-    echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
-    exit 1
-  fi
+if python3 -c "import pantheon.execution" >/dev/null 2>&1; then
+  pass "pantheon.execution is importable (python -m pantheon.execution wrapper ... is a valid CLI target)"
+else
+  fail "pantheon.execution is NOT importable — cannot run any further checks"
+  echo
+  echo "git-readonly-wrapper fixtures: $PASS passed, $FAIL failed"
+  exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -692,27 +653,14 @@ rm -rf "$BOUNDARY_REPO"
 # ---------------------------------------------------------------------------
 section "GIT_REDIRECT_STDOUT / GIT_REDIRECT_STDERR (Git for Windows sinks — structural + platform note)"
 
-if [[ "$IMPL" == "bash" ]]; then
-  # The unset statement spans multiple lines via trailing backslash continuations, so join them
-  # into one logical line first rather than requiring both variable names on the same physical
-  # line.
-  WRAPPER_JOINED="$(sed -e ':a' -e 'N' -e '$!ba' -e 's/\\\n[[:space:]]*/ /g' "$SRC_FILE")"
-  if grep -qE 'unset[^#]*GIT_REDIRECT_STDOUT' <<<"$WRAPPER_JOINED" && \
-     grep -qE 'unset[^#]*GIT_REDIRECT_STDERR' <<<"$WRAPPER_JOINED"; then
-    pass "wrapper source scrubs both GIT_REDIRECT_STDOUT and GIT_REDIRECT_STDERR in its unset block"
-  else
-    fail "wrapper source does NOT scrub GIT_REDIRECT_STDOUT/GIT_REDIRECT_STDERR — issue #7 item 2 unaddressed"
-  fi
+# Python's _forced_env() builds the subprocess environment as a fresh dict, key by key — there
+# is no "unset" statement to grep for; the structural proof is instead that GIT_REDIRECT_STDOUT/
+# GIT_REDIRECT_STDERR are never among the keys it explicitly sets (neutralization by omission —
+# see pantheon/execution.py's own module docstring, EXEC/WRITE-SURFACE MATRIX).
+if grep -qE 'env\["GIT_REDIRECT_ST(DOUT|DERR)"\]' "$SRC_FILE"; then
+  fail "pantheon/execution.py explicitly sets a GIT_REDIRECT_STDOUT/STDERR env key — issue #7 item 2 regression (these must stay absent by construction, never forwarded)"
 else
-  # Python's _forced_env() builds the subprocess environment as a fresh dict, key by key — there
-  # is no "unset" statement to grep for; the structural proof is instead that GIT_REDIRECT_STDOUT/
-  # GIT_REDIRECT_STDERR are never among the keys it explicitly sets (neutralization by omission —
-  # see pantheon/execution.py's own module docstring, EXEC/WRITE-SURFACE MATRIX).
-  if grep -qE 'env\["GIT_REDIRECT_ST(DOUT|DERR)"\]' "$SRC_FILE"; then
-    fail "pantheon/execution.py explicitly sets a GIT_REDIRECT_STDOUT/STDERR env key — issue #7 item 2 regression (these must stay absent by construction, never forwarded)"
-  else
-    pass "pantheon/execution.py never sets GIT_REDIRECT_STDOUT/GIT_REDIRECT_STDERR (neutralized by omission — _forced_env() builds a fresh dict, not a copy of os.environ)"
-  fi
+  pass "pantheon/execution.py never sets GIT_REDIRECT_STDOUT/GIT_REDIRECT_STDERR (neutralized by omission — _forced_env() builds a fresh dict, not a copy of os.environ)"
 fi
 
 REDIRECT_REPO="$(mktemp -d)"
@@ -785,18 +733,10 @@ else
   fail "wrapper-run 'show HEAD:big.txt' against a partial clone GREW .git/objects ($before_wrap -> $after_wrap) — GIT_NO_LAZY_FETCH regression"
 fi
 
-if [[ "$IMPL" == "bash" ]]; then
-  if grep -q '^export GIT_NO_LAZY_FETCH=1$' "$SRC_FILE"; then
-    pass "wrapper source forces 'export GIT_NO_LAZY_FETCH=1' in its environment block"
-  else
-    fail "wrapper source does NOT force GIT_NO_LAZY_FETCH=1 anywhere — issue #7 item 1 unaddressed"
-  fi
+if grep -qF 'env["GIT_NO_LAZY_FETCH"] = "1"' "$SRC_FILE"; then
+  pass "pantheon/execution.py's _forced_env() forces GIT_NO_LAZY_FETCH=1 unconditionally"
 else
-  if grep -qF 'env["GIT_NO_LAZY_FETCH"] = "1"' "$SRC_FILE"; then
-    pass "pantheon/execution.py's _forced_env() forces GIT_NO_LAZY_FETCH=1 unconditionally"
-  else
-    fail "pantheon/execution.py does NOT force GIT_NO_LAZY_FETCH=1 anywhere — issue #7 item 1 unaddressed"
-  fi
+  fail "pantheon/execution.py does NOT force GIT_NO_LAZY_FETCH=1 anywhere — issue #7 item 1 unaddressed"
 fi
 
 rm -rf "$LAZY_ORIGIN" "$LAZY_CLONE_RAW" "$LAZY_CLONE_WRAP"
@@ -813,38 +753,36 @@ rm -rf "$LAZY_ORIGIN" "$LAZY_CLONE_RAW" "$LAZY_CLONE_WRAP"
 # lookup at all — `_git_executable()` resolves ONLY from TRUSTED_GIT_DIRS, a fixed list of system
 # directories a PR's own tracked content can never write to.
 # ---------------------------------------------------------------------------
-if [[ "$IMPL" == "python" ]]; then
-  section "Untrusted-checkout PATH-injection (Codex P1 round 2 — an absolute-but-untrusted PATH entry)"
+section "Untrusted-checkout PATH-injection (Codex P1 round 2 — an absolute-but-untrusted PATH entry)"
 
-  PATHINJ_REPO="$(mktemp -d)"
-  mkdir -p "$PATHINJ_REPO/bin"
-  git -C "$PATHINJ_REPO" init -q
-  git -C "$PATHINJ_REPO" config user.email "test@example.com"
-  git -C "$PATHINJ_REPO" config user.name "test"
-  echo "a" > "$PATHINJ_REPO/f.txt"
-  git -C "$PATHINJ_REPO" add -A
-  git -C "$PATHINJ_REPO" commit -q -m "first"
+PATHINJ_REPO="$(mktemp -d)"
+mkdir -p "$PATHINJ_REPO/bin"
+git -C "$PATHINJ_REPO" init -q
+git -C "$PATHINJ_REPO" config user.email "test@example.com"
+git -C "$PATHINJ_REPO" config user.name "test"
+echo "a" > "$PATHINJ_REPO/f.txt"
+git -C "$PATHINJ_REPO" add -A
+git -C "$PATHINJ_REPO" commit -q -m "first"
 
-  PATHINJ_MARKER="$(mktemp -u)"
-  rm -f "$PATHINJ_MARKER"
-  cat > "$PATHINJ_REPO/bin/git" <<EOF
+PATHINJ_MARKER="$(mktemp -u)"
+rm -f "$PATHINJ_MARKER"
+cat > "$PATHINJ_REPO/bin/git" <<EOF
 #!/bin/sh
 touch "$PATHINJ_MARKER"
 exit 99
 EOF
-  chmod +x "$PATHINJ_REPO/bin/git"
+chmod +x "$PATHINJ_REPO/bin/git"
 
-  # Negative control: RAW PATH resolution (the exact mechanism a bare shutil.which("git") or a
-  # shell's own command lookup uses) DOES find the PR-committed impostor when its absolute
-  # directory is prepended to PATH — proving the fixture is live, and reproducing exactly what
-  # round 1's "reject relative, accept any absolute" fix remained vulnerable to.
-  rm -f "$PATHINJ_MARKER"
-  raw_which_out="$(cd "$PATHINJ_REPO" && PATH="$PATHINJ_REPO/bin:$PATH" command -v git)"
-  if [[ "$raw_which_out" == "$PATHINJ_REPO/bin/git" ]]; then
-    pass "negative control: raw PATH resolution (command -v git) DOES select the PR-committed impostor when its absolute dir is prepended to PATH — fixture is live"
-  else
-    fail "negative control FAILED: raw PATH resolution did not select the impostor (got '$raw_which_out') — this fixture is not exercising anything"
-  fi
+# Negative control: RAW PATH resolution (the exact mechanism a bare shutil.which("git") or a
+# shell's own command lookup uses) DOES find the PR-committed impostor when its absolute
+# directory is prepended to PATH — proving the fixture is live, and reproducing exactly what
+# round 1's "reject relative, accept any absolute" fix remained vulnerable to.
+rm -f "$PATHINJ_MARKER"
+raw_which_out="$(cd "$PATHINJ_REPO" && PATH="$PATHINJ_REPO/bin:$PATH" command -v git)"
+if [[ "$raw_which_out" == "$PATHINJ_REPO/bin/git" ]]; then
+  pass "negative control: raw PATH resolution (command -v git) DOES select the PR-committed impostor when its absolute dir is prepended to PATH — fixture is live"
+else
+  fail "negative control FAILED: raw PATH resolution did not select the impostor (got '$raw_which_out') — this fixture is not exercising anything"
 
   # The wrapper itself must NOT execute the impostor (marker absent) and must still successfully
   # run the real git (exit 0, real output) — TRUSTED_GIT_DIRS is consulted instead of PATH.

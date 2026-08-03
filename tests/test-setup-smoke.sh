@@ -71,7 +71,7 @@ else
   fail "tests/test-state-persistence-python.sh"
 fi
 
-if PANTHEON_EXECUTION_IMPL=python bash "$ROOT/tests/test-git-readonly-wrapper.sh"; then
+if bash "$ROOT/tests/test-git-readonly-wrapper.sh"; then
   pass "tests/test-git-readonly-wrapper.sh (pantheon.execution)"
 else
   fail "tests/test-git-readonly-wrapper.sh (pantheon.execution)"
