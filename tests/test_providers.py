@@ -1,6 +1,5 @@
 """tests/test_providers.py — pytest unit layer for pantheon.providers' argv-construction,
-PATH-resolution, environment-construction, and timeout/process-group seams
-.
+PATH-resolution, environment-construction, and timeout/process-group seams.
 
 pantheon.providers has NO dedicated black-box fixture suite (a disclosed, pre-existing gap — the
 retired bash lanes never had a test-providers.sh either), so this file is the ONLY

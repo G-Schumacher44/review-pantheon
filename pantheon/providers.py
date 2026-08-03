@@ -274,24 +274,24 @@ _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 # two GitHub Action surfaces already use it; this module's own `_claude()` now does too.
 #
 # THE SCHEMA MIRRORS THE DECISION SURFACE ONLY — it must never be stricter than
-# `pantheon.verdict.decide()`, or it turns a verdict the binding contract ACCEPTS into UNVERIFIED
-# (fail-closed in the wrong direction: a real, reviewable result reported as NOT GATED). A live
-# Two successive live Codex reviews on PR #28 caught this, and the second is the instructive one.
-# Round 1: `line` was typed `integer` with all five display fields `required`, so a model emitting
-# `"line": "section X"` — which `pantheon.render` coerces to `"?"` and `decide()` accepts as green
-# — was rejected before the decider ever saw it. Round 2: loosening those fields to `string|null`
-# was STILL stricter than the decider, which accepts objects, arrays, booleans and numbers there
-# (verified directly, not assumed — see tests/test_providers.py's companion test). A half-measure
-# satisfies the letter of "loosened" while leaving the stated guarantee false.
-# So: STRICT on what decide() branches on (agent/verdict/has_blocker/findings + severity), and the
-# five display fields DESIGN.md's "The display surface — deliberately NOT schema-validated"
-# section reserves for the render layer are left UNCONSTRAINED, accepting every JSON type. The
-# top-level `required` list mirrors `pantheon.verdict.REQUIRED_KEYS` exactly.
+# `pantheon.verdict.decide()`, or a verdict the binding contract ACCEPTS becomes UNVERIFIED
+# (fail-closed in the WRONG direction: a real, reviewable result reported as NOT GATED). So it is
+# strict on what decide() branches on (agent/verdict/has_blocker/findings + severity) and permits
+# every JSON type on the five display fields, which decide() ignores and the render layer
+# sanitizes. DESIGN.md's "Verdict contract" owns the full rationale and the incident history —
+# this is the pointer, not a second copy of the story.
+#
+# The display fields stay DECLARED (with a permissive type union) rather than omitted from
+# `properties` entirely: omitting them would express "unconstrained" more tersely, but declaring
+# them is what tells the model these keys are expected at all. A finding with no `file`/`line` is
+# a much weaker finding, and the schema is the strongest shape signal the generation gets.
+# Permissive-but-declared keeps the guidance without reintroducing the strictness.
 #
 # THREE copies, not two: this constant, `action.yml`'s `JSON_SCHEMA`, and `action/review.yml`'s
-# INLINE `--json-schema '...'` argument, which has no variable name at all — a grep for
-# `JSON_SCHEMA` finds two and reports the third absent, which is how it drifted a revision behind.
-# The byte-identity test searches by content for that reason. Change one, change all three.
+# INLINE `--json-schema '...'` argument, which has NO variable name — a grep for `JSON_SCHEMA`
+# finds two and reports the third absent, which is how it once drifted a revision behind. The
+# byte-identity test searches by content for that reason. Change one, change all three (#32
+# tracks deriving them from this constant instead).
 VERDICT_JSON_SCHEMA = (
     '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},'
     '"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object",'
