@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from pantheon import execution, jqjson, providers
+from pantheon import execution, jqjson, providers, verdict
 
 
 @pytest.fixture()
@@ -45,22 +45,33 @@ class _FakeProc:
     `TimeoutExpired` once and then return leftover output on retry, mirroring the real
     post-kill `communicate()` call `_run()` makes). `_run()` runs Popen in BINARY mode (no
     `text=True` — see that function's own docstring for why), so `communicate()` must return
-    bytes here too, matching the real contract this fake stands in for."""
+    bytes here too, matching the real contract this fake stands in for.
+
+    `stderr` (default "") is the SECOND element `communicate()` returns — real production code
+    (`_run()`) only ever consults it when it passed `merge_stderr=False` (`_claude()`'s own
+    call); every other lane's call site force-empties it regardless of what this fake returns
+    here, matching a real `stderr=subprocess.STDOUT` Popen call (whose `communicate()` always
+    returns `None` for the second element) closely enough for that path's own tests, which never
+    inspect it."""
 
     def __init__(
         self,
         argv,
         returncode: int = 0,
         stdout: str = "",
+        stderr: str = "",
         raise_timeout_once: bool = False,
         leftover_after_timeout: str = "",
+        leftover_stderr_after_timeout: str = "",
     ) -> None:
         self.argv = argv
         self.pid = 4242
         self.returncode = returncode
         self._stdout = stdout.encode("utf-8")
+        self._stderr = stderr.encode("utf-8")
         self._raise_timeout_once = raise_timeout_once
         self._leftover_after_timeout = leftover_after_timeout.encode("utf-8")
+        self._leftover_stderr_after_timeout = leftover_stderr_after_timeout.encode("utf-8")
         self.communicate_calls = 0
 
     def communicate(self, input=None, timeout=None):  # noqa: A002 - matches subprocess.Popen's own signature
@@ -68,8 +79,8 @@ class _FakeProc:
         if self._raise_timeout_once and self.communicate_calls == 1:
             raise subprocess.TimeoutExpired(cmd=self.argv, timeout=timeout)
         if self._raise_timeout_once:
-            return self._leftover_after_timeout, None
-        return self._stdout, None
+            return self._leftover_after_timeout, self._leftover_stderr_after_timeout
+        return self._stdout, self._stderr
 
 
 def _install_fake_popen(monkeypatch, **fake_proc_kwargs):
@@ -114,38 +125,37 @@ def test_claude_argv_shape(monkeypatch, prompt_file) -> None:
 
 
 # ---------------------------------------------------------------------------------------------
-# --bare's conditional presence — a P1 finding from a live Codex review on this PR: an earlier
-# version passed --bare unconditionally, which (per Claude Code's own official headless docs)
-# ALSO skips OAuth/system-keychain login — a real usability regression for the CLI lane's
-# documented primary auth path (docs/SETUP.md's Way C, `claude auth login`, no env var at all).
-# --bare must appear only when an explicit credential env var is present.
+# --bare is DROPPED entirely (issue #26 item 3 — see pantheon.providers._claude's own docstring
+# for the full history: was conditional on an explicit credential for a time, removed once this
+# lane also started passing --json-schema, because this repo's own committed history already
+# shows that flag pair breaking structured_output on the sibling Action lane, and re-verifying
+# compatibility on THIS lane's own invocation shape needed a credential unavailable in the
+# environment the removal was authored in). These fixtures lock in "never present, regardless of
+# credential" — the inverse of what this section used to assert.
 # ---------------------------------------------------------------------------------------------
 
 
-def test_claude_argv_includes_bare_when_explicit_api_key_present(monkeypatch, prompt_file) -> None:
+def test_claude_argv_never_includes_bare_with_explicit_api_key_present(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     captured = _install_fake_popen(monkeypatch)
 
     providers.provider_run("claude", "", prompt_file, "")
-    assert "--bare" in captured["argv"]
+    assert "--bare" not in captured["argv"]
 
 
-def test_claude_argv_includes_bare_when_explicit_oauth_token_present(monkeypatch, prompt_file) -> None:
+def test_claude_argv_never_includes_bare_with_explicit_oauth_token_present(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test-456")
     captured = _install_fake_popen(monkeypatch)
 
     providers.provider_run("claude", "", prompt_file, "")
-    assert "--bare" in captured["argv"]
+    assert "--bare" not in captured["argv"]
 
 
-def test_claude_argv_omits_bare_when_no_explicit_credential_present(monkeypatch, prompt_file) -> None:
-    # The locally-authenticated-session case the Codex finding names: no explicit token env var
-    # (e.g. `claude auth login`'s stored keychain credential instead) -- --bare must be absent so
-    # Claude Code's own normal (keychain-capable) startup still works.
+def test_claude_argv_never_includes_bare_with_no_credential_present(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
@@ -155,44 +165,36 @@ def test_claude_argv_omits_bare_when_no_explicit_credential_present(monkeypatch,
     assert "--bare" not in captured["argv"]
 
 
-def test_claude_cwd_stays_neutral_regardless_of_bare_flag_presence(monkeypatch, prompt_file) -> None:
-    # "Prove both directions": making --bare conditional (the usability fix above) must NOT
-    # reopen CRITICAL-1's own vulnerability (a provider's startup-time config/MCP/hooks
-    # auto-discovery reaching the PR checkout). The neutral cwd is layer 1 of that fix and is
-    # UNCONDITIONAL -- it does not depend on whether --bare fires. Proven here by checking the
-    # actual Popen cwd kwarg (not just the argv) across both the with-credential and
-    # without-credential cases: in neither case does cwd ever become repo_root.
+def test_claude_cwd_stays_neutral_regardless_of_credential_presence(monkeypatch, prompt_file) -> None:
+    # The neutral cwd (CRITICAL-1's own PRIMARY, unconditional control) never depended on --bare
+    # in the first place, and --bare is gone entirely now -- proven here by checking the actual
+    # Popen cwd kwarg regardless of whether a credential env var happens to be set.
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
-
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    captured_no_bare = _install_fake_popen(monkeypatch)
+    captured = _install_fake_popen(monkeypatch)
     providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
-    assert "--bare" not in captured_no_bare["argv"]
-    assert captured_no_bare["kwargs"]["cwd"] == "/some/scratch/dir"
-    assert captured_no_bare["kwargs"]["cwd"] != "/some/repo/root"
+    assert captured["kwargs"]["cwd"] == "/some/scratch/dir"
+    assert captured["kwargs"]["cwd"] != "/some/repo/root"
 
 
 # ---------------------------------------------------------------------------------------------
 # CLAUDE_CONFIG_DIR reopening CRITICAL-1 through the provider's ENV (adversarial review, round 6,
-# Codex P1). The --bare fix above (previous section) closed CRITICAL-1's cwd door; this section
-# proves the (separate) env door is closed too, on BOTH the --bare (explicit token) and no-bare
-# (stored keychain) paths -- neither "prove both directions" fixture above actually exercised
-# CLAUDE_CONFIG_DIR at all, which is exactly how this reopened without either of them catching it.
+# Codex P1) -- the containment property (pantheon.providers._safe_path_env_value) is independent
+# of --bare and stays proven here regardless of credential presence, now that --bare itself is
+# gone (issue #26 item 3).
 # ---------------------------------------------------------------------------------------------
 
 
-def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root_with_bare(
+def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root(
     monkeypatch, prompt_file, tmp_path
 ) -> None:
-    # The --bare (explicit-token) path: an attacker sets CLAUDE_CONFIG_DIR (via ANY mechanism
-    # that can influence this process's ambient env before it runs -- a repo-local .envrc, an
-    # environment-setting CI step reading repo content) to a directory inside the checkout
-    # containing a marker MCP-server/hook config. That marker directory's PATH must never reach
-    # the subprocess env at all -- if it did, Claude Code's own normal startup would load it
-    # (config/MCP/hook auto-discovery happens before --allowedTools's reach), even with --bare
-    # present, since --bare only skips OAuth/keychain login, not an EXPLICIT CLAUDE_CONFIG_DIR
-    # override.
+    # An attacker sets CLAUDE_CONFIG_DIR (via ANY mechanism that can influence this process's
+    # ambient env before it runs -- a repo-local .envrc, an environment-setting CI step reading
+    # repo content) to a directory inside the checkout containing a marker MCP-server/hook
+    # config. That marker directory's PATH must never reach the subprocess env at all -- if it
+    # did, Claude Code's own normal startup would load it (config/MCP/hook auto-discovery happens
+    # before --allowedTools's reach).
     repo_root = tmp_path / "checkout"
     repo_root.mkdir()
     marker_config_dir = repo_root / ".claude-hijacked"
@@ -209,45 +211,15 @@ def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_r
         "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
     )
 
-    assert "--bare" in captured["argv"]  # still the credential-present path
+    assert "--bare" not in captured["argv"]
     env = captured["kwargs"]["env"]
     assert "CLAUDE_CONFIG_DIR" not in env, "the marker config directory's path must never reach the subprocess env"
 
 
-def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root_without_bare(
-    monkeypatch, prompt_file, tmp_path
-) -> None:
-    # The no-bare (stored-keychain-session) path -- the coordinator's own naming of this as the
-    # door CRITICAL-1's --bare fix correctly left open (for usability) but that a blindly-
-    # forwarded CLAUDE_CONFIG_DIR reopened anyway, --bare or not.
-    repo_root = tmp_path / "checkout"
-    repo_root.mkdir()
-    marker_config_dir = repo_root / ".claude-hijacked"
-    marker_config_dir.mkdir()
-    (marker_config_dir / "settings.json").write_text('{"hooks": {"marker": "FIRED"}}')
-
-    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(marker_config_dir))
-    captured = _install_fake_popen(monkeypatch)
-
-    providers.provider_run(
-        "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
-    )
-
-    assert "--bare" not in captured["argv"]  # still the stored-keychain-session path
-    env = captured["kwargs"]["env"]
-    assert "CLAUDE_CONFIG_DIR" not in env, "the marker config directory's path must never reach the subprocess env"
-
-
-def test_claude_env_still_forwards_a_legitimate_claude_config_dir_without_bare(
-    monkeypatch, prompt_file, tmp_path
-) -> None:
-    # Regression guard (fixture (c) -- "don't re-break what you just fixed"): a real local
-    # multi-account CLAUDE_CONFIG_DIR override that resolves OUTSIDE any trusted root must still
-    # reach the subprocess env, on the stored-keychain (no --bare) path an operator actually uses
-    # day to day.
+def test_claude_env_still_forwards_a_legitimate_claude_config_dir(monkeypatch, prompt_file, tmp_path) -> None:
+    # Regression guard -- "don't re-break what you just fixed": a real local multi-account
+    # CLAUDE_CONFIG_DIR override that resolves OUTSIDE any trusted root must still reach the
+    # subprocess env.
     repo_root = tmp_path / "checkout"
     repo_root.mkdir()
     legitimate_config_dir = tmp_path / "not-the-checkout" / ".claude-alt-account"
@@ -266,13 +238,6 @@ def test_claude_env_still_forwards_a_legitimate_claude_config_dir_without_bare(
     assert "--bare" not in captured["argv"]
     env = captured["kwargs"]["env"]
     assert env["CLAUDE_CONFIG_DIR"] == str(legitimate_config_dir)
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
-    captured_with_bare = _install_fake_popen(monkeypatch)
-    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
-    assert "--bare" in captured_with_bare["argv"]
-    assert captured_with_bare["kwargs"]["cwd"] == "/some/scratch/dir"
-    assert captured_with_bare["kwargs"]["cwd"] != "/some/repo/root"
 
 
 def test_claude_omits_model_flag_when_empty(monkeypatch, prompt_file) -> None:
@@ -368,6 +333,78 @@ def test_extract_structured_output_unit() -> None:
     assert providers._extract_structured_output('{"no_such_key":true}') == '{"no_such_key":true}'
     assert providers._extract_structured_output("not json") == "not json"
     assert providers._extract_structured_output("[1,2,3]") == "[1,2,3]"
+
+
+def test_extract_structured_output_isolates_the_envelope_from_leading_noise() -> None:
+    # A leading warning/diagnostic line (from a MERGED stream, or a stray banner some CLI
+    # version might print to stdout) must not defeat the extraction -- verdict.extract_last_json
+    # is a rightmost-parseable-JSON-suffix scan, so leading noise is naturally skipped.
+    noisy = 'npm warn deprecated something\n{"structured_output":{"agent":"artemis","verdict":"SHIP"}}'
+    out = providers._extract_structured_output(noisy)
+    assert jqjson.loads(out) == {"agent": "artemis", "verdict": "SHIP"}
+
+
+# ---------------------------------------------------------------------------------------------
+# Streams captured SEPARATELY on the claude lane (_run's own merge_stderr=False) — a live Codex
+# review finding (P2) on this PR: a stderr diagnostic landing AFTER the JSON envelope on a
+# MERGED stream defeats verdict.extract_last_json's own trailing scan (which requires nothing
+# after the JSON object's own closing brace), discarding a valid verdict. Fixed by never merging
+# this lane's streams at all -- these fixtures prove both the wiring (the real Popen kwarg) and
+# the end-to-end behavior (a real trailing-stderr-noise scenario, verdict still parses).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_claude_popen_uses_separate_stderr_pipe_not_merged(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+
+    assert captured["kwargs"]["stderr"] is subprocess.PIPE
+    assert captured["kwargs"]["stderr"] is not subprocess.STDOUT
+
+
+def test_other_lanes_still_merge_stdout_and_stderr(monkeypatch, prompt_file) -> None:
+    # Regression-direction guard: merge_stderr=False is a claude-lane-ONLY opt-in -- every other
+    # lane keeps the ORIGINAL merged-stream contract (bash-parity, this module's own default).
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("codex"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("codex", "", prompt_file, "")
+
+    assert captured["kwargs"]["stderr"] is subprocess.STDOUT
+
+
+def test_claude_verdict_survives_a_trailing_stderr_warning_after_the_json_envelope(monkeypatch, prompt_file) -> None:
+    # THE exact scenario the Codex finding named: a successful invocation whose stderr emits a
+    # warning AFTER the valid JSON envelope was already written to stdout. With streams captured
+    # separately, that stderr content never reaches `envelope_text` at all -- the verdict must
+    # still parse and decide, not silently degrade to UNVERIFIED.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    envelope = jqjson.dumps(
+        {
+            "type": "result",
+            "is_error": False,
+            "structured_output": {
+                "agent": "artemis",
+                "verdict": "SHIP",
+                "has_blocker": False,
+                "findings": [],
+                "summary": "clean",
+            },
+        }
+    )
+    _install_fake_popen(monkeypatch, stdout=envelope, stderr="warning: some harmless deprecation notice\n")
+
+    out = providers.provider_run("claude", "", prompt_file, "")
+
+    parsed = jqjson.loads(out)
+    assert parsed["agent"] == "artemis"
+    assert parsed["verdict"] == "SHIP"
+
+    decision = verdict.decide("artemis", out)
+    assert decision["color"] == "green"
+    assert decision["reason"] == ""
 
 
 def test_codex_pipes_prompt_via_stdin(monkeypatch, prompt_file) -> None:

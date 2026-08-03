@@ -103,20 +103,20 @@ allowed ``Read`` tool call. Fixed with defense in depth, all three layers, none 
      ``pantheon.cli._build_prompt``) — exactly the design's stated intent (the wrapper is the
      ONLY sanctioned path back to the tree under ``readonly``), now actually true for the
      provider's OWN startup-time behavior too, not just its later tool calls.
-  2. **``--bare`` on the claude lane, CONDITIONALLY (the only lane with a real, documented flag
-     for this — see :func:`_claude`'s own docstring for the full conditional and why it isn't
-     unconditional).** Verified against Claude Code's current official headless docs
-     (code.claude.com/docs/en/headless): ``--bare`` "reduce[s] startup time by skipping
-     auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md" — the
-     exact five vectors this finding named, in ONE documented flag, layered on top of (never
-     instead of) the neutral-cwd fix above. A live Codex review on this PR caught that an
-     unconditional ``--bare`` is a real usability regression, not a security one: the same
-     official doc discloses it ALSO skips OAuth/system-keychain login (the CLI lane's documented
-     primary auth path, docs/SETUP.md's Way C ``claude auth login`` — no env var at all), so
-     :func:`_claude` now passes it only when an explicit ``ANTHROPIC_API_KEY``/
-     ``CLAUDE_CODE_OAUTH_TOKEN`` is present, falling back to normal (keychain-capable) startup
-     otherwise — the neutral cwd itself stays unconditional either way, so this narrows an
-     ADDITIONAL hardening layer, not the primary fix.
+  2. **``--bare`` on the claude lane — DROPPED entirely (issue #26 item 3, a live re-gate
+     finding on the same PR that added ``--json-schema``; see :func:`_claude`'s own docstring for
+     the full history).** Was CONDITIONALLY passed for a time (present only when an explicit
+     ``ANTHROPIC_API_KEY``/``CLAUDE_CODE_OAUTH_TOKEN`` was set — the documented
+     "reduce startup time by skipping auto-discovery of hooks, skills, plugins, MCP servers, auto
+     memory, and CLAUDE.md" hardening, code.claude.com/docs/en/headless), layered on top of
+     (never instead of) the neutral-cwd fix above. Removed once this lane also started passing
+     ``--json-schema``: this repo's own committed history already shows that exact flag pair
+     breaking ``structured_output`` on the sibling Action lane, and this module's own
+     "verified live, never assumed" discipline could not re-confirm compatibility on this lane's
+     own invocation shape without a credential unavailable in the environment the removal was
+     authored in — schema enforcement (item 3's whole purpose) wins over an already-disclosed
+     "genuinely redundant defense-in-depth" layer; the neutral cwd stays the PRIMARY, unconditional
+     control, unaffected either way.
      ``codex``/``gemini``/``cursor-agent`` have **no equivalent documented flag** as of this
      writing (researched against each CLI's current official docs before writing this — not
      assumed): this is a disclosed, honest residual exposure for those three best-effort lanes,
@@ -147,11 +147,9 @@ and how it's resolved.
   - **claude's startup-time config/MCP/hooks auto-discovery** — YES, the original vulnerability.
     Resolved: neutral cwd, unconditional under the ``readonly`` tier (round 1 above).
   - **claude's OAuth/system-keychain login** (``claude auth login``, docs/SETUP.md's Way C) — NO,
-    keychain auth is tied to the user account, not cwd; broken instead by ``--bare``'s OWN
-    documented side effect (skips stored-credential lookup), triggered as a consequence of this
-    fix, not a cwd dependency itself. Resolved: ``--bare`` is now conditional on an explicit
-    ``ANTHROPIC_API_KEY``/``CLAUDE_CODE_OAUTH_TOKEN`` being present (see :func:`_claude`) — absent
-    either, Claude Code's own normal (keychain-capable) startup runs instead.
+    keychain auth is tied to the user account, not cwd; moot now that ``--bare`` is dropped
+    entirely (issue #26 item 3 — see :func:`_claude`'s own docstring), so Claude Code's own
+    normal (keychain-capable) startup always runs on this lane regardless of credential source.
   - **codex's non-interactive "am I in a git repository" guard** — YES, `codex exec` refuses to
     run at all outside a git repository. Resolved: ``--skip-git-repo-check``, unconditional,
     since this lane always launches from the neutral cwd (see :func:`_codex`).
@@ -746,6 +744,7 @@ def _run(
     timeout: float | None = None,
     cwd: str | None = None,
     repo_root: str | None = None,
+    merge_stderr: bool = True,
 ) -> str:
     """Runs ``argv`` (``argv[0]`` already resolved via :func:`_resolve_cli`, never a bare command
     name left for the child's own shell/exec lookup to re-resolve) with the explicitly
@@ -756,13 +755,28 @@ def _run(
     outside ``--allowedTools``'s reach — see this module's own docstring for the full finding and
     fix). Started with ``start_new_session=True`` (POSIX) so :func:`_terminate_group` can reach the
     WHOLE process group on a timeout, not just this one PID (see this module's own docstring).
-    Merges stdout+stderr into one text stream — mirrors bash's own
+    Raises :class:`ProviderError` on a nonzero exit, a timeout, or a failure to even start the
+    process (the executable vanishing between :func:`_resolve_cli` and this call, say) — never
+    lets a raw ``subprocess.CalledProcessError``/``OSError`` escape to a caller that only knows
+    this module's own exception type.
+
+    ``merge_stderr`` (default ``True``, preserving the ORIGINAL behavior for every EXISTING call
+    site — codex/gemini/cursor all still get one merged stdout+stderr text, mirroring bash's own
     ``raw_output="$(run_with_timeout ... provider_run "$MODEL" "$prompt_file" 2>&1)"`` capture in
-    ``cli/review-gate``'s ``run_agent()``. Raises :class:`ProviderError` on a nonzero exit, a
-    timeout, or a failure to even start the process (the executable vanishing between
-    :func:`_resolve_cli` and this call, say) — never lets a raw
-    ``subprocess.CalledProcessError``/``OSError`` escape to a caller that only knows this module's
-    own exception type.
+    ``cli/review-gate``'s ``run_agent()``): a live Codex review finding (P2) on this PR's own
+    ``--json-schema`` fix (issue #26 item 3) — a stderr diagnostic line landing AFTER the claude
+    lane's own clean JSON envelope on a merged stream defeats
+    ``pantheon.verdict.extract_last_json``'s own trailing-JSON scan, which requires NOTHING after
+    the JSON object's own closing brace; a LEADING stderr line doesn't break that scan (the
+    envelope is still the rightmost, complete-with-nothing-after candidate), but a TRAILING one
+    does, discarding a perfectly valid, schema-conformant verdict. ``--output-format json`` is
+    specifically claude's own MACHINE-READABLE mode — mixing its stdout with unrelated stderr
+    diagnostics on one stream defeats that mode's whole purpose. When ``merge_stderr=False``
+    (the claude lane's own call, see :func:`_claude`), stdout and stderr are captured on TWO
+    SEPARATE pipes: only stdout is ever returned on the success path (never contaminated by a
+    stray stderr line, leading OR trailing) — a nonzero exit's :class:`ProviderError` still
+    carries BOTH streams concatenated in ``output`` (the SAME diagnostic shape every caller
+    already expects, unaffected by which mode produced it).
 
     Deliberately BINARY-mode (no ``text=True``/``encoding=``), not strict-UTF-8 text mode — a
     Codex review finding on this port's own PR: a provider CLI, or any tool subprocess IT spawns,
@@ -777,13 +791,14 @@ def _run(
     closed by construction (Python's strict decoder never runs on this path at all), not by
     adding one more ``except UnicodeDecodeError`` to the pile."""
     stdin_bytes = input_text.encode("utf-8", errors="replace") if input_text is not None else None
+    stderr_target = subprocess.STDOUT if merge_stderr else subprocess.PIPE
 
     try:
         proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE if input_text is not None else None,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=stderr_target,
             env=_provider_env(repo_root),
             cwd=cwd,
             shell=False,
@@ -793,19 +808,22 @@ def _run(
         raise ProviderError(f"failed to execute {argv[0]}: {e}") from e
 
     try:
-        stdout_bytes, _ = proc.communicate(input=stdin_bytes, timeout=timeout)
+        stdout_bytes, stderr_bytes = proc.communicate(input=stdin_bytes, timeout=timeout)
     except subprocess.TimeoutExpired:
         _terminate_group(proc)
         try:
-            leftover_bytes, _ = proc.communicate(timeout=5)
+            leftover_stdout, leftover_stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            leftover_bytes = b""
-        leftover = (leftover_bytes or b"").decode("utf-8", errors="replace")
+            leftover_stdout, leftover_stderr = b"", b""
+        leftover = (leftover_stdout or b"").decode("utf-8", errors="replace") + (leftover_stderr or b"").decode(
+            "utf-8", errors="replace"
+        )
         raise ProviderError(f"{argv[0]} timed out after {timeout}s", output=leftover) from None
 
     stdout = (stdout_bytes or b"").decode("utf-8", errors="replace")
+    stderr = (stderr_bytes or b"").decode("utf-8", errors="replace") if not merge_stderr else ""
     if proc.returncode != 0:
-        raise ProviderError(f"{argv[0]} exited {proc.returncode}", output=stdout)
+        raise ProviderError(f"{argv[0]} exited {proc.returncode}", output=stdout + stderr)
     return stdout
 
 
@@ -824,49 +842,47 @@ def _claude(
     can answer non-interactively outside a terminal; ``dontAsk`` is documented as the mode "for
     CI pipelines and scripts", auto-denying anything not pre-approved rather than hanging.
 
-    ``--bare`` — a CRITICAL fix (adversarial review), verified against Claude Code's current
-    official headless-mode docs (code.claude.com/docs/en/headless) before adding, not assumed:
-    documented to "reduce startup time by skipping auto-discovery of hooks, skills, plugins, MCP
-    servers, auto memory, and CLAUDE.md" — closing, in one flag, every one of the config-discovery
-    vectors this module's own docstring names, layered on top of (never instead of) launching from
-    a neutral ``cwd`` (see :func:`_run`'s own docstring).
+    **``--bare`` is NO LONGER PASSED, on any credential path — DROPPED, not merely made
+    conditional, as of issue #26 item 3's ``--json-schema`` addition below (a live re-gate
+    finding, Artemis P1/should_fix, on this same PR).** An EARLIER version of this lane passed
+    ``--bare`` conditionally (present only when an explicit ``ANTHROPIC_API_KEY``/
+    ``CLAUDE_CODE_OAUTH_TOKEN`` credential was set — the documented "reduce startup time by
+    skipping auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md"
+    hardening, code.claude.com/docs/en/headless, layered on top of the neutral ``cwd`` below).
+    That conditional was correct FOR ITS OWN TIME, but this repo's own committed history
+    (``DESIGN.md``'s "Security posture", the pinned SHA both Action surfaces trust) already
+    documents a LIVE, REPRODUCED failure of ``--bare`` combined with ``--json-schema``-driven
+    structured output on the sibling GitHub Action lane — a real self-hosted-gate run failed
+    both agents to UNVERIFIED with ``##[error]--json-schema was provided but Claude did not
+    return structured_output``, and ``--bare`` was removed from that lane specifically because
+    of it, permanently, never re-added. This module's own live-verification discipline could not
+    re-confirm whether the IDENTICAL combination reproduces on THIS lane's own
+    ``--output-format json`` (non-streaming) mode specifically (the Action lane's own failure was
+    observed under its different, streaming invocation shape) — no explicit
+    ``ANTHROPIC_API_KEY``/``CLAUDE_CODE_OAUTH_TOKEN`` credential was available to test with in
+    the environment this fix was authored in, and minting one (``claude setup-token``) requires
+    interactive browser auth this environment cannot complete. Given direct, first-party evidence
+    of the SAME flag pair breaking structured output once already in this repo, and given item
+    3's own reason for existing (unattended/CI runs — precisely the case an explicit credential,
+    and therefore the old conditional's own ``--bare`` trigger, implies) is exactly the scenario
+    that would silently degrade to UNVERIFIED if the conflict reproduces here too, the safe,
+    evidence-led call is: schema enforcement wins, unconditionally, and ``--bare`` is dropped
+    rather than risk defeating item 3's entire purpose on an unverified combination. This does
+    NOT reopen CRITICAL-1's own vulnerability: the neutral ``cwd`` below (layer 1 of that fix)
+    was always the PRIMARY, unconditional control — ``--bare`` was always disclosed as
+    "genuinely redundant defense-in-depth on top of that, not the primary control" (see this
+    docstring's own prior revisions in git history) — and :func:`_provider_env`'s own
+    :data:`_PATH_SHAPED_ENV_KEYS` containment check (``CLAUDE_CONFIG_DIR`` included) is
+    unaffected by ``--bare``'s presence either way. A future contributor who CAN empirically
+    re-verify ``--bare`` + ``--json-schema`` compatibility on this exact non-streaming
+    ``--output-format json`` shape (a real credential, a real live run) is the only path back to
+    re-adding it — this repo's own "verified live, not assumed" discipline applies to REMOVING a
+    control just as much as adding one, and this removal itself is exactly that: evidence-led,
+    not merely cautious.
 
-    **Passed CONDITIONALLY, only when an explicit credential is present — a P1 finding from a
-    live Codex review on this PR, correcting an earlier version's own docstring claim that
-    forwarding ``ANTHROPIC_API_KEY``/``CLAUDE_CODE_OAUTH_TOKEN`` made this "a non-issue".** That
-    claim assumed a token env var is always set; it isn't for the CLI lane's documented primary
-    auth path (docs/SETUP.md's Way C — ``claude auth login``, which stores credentials in the
-    system keychain, no env var at all). The SAME official doc that documents ``--bare`` also
-    discloses it skips OAuth/system-keychain login entirely, "only sees credentials you pass
-    explicitly" — an unconditional ``--bare`` would silently turn the CLI lane's default,
-    documented, interactively-authenticated setup into UNVERIFIED for every run, a real
-    usability regression, not a security one. Resolved by checking for an explicit credential
-    (either of the two env vars this module's own :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` already
-    forwards) before adding the flag: present -> ``--bare`` (the hardened path, appropriate for
-    unattended/CI use, which is what an explicit token implies); absent -> omit it, falling back
-    to Claude Code's own normal startup (stored/keychain auth still works, matching this lane's
-    pre-fix behavior for that one case). This does NOT reopen CRITICAL-1's own vulnerability
-    either way: the neutral ``cwd`` (layer 1 of that fix, see :func:`_run`'s own docstring) is
-    unconditional regardless of ``--bare`` — nothing repo-local exists in the scratch directory
-    for a provider's own startup-time discovery to find via cwd, credential source aside —
-    ``--bare`` is genuinely redundant defense-in-depth on top of that, not the primary control, so
-    making it conditional narrows an ADDITIONAL hardening layer, not the fix itself.
-
-    **Correction (adversarial review, round 6, Codex P1): the claim above was true for the CWD
-    door, but incomplete — CRITICAL-1 reopened through a SECOND, separate door this ``--bare``
-    conditionality never touched: the provider's own ENV.** Omitting ``--bare`` on the
-    stored-keychain path (correct, for local sessions — see above) still left
-    :func:`_provider_env` forwarding ``CLAUDE_CONFIG_DIR`` from ambient env unconditionally; a
-    hostile checkout's own env-loading mechanism pointing that AT a directory inside the checkout
-    got a normal Claude startup against attacker-controlled config (MCP servers, hooks) —
-    identical exfiltration, different door, ``--bare`` or not (an EXPLICIT ``CLAUDE_CONFIG_DIR``
-    override isn't something ``--bare``'s own OAuth/keychain-skip behavior touches either way).
-    Closed at :func:`_provider_env` itself, not here: every PATH-SHAPED key in
-    :data:`_PATH_SHAPED_ENV_KEYS` (``CLAUDE_CONFIG_DIR`` included) is now validated to resolve
-    outside the repo root/cwd before being forwarded, and ``HOME`` is never read from ambient env
-    at all — see that function's own docstring. Fixture proof, both ``--bare`` and no-``--bare``:
-    tests/test_providers.py's ``test_claude_env_never_forwards_a_claude_config_dir_pointed_
-    inside_the_repo_root_with_bare``/``..._without_bare``.
+    ``cwd`` is a neutral scratch directory (never the repo checkout — see :func:`_run`'s own
+    docstring for the full CRITICAL-1 finding and fix) — the unconditional, primary control this
+    whole startup-discovery vector actually closes.
 
     **``--json-schema``/``--output-format json`` — issue #26 item 3.** Every other lane
     (codex/gemini/cursor, none of which expose an equivalent flag as of this writing — see this
@@ -876,28 +892,33 @@ def _claude(
     ``--json-schema <schema>``, and the two GitHub Action surfaces (``action.yml``,
     ``action/review.yml``) already pass an identical schema via ``claude_args`` and read the
     result from ``structured_output``. Confirmed live (this fix's own investigation, a real
-    ``claude -p ... --json-schema '<schema>' --output-format json`` invocation): with both flags,
-    stdout is ONE JSON envelope object carrying a ``structured_output`` key holding the
-    schema-validated object itself — :func:`_extract_structured_output` (see its own docstring)
-    turns that envelope into the same plain, trailing-JSON-object text shape
+    ``claude -p ... --json-schema '<schema>' --output-format json`` invocation, WITHOUT
+    ``--bare``): stdout is ONE JSON envelope object carrying a ``structured_output`` key holding
+    the schema-validated object itself — :func:`_extract_structured_output` (see its own
+    docstring) turns that envelope into the same plain, trailing-JSON-object text shape
     ``pantheon.verdict.decide()`` already expects from every OTHER lane, so that decision function
     itself needed no change at all: both runtimes (this CLI lane and the Action's own
     ``structured_output``-driven lane) now enforce the IDENTICAL schema and feed the IDENTICAL
-    decision function, whether or not either enforces it at the CLI-flag level."""
+    decision function, whether or not either enforces it at the CLI-flag level.
+
+    **Streams captured SEPARATELY (``merge_stderr=False``) — a live Codex review finding (P2) on
+    this same PR.** A merged stdout+stderr stream (this module's own DEFAULT, still used by every
+    OTHER lane) lets a harmless stderr diagnostic landing AFTER the JSON envelope defeat
+    :func:`pantheon.verdict.extract_last_json`'s own trailing-scan, discarding a perfectly valid
+    verdict — see :func:`_run`'s own docstring for the full finding and fix; this lane is the
+    ONE caller that opts into the separated-stream path, since it's the only lane whose output is
+    a single, machine-readable JSON envelope in the first place."""
     claude_bin = _resolve_cli("claude", repo_root)
     if claude_bin is None:
         raise ProviderError("'claude' CLI not found on PATH")
 
     prompt = _read_prompt(prompt_file)
     tools = allowed_tools or default_allowed_tools(repo_root)
-    argv = [claude_bin]
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        argv.append("--bare")
-    argv += ["-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
+    argv = [claude_bin, "-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
     if model:
         argv += ["--model", model]
     argv += ["--output-format", "json", "--json-schema", VERDICT_JSON_SCHEMA]
-    envelope = _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root)
+    envelope = _run(argv, timeout=timeout, cwd=neutral_cwd, repo_root=repo_root, merge_stderr=False)
     return _extract_structured_output(envelope)
 
 
