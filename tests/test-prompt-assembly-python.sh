@@ -197,7 +197,7 @@ ctx = GateContext(
     rules_file='$4',
     spec_file='$5',
 )
-path = _build_prompt(ctx, '$3', '$WORKDIR_P3')
+path = _build_prompt(ctx, '$3', '$WORKDIR_P3', '$WORKDIR_P3')
 print(path, end='')
 "
 }
