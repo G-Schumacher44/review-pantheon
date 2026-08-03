@@ -756,11 +756,17 @@ def _agent_data_from_env(agent: str) -> AgentRenderData:
 def render_from_env(head_sha: str, agents: list[str]) -> str:
     """Reads the bash-contract env vars (``<NAME>_COLOR`` etc.) for each agent in ``agents`` and
     renders the comment — the env-var-driven equivalent of calling ``render_comment`` directly
-    with a hand-built ``agent_data`` mapping. Also reads ``PANTHEON_REPO_ROOT`` (the same env var
-    name ``pantheon.execution``'s wrapper CLI reads for the identical concept — see that module's
-    ``_wrapper_cli`` docstring) so this black-box CLI seam can exercise :func:`render_comment`'s
-    ``repo_root``-redaction fix (see :func:`redact_paths`) too, not just its own in-process
-    API — `tests/test-render-comment-python.sh`'s own fixture drives this env var."""
+    with a hand-built ``agent_data`` mapping. Also reads ``PANTHEON_REPO_ROOT`` — an env var this
+    black-box CLI seam introduces SOLELY to let this function exercise :func:`render_comment`'s
+    ``repo_root``-redaction fix (see :func:`redact_paths`) from the outside, not something any
+    other part of this port reads. (Corrected — adversarial review, round 8, Apollo note: an
+    earlier version of this docstring claimed it was "the same env var name
+    ``pantheon.execution``'s wrapper CLI reads for the identical concept," which was never true —
+    ``pantheon.execution._wrapper_cli`` resolves the real repo root via a ``--repo-root <path>``
+    CLI flag it parses from its own argv, not any environment variable; see that module's own
+    docstring and ``pantheon.cli._wrapper_invocation``, which bakes that flag into the fixed
+    Bash-tool permission prefix itself.) `tests/test-render-comment-python.sh`'s own fixture
+    drives this env var."""
     repo_root = os.environ.get("PANTHEON_REPO_ROOT") or None
     return render_comment(head_sha, agents, {a: _agent_data_from_env(a) for a in agents}, repo_root=repo_root)
 
