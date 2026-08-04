@@ -105,8 +105,10 @@ pressure-tests the plan before it's built.
 **On generative AI use.** review-pantheon is a public rebuild of a private review system the
 author already runs — ported and re-implemented from scratch for open distribution (no code
 copied over), with `DESIGN.md` as the rebuild's binding contract. Claude-based agents did the
-rebuild work, and every commit was gated by the repo's own review method (Artemis, Apollo, and a
-delivery-verify pass) before landing. Human-directed, spec-driven, self-gated.
+rebuild work. Once the gate itself was running (2026-07-31, when branch protection landed), every
+change has gone through it — Artemis and Apollo on a pull request, fail-closed, no direct pushes.
+A handful of early commits predate that and went straight to `dev`; `git log` shows which.
+Human-directed, spec-driven, self-gated.
 
 ## License
 

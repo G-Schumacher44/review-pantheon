@@ -78,6 +78,28 @@ jobs:
               print(f + ': OK')
           "
 
+      # actionlint, NOT just the YAML parse above. A pre-flip security review found
+      # action/review.yml carrying `|| "literal"` inside a `${{ }}` expression — the expression
+      # grammar accepts SINGLE-quoted literals only, so GitHub rejected the file at queue time and
+      # the vendored workflow every Way-A adopter installs reviewed exactly zero PRs. The YAML
+      # parse above could never catch it: the file IS valid YAML, and ci.yml's own header notes
+      # review.yml never runs against this repo, so nothing executed it either. A check that
+      # cannot fail for the actual failure mode is green by construction; this is the check that
+      # can. It also catches the shell-injection shape (`${{ }}` interpolated into `run:`) that
+      # the same review found on the very same lines.
+      - name: Lint the workflows with actionlint
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          # action/review.yml is a vendored workflow that lives outside .github/workflows, so
+          # actionlint's own auto-discovery does not see it — name it explicitly. Passing it as an
+          # argument is what makes this step cover the file that actually shipped broken.
+          # -ignore SC2016 ("expressions don't expand in single quotes"): informational, and every
+          # occurrence here is deliberate — single quotes are exactly how this repo keeps `$VAR`
+          # literal inside embedded python/jq snippets. Nothing else is suppressed; the expression
+          # and shell-injection classes both stay fatal.
+          ./actionlint -color -ignore 'SC2016' .github/workflows/*.yml action/review.yml
+
       - name: Run verdict-decision fixture tests
         run: bash tests/test-verdict-decision-python.sh
 

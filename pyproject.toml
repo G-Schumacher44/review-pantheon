@@ -122,6 +122,13 @@ disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
+# Makes the repo root importable so a bare `pytest -q` — the command CONTRIBUTING.md documents —
+# works on a FRESH CLONE with no `pip install -e .` first. `python -m pytest` happens to work
+# without this (it injects cwd into sys.path); bare `pytest` does not, and CI never noticed
+# because CI pip-installs the package two steps earlier. A first-time contributor following the
+# docs top to bottom got 8 collection ImportErrors on unmodified `dev`. (pytest >= 7.0, already
+# the declared minversion.)
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 # Deliberately narrow to tests/test_*.py (the pytest unit layer — jqjson matrix + pure-function

@@ -828,23 +828,43 @@ jobs:
 
       - name: Save verdict artifact
         if: always()
+        # EVERY value below travels through `env:`, never `${{ }}` inside `run:`. `top_finding`
+        # and `findings_json` are built verbatim from the MODEL'S OWN PROSE (pantheon/verdict.py's
+        # top_finding_of), and `${{ }}` is expanded by the expression engine BEFORE bash parses
+        # the script — so an interpolated value is not data, it is script text. A finding whose
+        # `issue` contained a quote and a `;` would execute on the runner, in the same job that
+        # holds CLAUDE_CODE_OAUTH_TOKEN, and could rewrite these very artifacts before upload to
+        # forge a green comment. Even an ordinary apostrophe ("doesn't", "the caller's cwd") broke
+        # the step. action.yml has always done this correctly via `env:`; this vendored copy had
+        # diverged. (Both caught by a pre-flip security review; see also the actionlint CI step,
+        # which exists so this class fails the build instead of shipping.)
         env:
           AGENT_NAME: ${{ matrix.agent }}
+          DOCS_ONLY: ${{ steps.docs-check.outputs.docs_only }}
+          DECIDED_COLOR: ${{ steps.decide.outputs.color }}
+          DECIDED_VERDICT: ${{ steps.decide.outputs.verdict }}
+          DECIDED_TOP: ${{ steps.decide.outputs.top_finding }}
+          DECIDED_FINDINGS: ${{ steps.decide.outputs.findings_json }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/verdicts"
-          if [ "$AGENT_NAME" = "apollo" ] && [ "${{ steps.docs-check.outputs.docs_only }}" = "true" ]; then
+          if [ "$AGENT_NAME" = "apollo" ] && [ "$DOCS_ONLY" = "true" ]; then
             color="yellow"; verdict="SKIPPED"; top="docs-only diff: apollo skipped by design"
             findings='{"agent":"apollo","verdict":"SKIPPED","has_blocker":false,"findings":[],"summary":"docs-only diff: apollo skipped by design"}'
           else
-            color="${{ steps.decide.outputs.color || 'unverified' }}"
-            verdict="${{ steps.decide.outputs.verdict || 'UNVERIFIED' }}"
-            top='${{ steps.decide.outputs.top_finding || "decide step did not run" }}'
-            findings='${{ steps.decide.outputs.findings_json || "{}" }}'
+            color="${DECIDED_COLOR:-}"; [ -n "$color" ] || color="unverified"
+            verdict="${DECIDED_VERDICT:-}"; [ -n "$verdict" ] || verdict="UNVERIFIED"
+            top="${DECIDED_TOP:-}"; [ -n "$top" ] || top="decide step did not run"
+            findings="${DECIDED_FINDINGS:-}"; [ -n "$findings" ] || findings='{}'
           fi
-          cat > "$RUNNER_TEMP/verdicts/${AGENT_NAME}.json" <<EOF
-          {"agent":"${AGENT_NAME}","color":"$color","verdict":"$verdict"}
-          EOF
+          # Built by json.dumps, not a hand-quoted heredoc: `verdict` is model-derived, so a quote
+          # or newline in it would otherwise emit malformed JSON that the combine step below
+          # silently reads as its `.get(...)` default -- an UNVERIFIED laundered into a default.
+          AGENT="$AGENT_NAME" COLOR="$color" VERDICT="$verdict" python3 -c '
+          import json, os
+          print(json.dumps({"agent": os.environ["AGENT"], "color": os.environ["COLOR"],
+                            "verdict": os.environ["VERDICT"]}))
+          ' > "$RUNNER_TEMP/verdicts/${AGENT_NAME}.json"
           printf '%s' "$findings" > "$RUNNER_TEMP/verdicts/${AGENT_NAME}-findings.json"
           printf '%s' "$top" > "$RUNNER_TEMP/verdicts/${AGENT_NAME}-top.txt"
 

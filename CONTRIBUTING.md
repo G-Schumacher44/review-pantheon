@@ -3,7 +3,9 @@
 ## Ground rules
 
 - **PRs only.** `dev` is the base branch and is ruleset-protected; `main` is the release branch.
-  Nobody — including the maintainer — pushes to either directly.
+  Nobody pushes to `main` directly — its ruleset admits no bypass at all. `dev` is PR-only too,
+  with an admin bypass retained as the maintainer's emergency hatch (a few commits from before
+  the ruleset landed went straight to `dev`; `git log` shows them).
 - **This repo reviews its own PRs with the same panel it ships, then a human decides.** CI's
   `composite-action-self-check` job runs a live self-test of `action.yml` against this repo's own
   PRs (Artemis + Apollo, `execution: trusted` — this repo reviewing its own PRs from its own
