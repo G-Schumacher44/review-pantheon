@@ -1007,7 +1007,11 @@ jobs:
             case "$color" in
               red) overall="red" ;;
               unverified) [ "$overall" = "red" ] || overall="unverified" ;;
-              yellow) [ "$overall" = "green" ] && overall="yellow" || true ;;
+              # `if`, not `[ ... ] && x || true`: shellcheck's SC2015 is right that A && B || C
+              # is not if-then-else — C runs whenever B fails, which is a real trap even though
+              # an assignment cannot fail here. Written plainly so the next edit to this line
+              # cannot introduce the bug the idiom invites.
+              yellow) if [ "$overall" = "green" ]; then overall="yellow"; fi ;;
             esac
 
             has_findings=false
