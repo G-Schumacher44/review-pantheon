@@ -258,8 +258,23 @@ def test_claude_falls_back_to_default_allowed_tools_when_empty(monkeypatch, prom
     providers.provider_run("claude", "", prompt_file, "")
     tools = captured["argv"][captured["argv"].index("--allowedTools") + 1]
     assert tools == providers.default_allowed_tools()
-    assert providers._WRAPPER_SCRIPT_NAME in tools
     assert tools.endswith("wrapper *)")
+
+    # `default_allowed_tools()` has TWO legitimate shapes and this test must hold for both, or a
+    # bare `git clone && pytest` (no `pip install -e .` yet) fails on a correctly-behaving tree:
+    #   - package installed  -> the hardened `pantheon-git-readonly` console script
+    #   - not installed      -> a documented, loudly-warned fallback to `python -m
+    #                           pantheon.execution wrapper`, which does NOT close the
+    #                           checkout-directory-shadowing vector
+    # Asserting only the installed form made a real environment difference look like a defect.
+    # Branch instead of skipping: skipping would drop the routing assertion entirely in the
+    # environment where the WEAKER path is the one in use, which is where it matters most.
+    # Sibling guards (test_execution.py:376, and two more in this file) use pytest.skip because
+    # those tests exercise the installed script itself and have nothing to assert without it.
+    if execution.resolve_console_script(providers._WRAPPER_SCRIPT_NAME) is not None:
+        assert providers._WRAPPER_SCRIPT_NAME in tools
+    else:
+        assert "-m pantheon.execution wrapper" in tools
 
 
 # ---------------------------------------------------------------------------------------------
