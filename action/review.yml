@@ -235,6 +235,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2153  # BASE_SHA is provided by the `env:` block on this step
+          # above — GitHub exports it before bash starts, so it is never assigned inside this
+          # script. shellcheck sees only the body, and the `local base_sha` inside
+          # pantheon_base_pinned_read below makes it guess a misspelling. The `:?` on the next
+          # line is the real guard: if the env binding is ever dropped, this dies immediately
+          # rather than base-pinning against an empty ref.
+          : "${BASE_SHA:?BASE_SHA must be set by the env: block on this step}"
 
           # ---- BEGIN inlined copy of pantheon/basepin.py's algorithm — keep in sync by hand ----
           pantheon_normalize_repo_path() {
@@ -394,6 +401,13 @@ jobs:
           AGENT_NAME: ${{ matrix.agent }}
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2153  # BASE_SHA is provided by the `env:` block on this step
+          # above — GitHub exports it before bash starts, so it is never assigned inside this
+          # script. shellcheck sees only the body, and the `local base_sha` inside
+          # pantheon_base_pinned_read below makes it guess a misspelling. The `:?` on the next
+          # line is the real guard: if the env binding is ever dropped, this dies immediately
+          # rather than base-pinning against an empty ref.
+          : "${BASE_SHA:?BASE_SHA must be set by the env: block on this step}"
 
           # ---- BEGIN inlined copy of pantheon/basepin.py's algorithm — keep in sync by hand ----
           pantheon_normalize_repo_path() {
