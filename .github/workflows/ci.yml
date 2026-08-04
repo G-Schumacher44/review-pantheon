@@ -97,14 +97,18 @@ jobs:
       # backs that promise.
       - name: Lint the workflows with actionlint
         env:
-          # Pinned, not `main`. This runs on every push/PR, and an unpinned installer from a
-          # third-party repo's mutable default branch is arbitrary code execution in this job on
-          # someone else's commit. (This repo already fails its own build if
-          # `claude-code-action` is not SHA-pinned — same standard applies to its own tooling.)
+          # Pinned to a COMMIT SHA, not `main` and not a tag. This runs on every push/PR, and an
+          # unpinned installer from a third-party repo is arbitrary code execution in this job on
+          # someone else's commit. A tag is not a pin — its owner can move it. This repo already
+          # fails its own build if `claude-code-action` is not pinned to a full 40-char SHA
+          # (tests/test-action-refs.sh), so applying a weaker standard to its own tooling was the
+          # inconsistency a pre-flip review flagged. 03d0035246f3e81f36aed592ffb4bebf33a03106 is v1.7.7,
+          # resolved via `gh api repos/rhysd/actionlint/git/ref/tags/v1.7.7`.
+          ACTIONLINT_SHA: "03d0035246f3e81f36aed592ffb4bebf33a03106"
           ACTIONLINT_VERSION: "1.7.7"
         run: |
           set -euo pipefail
-          bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
+          bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/${ACTIONLINT_SHA}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
           # action/review.yml is a vendored workflow that lives outside .github/workflows, so
           # actionlint's own auto-discovery does not see it — name it explicitly. Passing it as an
           # argument is what makes this step cover the file that actually shipped broken.

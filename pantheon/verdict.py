@@ -349,6 +349,9 @@ def emit_github_output(decision: dict) -> None:
         # invariant_fired / reason: needed by the combined-comment renderer (pantheon.render, via
         # action.yml's combine step / action/review.yml's own comment-build step) to show the
         # "stated verdict was overridden" notice when the blocker invariant fired.
+        # SAFE as a single line, and the ONLY exception: this value is a boolean literal this
+        # module computes, never model-derived. Do not copy this line as a template for a new key —
+        # anything carrying model text needs the heredoc form above, or the injection reopens.
         out.write(f"invariant_fired={'true' if decision['invariant_fired'] else 'false'}\n")
         reason = decision.get("reason") or ""
         out.write(f"reason<<{delim}\n{reason}\n{delim}\n")

@@ -91,8 +91,13 @@ provider credential arrives as the empty string and no review call is possible.
 
 What that means in practice:
 
-- The `review` job does not run on fork PRs. A separate `fork-notice` job states plainly that the
-  PR is **NOT GATED** and writes the same to the run's step summary.
+- **Vendored lane** (`action/review.yml`, Way A): the `review` job does not run on fork PRs, and a
+  separate `fork-notice` job states plainly that the PR is **NOT GATED**, in the log and in the
+  run's step summary.
+- **Published-action lane** (`action.yml`, Ways B/C): the job runs, but the action detects the
+  fork at its auth step and skips every subsequent step, emitting the same NOT GATED notice and
+  step summary. The check ends green-because-skipped rather than red-because-unauthenticated.
+  Nothing else in your workflow needs to change.
 - **A green check on a fork PR means the gate skipped, not that the change passed.** Review it
   manually. This is the one dangerous misreading, so it is stated at every surface a maintainer
   might look at.

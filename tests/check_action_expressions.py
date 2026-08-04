@@ -68,6 +68,16 @@ def _run_block_spans(text: str) -> list[tuple[int, int]]:
 
     i = 0
     while i < len(lines):
+        # SINGLE-LINE `run: cmd` counts too, not just block scalars. An earlier version of this
+        # matched only `run: |`/`run: >`, so `run: echo "${{ ... }}"` — identical risk, different
+        # YAML spelling — was never scanned, and the guard printed "clean" over six live
+        # interpolations in action.yml. A check that cannot fail for half the syntax it claims to
+        # cover is green by construction.
+        single = re.match(r"^(\s*)run:\s*(?![|>]\s*$)\S", lines[i])
+        if single:
+            spans.append((offsets[i], offsets[i] + len(lines[i]) + 1))
+            i += 1
+            continue
         m = re.match(r"^(\s*)run:\s*[|>]", lines[i])
         if not m:
             i += 1
@@ -90,9 +100,21 @@ def _line_of(text: str, index: int) -> int:
     return text.count("\n", 0, index) + 1
 
 
+def _rel(path: Path) -> str:
+    """Repo-relative path for display, tolerating a fixture file outside the repo.
+
+    Exists so this module can be exercised by its own test suite against planted-violation
+    fixtures in a tmp dir — a guard with no self-test is the shape it was written to prevent.
+    """
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def check(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
-    rel = path.relative_to(REPO_ROOT)
+    rel = _rel(path)
     findings: list[str] = []
 
     for m in EXPR.finditer(text):
@@ -138,7 +160,7 @@ def check_no_pull_request_target(path: Path) -> list[str]:
     SECURITY.md's "Fork pull requests" for the safe ``workflow_run`` pattern.
     """
     text = path.read_text(encoding="utf-8")
-    rel = path.relative_to(REPO_ROOT)
+    rel = _rel(path)
     findings: list[str] = []
     for i, line in enumerate(text.split("\n"), start=1):
         # Only actual USE counts, not the warnings in this repo telling you never to use it.
@@ -147,7 +169,7 @@ def check_no_pull_request_target(path: Path) -> list[str]:
         # does NOT skip comments: expression substitution happens before bash parses, so a value
         # containing a newline escapes the comment and becomes script. Different rule, because
         # the two are evaluated at different times.)
-        code = line.split("#", 1)[0]
+        code = re.split(r"(?:^|\s)#", line, maxsplit=1)[0]
         if "pull_request_target" not in code:
             continue
         findings.append(
@@ -172,7 +194,7 @@ def check_env_bindings(path: Path) -> list[str]:
     Checked per STEP, not per file: a sibling step having the binding proves nothing about this one.
     """
     text = path.read_text(encoding="utf-8")
-    rel = path.relative_to(REPO_ROOT)
+    rel = _rel(path)
     lines = text.split("\n")
     findings: list[str] = []
 
@@ -210,6 +232,12 @@ def main() -> int:
         all_findings.extend(check(path))
         all_findings.extend(check_env_bindings(path))
         all_findings.extend(check_no_pull_request_target(path))
+
+    # The pull_request_target prohibition is repo-wide, not surface-specific: the one-word change
+    # that voids the threat model is just as fatal in a NEW workflow file as in these two, and a
+    # guard scoped to two paths would never see it.
+    for wf in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        all_findings.extend(check_no_pull_request_target(wf))
 
     if all_findings:
         print("Action-expression guard FAILED:\n", file=sys.stderr)

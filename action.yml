@@ -8,7 +8,7 @@
 # the one implementation every lane calls), action/lib/*.sh, the JSON schema below — is read
 # from `${{ github.action_path }}`, i.e.
 # review-pantheon's own checkout as GitHub Actions pulls it for the `uses:` reference (run via
-# `PYTHONPATH="${{ github.action_path }}" python3 "$ACTION_PATH/pantheon/verdict.py"`
+# `PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py"`
 # — a `pip install` is not needed, a stdlib-only package runs straight from its own checkout).
 #
 # Deliberately NOT `python3 -m pantheon.verdict` (a Codex P1 finding on this port's own PR): `-m`
@@ -267,7 +267,10 @@ runs:
       env:
         OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
         API_KEY: ${{ inputs.anthropic_api_key }}
-        IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        # Gated on the event: off a pull_request, `github.event.pull_request` is null, so a bare
+        # inequality would report "this PR is from a fork" on a push/workflow_dispatch run with a
+        # genuinely missing secret — the same false diagnosis this whole change removes.
+        IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       run: |
         set -euo pipefail
         if [ -n "$OAUTH_TOKEN" ] && [ -n "$API_KEY" ]; then
@@ -318,6 +321,7 @@ runs:
     # step that touches either SHA in a shell command; a failure here fails the whole composite
     # action closed (no continue-on-error on this step) before anything downstream executes.
     - name: Validate PR base/head SHAs
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -336,6 +340,7 @@ runs:
 
     - name: Resolve gate configuration
       id: resolve
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         PERSONAS_PATH: ${{ inputs.personas_path }}
@@ -548,6 +553,7 @@ runs:
 
     - name: Detect docs-only diff
       id: docs-check
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -574,7 +580,7 @@ runs:
     # -------------------------------------------------------------------------------------
     - name: Build prompt (artemis)
       id: build-prompt-artemis
-      if: contains(inputs.agents, 'artemis')
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -603,7 +609,7 @@ runs:
 
     - name: Run artemis
       id: run-agent-artemis
-      if: contains(inputs.agents, 'artemis')
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -615,7 +621,7 @@ runs:
 
     - name: Save raw output (artemis)
       id: save-raw-artemis
-      if: contains(inputs.agents, 'artemis')
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -624,24 +630,24 @@ runs:
 
     - name: Decide verdict (artemis)
       id: decide-artemis
-      if: contains(inputs.agents, 'artemis')
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-      run: PYTHONPATH="${{ github.action_path }}" python3 "$ACTION_PATH/pantheon/verdict.py" artemis "$RUNNER_TEMP/artemis-raw.txt"
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" artemis "$RUNNER_TEMP/artemis-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # apollo — the docs-only exception: skips loudly instead of running (DESIGN.md)
     # -------------------------------------------------------------------------------------
     - name: Log docs-only skip (apollo)
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only == 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only == 'true') && steps.auth.outputs.gated != 'false' }}
       shell: bash
       run: echo "::notice::docs-only diff — skipping apollo loudly (nothing but docs changed)."
 
     - name: Build prompt (apollo)
       id: build-prompt-apollo
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -673,7 +679,7 @@ runs:
 
     - name: Run apollo
       id: run-agent-apollo
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -685,7 +691,7 @@ runs:
 
     - name: Save raw output (apollo)
       id: save-raw-apollo
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -694,12 +700,12 @@ runs:
 
     - name: Decide verdict (apollo)
       id: decide-apollo
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-      run: PYTHONPATH="${{ github.action_path }}" python3 "$ACTION_PATH/pantheon/verdict.py" apollo "$RUNNER_TEMP/apollo-raw.txt"
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" apollo "$RUNNER_TEMP/apollo-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # socrates / diogenes / plato — counsel agents. Not part of the default `agents` panel;
@@ -708,7 +714,7 @@ runs:
     # -------------------------------------------------------------------------------------
     - name: Build prompt (socrates)
       id: build-prompt-socrates
-      if: contains(inputs.agents, 'socrates')
+      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -737,7 +743,7 @@ runs:
 
     - name: Run socrates
       id: run-agent-socrates
-      if: contains(inputs.agents, 'socrates')
+      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -749,7 +755,7 @@ runs:
 
     - name: Save raw output (socrates)
       id: save-raw-socrates
-      if: contains(inputs.agents, 'socrates')
+      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -758,16 +764,16 @@ runs:
 
     - name: Decide verdict (socrates)
       id: decide-socrates
-      if: contains(inputs.agents, 'socrates')
+      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-      run: PYTHONPATH="${{ github.action_path }}" python3 "$ACTION_PATH/pantheon/verdict.py" socrates "$RUNNER_TEMP/socrates-raw.txt"
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" socrates "$RUNNER_TEMP/socrates-raw.txt"
 
     - name: Build prompt (diogenes)
       id: build-prompt-diogenes
-      if: contains(inputs.agents, 'diogenes')
+      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -796,7 +802,7 @@ runs:
 
     - name: Run diogenes
       id: run-agent-diogenes
-      if: contains(inputs.agents, 'diogenes')
+      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -808,7 +814,7 @@ runs:
 
     - name: Save raw output (diogenes)
       id: save-raw-diogenes
-      if: contains(inputs.agents, 'diogenes')
+      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -817,16 +823,16 @@ runs:
 
     - name: Decide verdict (diogenes)
       id: decide-diogenes
-      if: contains(inputs.agents, 'diogenes')
+      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-      run: PYTHONPATH="${{ github.action_path }}" python3 "$ACTION_PATH/pantheon/verdict.py" diogenes "$RUNNER_TEMP/diogenes-raw.txt"
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" diogenes "$RUNNER_TEMP/diogenes-raw.txt"
 
     - name: Build prompt (plato)
       id: build-prompt-plato
-      if: contains(inputs.agents, 'plato')
+      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -855,7 +861,7 @@ runs:
 
     - name: Run plato
       id: run-agent-plato
-      if: contains(inputs.agents, 'plato')
+      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -867,7 +873,7 @@ runs:
 
     - name: Save raw output (plato)
       id: save-raw-plato
-      if: contains(inputs.agents, 'plato')
+      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -876,12 +882,12 @@ runs:
 
     - name: Decide verdict (plato)
       id: decide-plato
-      if: contains(inputs.agents, 'plato')
+      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-      run: PYTHONPATH="${{ github.action_path }}" python3 "$ACTION_PATH/pantheon/verdict.py" plato "$RUNNER_TEMP/plato-raw.txt"
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" plato "$RUNNER_TEMP/plato-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # Combine + enforce — runs regardless of which/whether prior steps failed, because every
@@ -892,6 +898,7 @@ runs:
     # -------------------------------------------------------------------------------------
     - name: Build and post combined comment
       id: combine
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -930,9 +937,11 @@ runs:
         PLATO_FINDINGS: ${{ steps.decide-plato.outputs.findings_json }}
         PLATO_INVARIANT: ${{ steps.decide-plato.outputs.invariant_fired }}
         PLATO_REASON: ${{ steps.decide-plato.outputs.reason }}
-      run: bash "$ACTION_PATH/action/lib/combine_verdicts.sh" "${{ inputs.agents }}"
+        AGENTS: ${{ inputs.agents }}
+      run: bash "$ACTION_PATH/action/lib/combine_verdicts.sh" "$AGENTS"
 
     - name: Enforce gate result
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         OVERALL_COLOR: ${{ steps.combine.outputs.overall_color }}
