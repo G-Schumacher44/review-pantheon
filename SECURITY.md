@@ -86,8 +86,9 @@ the gate now says so out loud instead of failing with a misleading message.**
 
 GitHub does not expose `secrets.*` to a `pull_request` run originating from a fork. The reason is
 sound: the PR's own code executes in that job, so any credential available there would be an
-outside contributor's for the taking. Both surfaces run on `pull_request`, so on a fork the
-provider credential arrives as the empty string and no review call is possible.
+outside contributor's for the taking. The vendored workflow runs on `pull_request`; the composite action runs on whatever the
+calling workflow triggers, which for every documented install here is also `pull_request`. Either
+way, on a fork the provider credential arrives as the empty string and no review call is possible.
 
 What that means in practice:
 
@@ -101,10 +102,11 @@ What that means in practice:
 - **A green check on a fork PR means the gate skipped, not that the change passed.** Review it
   manually. This is the one dangerous misreading, so it is stated at every surface a maintainer
   might look at.
-- Consequently, do not configure this as a **required** status check on a repository that accepts
-  outside contributions until you have adopted one of the patterns below. A required check that
-  can never pass blocks every community PR, and neither the contributor nor the maintainer can
-  clear it.
+- Consequently, think twice before making this a **required** status check on a repository that
+  accepts outside contributions. It will pass on fork PRs — because it skipped — so a required
+  check does not block them; the hazard is the opposite one, that "required check green" reads as
+  "reviewed" when nothing was reviewed. If you want required-means-reviewed, adopt one of the
+  patterns below first.
 
 ### Never use `pull_request_target`
 
@@ -120,9 +122,11 @@ personas and decider, the read-only git wrapper, the argv allowlist, the neutral
 none of them can compensate for that choice, and none of them would fail if someone made it. It
 is a one-word change that silently voids the entire threat model.
 
-It is therefore enforced mechanically, not by convention: `tests/check_action_expressions.py`
-fails the build if `pull_request_target` appears in either Action surface, and CI runs it on every
-push and pull request.
+It is therefore enforced mechanically in **this** repository, not by convention:
+`tests/check_action_expressions.py` fails the build if `pull_request_target` appears in either
+Action surface or in any `.github/workflows/*.yml`, and CI runs it on every push and pull request.
+Note that `install.sh` does not vendor that guard — an adopter inherits the workflow, not this
+repo's CI enforcement, so the prohibition is yours to keep on your own fork of the setup.
 
 ### If you genuinely need fork review
 

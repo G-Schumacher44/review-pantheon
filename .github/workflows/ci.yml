@@ -220,13 +220,17 @@ jobs:
           # it still cites a stale number (exactly how the bash count drifted to 18 silently
           # across three slices before this check existed); assert the digit, not just the rows.
           sh_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '\.sh$')
-          py_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '\.py$')
+          # test_*.py, not *.py: the sentence this is checked against says "tests/test_*.py", and
+          # tests/ also holds CI guard scripts that pytest never collects (check_action_expressions.py).
+          # Those coincided until the first non-test .py landed here, at which point counting all
+          # .py made the check demand a number the sentence does not describe.
+          py_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '/test_.*\.py$')
           # sort -u: the count sentence is deliberately allowed to appear more than once (the
           # table intro and its own subsection heading both cite it) — dedupe identical repeats,
           # but a genuine mismatch between two citations still surfaces as more than one line,
           # which the single-value check below correctly rejects.
           sh_count_prose="$(grep -oE '\([0-9]+ files; verified against `git ls-tree -r tests/\*\.sh`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
-          py_count_prose="$(grep -oE '\([0-9]+ files, `tests/test_\*\.py`; verified against `git ls-tree -r tests/\*\.py`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
+          py_count_prose="$(grep -oE '\([0-9]+ files, `tests/test_\*\.py`; verified against `git ls-tree -r tests/test_\*\.py`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
           [[ -n "$sh_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's bash-suite prose count sentence — did its wording change? update this check's regex to match"; status=1; }
           [[ -n "$py_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's pytest prose count sentence — did its wording change? update this check's regex to match"; status=1; }
           [[ "$(wc -l <<<"$sh_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct bash-suite count across its mentions: $sh_count_prose"; status=1; }

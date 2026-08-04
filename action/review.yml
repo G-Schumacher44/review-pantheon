@@ -17,7 +17,8 @@
 # package-shaped `$RUNNER_TEMP` directory the "Decide verdict" step below points `PYTHONPATH` at.
 # `pantheon/render.py` rides the same mechanism: its `sanitize_inline` is what stops model-authored
 # prose from breaking out of the posted comment's markdown table, and it must be base-pinned for
-# the same reason the decider is — a PR that could swap the escaping rules could un-escape itself. The read-only git wrapper (`pantheon/execution.py`) is resolved the
+# the same reason the decider is — a PR that could swap the escaping rules could un-escape
+# itself. The read-only git wrapper (`pantheon/execution.py`) is resolved the
 # same way, separately — see "Resolve read-only git wrapper (base-pinned)" below. Only
 # REVIEW_RULES.md/DESIGN.md (judgment CONTENT, not gate behavior) remain a documented exception
 # on this one lane — see DESIGN.md's "Lane differences".

@@ -53,7 +53,7 @@ assert_file "default install: personas copied to .github/review-agents" "$T1/.gi
 assert_file "default install: review.yml workflow copied" "$T1/.github/workflows/review.yml"
 
 # The verdict decider's real implementation, vendored as a package — action/review.yml's
-# "Resolve gate scripts (base-pinned)" step base-pin-reads exactly these three files at
+# "Resolve gate scripts (base-pinned)" step base-pin-reads exactly these four files at
 # .github/review-agents/pantheon/{__init__,jqjson,verdict,render}.py; "Resolve read-only git wrapper
 # (base-pinned)" base-pin-reads pantheon/execution.py. Missing any one of them is a dead
 # reference at gate-run time.
