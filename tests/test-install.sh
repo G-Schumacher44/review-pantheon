@@ -54,10 +54,10 @@ assert_file "default install: review.yml workflow copied" "$T1/.github/workflows
 
 # The verdict decider's real implementation, vendored as a package — action/review.yml's
 # "Resolve gate scripts (base-pinned)" step base-pin-reads exactly these three files at
-# .github/review-agents/pantheon/{__init__,jqjson,verdict}.py; "Resolve read-only git wrapper
+# .github/review-agents/pantheon/{__init__,jqjson,verdict,render}.py; "Resolve read-only git wrapper
 # (base-pinned)" base-pin-reads pantheon/execution.py. Missing any one of them is a dead
 # reference at gate-run time.
-for pyfile in __init__.py jqjson.py verdict.py execution.py; do
+for pyfile in __init__.py jqjson.py verdict.py render.py execution.py; do
   assert_file "default install: pantheon/$pyfile copied" "$T1/.github/review-agents/pantheon/$pyfile"
   if cmp -s "$ROOT/pantheon/$pyfile" "$T1/.github/review-agents/pantheon/$pyfile"; then
     pass "default install: pantheon/$pyfile matches pantheon/$pyfile verbatim"

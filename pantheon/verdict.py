@@ -309,14 +309,17 @@ def emit_github_output(decision: dict) -> None:
     set — a no-op everywhere else (this module's own migration-exam fixture,
     tests/test-verdict-decision-python.sh, never sets it, and neither does a plain CLI-lane
     invocation). This is workflow plumbing, not part of the decision rule itself (see this
-    module's own docstring) — added at port slice 5, absorption, to make ``python3 -m
-    pantheon.verdict`` a drop-in replacement for ``action/decide_verdict.py``'s own
-    ``emit_github_output`` at the Action's two call sites (``action.yml``'s composite steps,
-    ``action/review.yml``'s vendored decide step — both read ``steps.<id>.outputs.*``
-    downstream). Byte-for-byte the same shape ``action/decide_verdict.py``'s own function
-    produces: same key names, same multi-line-safe ``<<delim`` heredoc marker convention (a
-    random per-call delimiter via :mod:`secrets`, so a finding's own text can never accidentally
-    terminate the heredoc early), same fields sourced from the same places on ``decision``.
+    module's own docstring) — added at port slice 5, absorption, so that ``python3 -m
+    pantheon.verdict`` is what both Action call sites invoke (``action.yml``'s composite steps and
+    ``action/review.yml``'s vendored decide step — both read ``steps.<id>.outputs.*`` downstream).
+
+    The wire format: every key uses the multi-line-safe ``<<delim`` heredoc convention, with a
+    random per-call delimiter via :mod:`secrets` so a value's own text can never terminate the
+    heredoc early. This is the authoritative description — the bash-era ``action/decide_verdict.py``
+    it was originally written to match no longer exists (retired with the bash CLI), and the format
+    has since diverged from it deliberately: ``color`` and ``verdict`` moved from the single-line
+    ``key=value`` form to the heredoc form to close a $GITHUB_OUTPUT injection (see the comment at
+    the write site below).
     Every JSON serialize here goes through :mod:`pantheon.jqjson`, never a bare
     ``json.dumps`` call — this module's own "JSON boundary" rule (see the module docstring)."""
     gh_out = os.environ.get("GITHUB_OUTPUT")

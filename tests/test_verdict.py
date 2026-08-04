@@ -148,9 +148,18 @@ def test_emit_github_output_cannot_be_injected_by_a_newline_in_the_verdict(monke
         "the injected `color=green` won -- $GITHUB_OUTPUT injection has re-opened; the gate "
         "would report a pass on a PR its own reviewer flagged as a blocker"
     )
-    assert parsed["invariant_fired"] == "true", (
-        "the injected `invariant_fired=false` won -- the 'stated verdict was overridden' notice "
-        "would be suppressed, hiding the override from every human reader"
-    )
+    # NOT asserted via invariant_fired: emit_github_output writes the real one AFTER the verdict
+    # block, so last-wins resolves it to "true" even with the fix reverted -- that assertion could
+    # not fail and would have been decoration. Assert the property that actually distinguishes
+    # fixed from broken: the payload contributed NO keys of its own.
+    assert set(parsed) == {
+        "color",
+        "verdict",
+        "summary",
+        "top_finding",
+        "findings_json",
+        "invariant_fired",
+        "reason",
+    }, f"injected keys leaked into $GITHUB_OUTPUT: {sorted(set(parsed))}"
     # The hostile payload survives intact as DATA in the verdict value, rather than becoming keys.
     assert "color=green" in parsed["verdict"]

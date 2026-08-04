@@ -79,6 +79,63 @@ reviewing a fork PR you don't control. A report that `trusted` grants full Bash 
 behavior, not a finding — the thing worth reporting is a path where `readonly` silently behaves
 like `trusted`.
 
+## Fork pull requests
+
+**Fork PRs are not gated. That is a structural property of GitHub Actions, not a bug here, and
+the gate now says so out loud instead of failing with a misleading message.**
+
+GitHub does not expose `secrets.*` to a `pull_request` run originating from a fork. The reason is
+sound: the PR's own code executes in that job, so any credential available there would be an
+outside contributor's for the taking. Both surfaces run on `pull_request`, so on a fork the
+provider credential arrives as the empty string and no review call is possible.
+
+What that means in practice:
+
+- The `review` job does not run on fork PRs. A separate `fork-notice` job states plainly that the
+  PR is **NOT GATED** and writes the same to the run's step summary.
+- **A green check on a fork PR means the gate skipped, not that the change passed.** Review it
+  manually. This is the one dangerous misreading, so it is stated at every surface a maintainer
+  might look at.
+- Consequently, do not configure this as a **required** status check on a repository that accepts
+  outside contributions until you have adopted one of the patterns below. A required check that
+  can never pass blocks every community PR, and neither the contributor nor the maintainer can
+  clear it.
+
+### Never use `pull_request_target`
+
+This is the trap, and it is the first thing a search engine will suggest.
+
+`pull_request_target` runs with the base repository's context and **does** expose secrets — while
+the content under review is still an outside contributor's. Since this gate exists to fetch and
+process that diff, adopting that trigger is the textbook configuration for handing a stranger's
+content a live credential and write-scoped token.
+
+The critical point: **every other control in this project sits below the trigger.** Base-pinned
+personas and decider, the read-only git wrapper, the argv allowlist, the neutral provider cwd —
+none of them can compensate for that choice, and none of them would fail if someone made it. It
+is a one-word change that silently voids the entire threat model.
+
+It is therefore enforced mechanically, not by convention: `tests/check_action_expressions.py`
+fails the build if `pull_request_target` appears in either Action surface, and CI runs it on every
+push and pull request.
+
+### If you genuinely need fork review
+
+Use the two-stage `workflow_run` pattern, which is GitHub's own documented answer:
+
+1. A `pull_request`-triggered workflow does the untrusted work with **no secrets**, and uploads the
+   diff (and only the diff) as an artifact.
+2. A second workflow triggered on `workflow_run` completion runs in the base repository's trusted
+   context with the credential, downloads that artifact, and reviews it — **never checking out the
+   fork's code**.
+
+The security of this rests entirely on step 2 never executing anything originating from the fork.
+Treat any change to that workflow as a change to the threat model.
+
+A simpler alternative that many projects prefer: gate on author association, so members and
+collaborators are reviewed automatically while outside contributions require a maintainer to
+approve the workflow run first (GitHub supports this natively for first-time contributors).
+
 ## Blast radius
 
 If a reviewer agent were fully compromised by injected content, here's what it could reach on the

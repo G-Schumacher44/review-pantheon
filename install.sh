@@ -111,10 +111,12 @@ SKILLS_SRC="$SCRIPT_DIR/skills"
 ACTION_SRC="$SCRIPT_DIR/action/review.yml"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
 # action/review.yml's "Resolve gate scripts (base-pinned)" step base-pin-reads __init__.py/
-# jqjson.py/verdict.py (the verdict decider's dependency closure) and its "Resolve read-only git
-# wrapper (base-pinned)" step base-pin-reads execution.py (the read-only git wrapper) at the PR's
-# base commit — all four need to exist HERE, vendored into the target repo, for base-pinning to
-# ever find them.
+# jqjson.py/verdict.py (the verdict decider's dependency closure) plus render.py (its
+# sanitize_inline is what keeps model-authored text from breaking out of the posted comment's
+# markdown table — see that workflow's "Save verdict artifact" step), and its "Resolve read-only
+# git wrapper (base-pinned)" step base-pin-reads execution.py (the read-only git wrapper) at the
+# PR's base commit — all five need to exist HERE, vendored into the target repo, for base-pinning
+# to ever find them.
 PANTHEON_PKG_SRC="$SCRIPT_DIR/pantheon"
 
 SKIPPED=()
@@ -148,6 +150,7 @@ if [[ "$DO_USER" != "true" ]]; then
   [[ -f "$PANTHEON_PKG_SRC/__init__.py" ]] || die "missing $PANTHEON_PKG_SRC/__init__.py"
   [[ -f "$PANTHEON_PKG_SRC/jqjson.py" ]] || die "missing $PANTHEON_PKG_SRC/jqjson.py"
   [[ -f "$PANTHEON_PKG_SRC/verdict.py" ]] || die "missing $PANTHEON_PKG_SRC/verdict.py"
+  [[ -f "$PANTHEON_PKG_SRC/render.py" ]] || die "missing $PANTHEON_PKG_SRC/render.py"
   [[ -f "$PANTHEON_PKG_SRC/execution.py" ]] || die "missing $PANTHEON_PKG_SRC/execution.py"
 
   AGENTS_DEST="$TARGET/.github/review-agents"
@@ -171,7 +174,7 @@ if [[ "$DO_USER" != "true" ]]; then
   install_file "$RULES_SRC" "$RULES_DEST"
 
   mkdir -p "$PANTHEON_PKG_DEST"
-  for pyfile in __init__.py jqjson.py verdict.py execution.py; do
+  for pyfile in __init__.py jqjson.py verdict.py render.py execution.py; do
     install_file "$PANTHEON_PKG_SRC/$pyfile" "$PANTHEON_PKG_DEST/$pyfile"
   done
 

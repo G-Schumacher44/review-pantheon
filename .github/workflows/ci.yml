@@ -85,20 +85,49 @@ jobs:
       # parse above could never catch it: the file IS valid YAML, and ci.yml's own header notes
       # review.yml never runs against this repo, so nothing executed it either. A check that
       # cannot fail for the actual failure mode is green by construction; this is the check that
-      # can. It also catches the shell-injection shape (`${{ }}` interpolated into `run:`) that
-      # the same review found on the very same lines.
+      # can.
+      #
+      # SCOPE, precisely — actionlint does NOT catch the shell-injection shape. An earlier version
+      # of this comment claimed it did; that was verified FALSE (re-inserting
+      # `top='${{ steps.decide.outputs.top_finding }}'` inside a `run:` block lints clean, exit 0).
+      # actionlint's untrusted-input rule fires only for an allowlist of `github.*` contexts and
+      # never for `steps.*.outputs.*` — which is exactly the model-derived vector this repo cares
+      # about. Claiming coverage you do not have is worse than having none: the next maintainer
+      # trusts the check and ships the injection. The separate grep guard below is what actually
+      # backs that promise.
       - name: Lint the workflows with actionlint
+        env:
+          # Pinned, not `main`. This runs on every push/PR, and an unpinned installer from a
+          # third-party repo's mutable default branch is arbitrary code execution in this job on
+          # someone else's commit. (This repo already fails its own build if
+          # `claude-code-action` is not SHA-pinned — same standard applies to its own tooling.)
+          ACTIONLINT_VERSION: "1.7.7"
         run: |
           set -euo pipefail
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
           # action/review.yml is a vendored workflow that lives outside .github/workflows, so
           # actionlint's own auto-discovery does not see it — name it explicitly. Passing it as an
           # argument is what makes this step cover the file that actually shipped broken.
-          # -ignore SC2016 ("expressions don't expand in single quotes"): informational, and every
-          # occurrence here is deliberate — single quotes are exactly how this repo keeps `$VAR`
-          # literal inside embedded python/jq snippets. Nothing else is suppressed; the expression
-          # and shell-injection classes both stay fatal.
+          #
+          # action.yml is NOT lintable here and cannot be: it is composite-action metadata, so
+          # actionlint rejects it ("\"jobs\" section is missing in workflow"). That leaves the
+          # flagship published surface — the `@v1` path every non-vendoring adopter uses — without
+          # expression-grammar coverage, which is why the next step exists.
+          #
+          # -ignore SC2016 ("expressions don't expand in single quotes"): informational only. All
+          # occurrences are deliberate single-quoted `grep`/`sed` regex patterns in this file and
+          # release.yml (verified: removing the flag surfaces exactly those, nothing else).
           ./actionlint -color -ignore 'SC2016' .github/workflows/*.yml action/review.yml
+
+      # The guard actionlint cannot provide, for BOTH Action surfaces including action.yml.
+      # Two classes, both found live on this repo by a pre-flip security review:
+      #   1. double-quoted string literals inside `${{ }}` — invalid grammar, rejected at queue
+      #      time, workflow silently never runs.
+      #   2. `${{ }}` interpolated into a `run:` block — the expression engine substitutes BEFORE
+      #      bash parses, so model-authored prose becomes script text (RCE in a job holding
+      #      CLAUDE_CODE_OAUTH_TOKEN). Values must travel via `env:` and be read as "$VAR".
+      - name: Guard both Action surfaces against expression-injection shapes
+        run: python3 tests/check_action_expressions.py
 
       - name: Run verdict-decision fixture tests
         run: bash tests/test-verdict-decision-python.sh
