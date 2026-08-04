@@ -672,7 +672,7 @@ def _base_pinned_text(ctx: GateContext, path: str) -> tuple[str | None, bool]:
     return None, False
 
 
-def _build_prompt(ctx: GateContext, agent: str, workdir: str) -> str:
+def _build_prompt(ctx: GateContext, agent: str, workdir: str, neutral_cwd: str) -> str:
     """Assembles one agent's full prompt: persona (frontmatter stripped) + a "Run context"
     block naming the repo/PR/diff-range/base-branch/execution tier, the house-rules file
     (base-pinned, fenced with a per-render anti-collision marker), the spec file (apollo only,
@@ -787,10 +787,30 @@ def _build_prompt(ctx: GateContext, agent: str, workdir: str) -> str:
         lines.append("`git show <ref>:path`, and `git log` to inspect the change — those two ref names are")
         lines.append("fetched specifically for this review; don't treat them as ordinary branch names.")
     else:
-        lines.append("You are running inside the target repo's working tree. Use the read-only git wrapper")
-        lines.append(f"named above (not raw `git`) with `{ctx.diff_range}` as the diff range to inspect the")
-        lines.append("change — those two ref names are fetched specifically for this review; don't treat")
-        lines.append("them as ordinary branch names.")
+        # Issue #26 P2 (Codex, PR #25 thread PRRT_kwDOTokUCs6V1lny): under readonly this process's
+        # OWN cwd is `neutral_cwd` — a scratch directory with no repo content in it at all (see
+        # pantheon.providers' module docstring for why: a provider CLI's own startup-time config/
+        # MCP/hooks auto-discovery scans its cwd, so the repo checkout is never handed to it
+        # directly) — NOT the repo's working tree the pre-fix text unconditionally claimed. An
+        # agent told it's in the repo reaches for repo-relative paths that don't resolve from this
+        # cwd, compounding the wrapper's own flag refusals — a likely contributing cause of the
+        # readonly tier's own reported failure (this issue's headline). State the real cwd and the
+        # two actual ways back to the repo instead: Read/Grep/Glob against the absolute repo root
+        # already given above, and the read-only git wrapper (never raw `git`, which isn't even on
+        # this process's restricted Bash allowlist).
+        lines.append(
+            f"This process's own working directory is a neutral scratch directory ({neutral_cwd}), "
+            "NOT the target repo's working tree — there is no repo content there at all."
+        )
+        lines.append(
+            "Reach the repo two ways: Read/Grep/Glob against the absolute repo root path given "
+            "above, and the read-only git wrapper named above (never raw `git`, which this "
+            "process's Bash allowlist does not permit)"
+        )
+        lines.append(
+            f"with `{ctx.diff_range}` as the diff range to inspect the change — those two ref names "
+            "are fetched specifically for this review; don't treat them as ordinary branch names."
+        )
 
     lines.append("")
     lines.append("## Output contract")
@@ -836,7 +856,7 @@ def _run_agent(
             findings_json=findings_json,
         )
 
-    prompt_file = _build_prompt(ctx, agent, workdir)
+    prompt_file = _build_prompt(ctx, agent, workdir, neutral_cwd)
 
     if dry_run:
         _note(f"[dry-run] would run: provider={provider} model={model!r} prompt_file={prompt_file}")

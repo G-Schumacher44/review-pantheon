@@ -701,7 +701,9 @@ def test_build_prompt_writes_non_ascii_pr_title_as_utf8_bytes_on_disk(tmp_path, 
         spec_file="",
     )
 
-    prompt_path = cli_module._build_prompt(ctx, "artemis", str(workdir))
+    neutral_cwd = tmp_path / "provider-cwd"
+    neutral_cwd.mkdir()
+    prompt_path = cli_module._build_prompt(ctx, "artemis", str(workdir), str(neutral_cwd))
 
     raw_bytes = Path(prompt_path).read_bytes()
     assert "Fïx encödïng — 日本語のタイトル".encode() in raw_bytes
@@ -742,7 +744,9 @@ def _make_prompt_fixture(tmp_path: Path, monkeypatch, pr_title: str, base_ref: s
         rules_file="RULES.md",
         spec_file="",
     )
-    prompt_path = cli_module._build_prompt(ctx, "artemis", str(workdir))
+    neutral_cwd = tmp_path / "provider-cwd"
+    neutral_cwd.mkdir(exist_ok=True)
+    prompt_path = cli_module._build_prompt(ctx, "artemis", str(workdir), str(neutral_cwd))
     return Path(prompt_path).read_text(encoding="utf-8")
 
 

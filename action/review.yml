@@ -780,7 +780,7 @@ jobs:
           claude_args: |
             --allowedTools "Read,Grep,Glob,Bash(${{ steps.resolve-git-wrapper.outputs.wrapper_path }} *)"
             --permission-mode dontAsk
-            --json-schema '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":"string"},"line":{"type":"integer"},"issue":{"type":"string"},"scenario":{"type":"string"}},"required":["severity","file","line","issue","scenario"]}},"summary":{"type":"string"}},"required":["agent","verdict","has_blocker","findings","summary"]}'
+            --json-schema '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"file":{"type":["string","number","boolean","object","array","null"]},"line":{"type":["string","number","boolean","object","array","null"]},"issue":{"type":["string","number","boolean","object","array","null"]},"scenario":{"type":["string","number","boolean","object","array","null"]}},"required":["severity"]}},"summary":{"type":["string","number","boolean","object","array","null"]}},"required":["agent","verdict","has_blocker","findings","summary"]}'
 
       - name: Save raw agent output
         if: always() && (matrix.agent != 'apollo' || steps.docs-check.outputs.docs_only != 'true')

@@ -1,9 +1,8 @@
 """tests/test_providers.py — pytest unit layer for pantheon.providers' argv-construction,
-PATH-resolution, environment-construction, and timeout/process-group seams
-(docs/PYTHON-PORT.md section 4's port slice 4 deliverable).
+PATH-resolution, environment-construction, and timeout/process-group seams.
 
-pantheon.providers has NO dedicated black-box fixture suite (docs/PYTHON-PORT.md §9's disclosed
-pre-existing gap — no test-providers.sh for the bash lanes either), so this file is the ONLY
+pantheon.providers has NO dedicated black-box fixture suite (a disclosed, pre-existing gap — the
+retired bash lanes never had a test-providers.sh either), so this file is the ONLY
 coverage its argv-construction/CLI-resolution/env-construction logic gets, not a duplication of
 anything else. Every test here monkeypatches `providers._resolve_cli` and/or
 `providers.subprocess.Popen` so it never actually shells out to a real
@@ -15,14 +14,18 @@ allowlist (never a blanket `os.environ` copy), and on `_terminate_group` firing 
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from pantheon import execution, providers
+from pantheon import execution, jqjson, providers, verdict
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture()
@@ -45,22 +48,33 @@ class _FakeProc:
     `TimeoutExpired` once and then return leftover output on retry, mirroring the real
     post-kill `communicate()` call `_run()` makes). `_run()` runs Popen in BINARY mode (no
     `text=True` — see that function's own docstring for why), so `communicate()` must return
-    bytes here too, matching the real contract this fake stands in for."""
+    bytes here too, matching the real contract this fake stands in for.
+
+    `stderr` (default "") is the SECOND element `communicate()` returns — real production code
+    (`_run()`) only ever consults it when it passed `merge_stderr=False` (`_claude()`'s own
+    call); every other lane's call site force-empties it regardless of what this fake returns
+    here, matching a real `stderr=subprocess.STDOUT` Popen call (whose `communicate()` always
+    returns `None` for the second element) closely enough for that path's own tests, which never
+    inspect it."""
 
     def __init__(
         self,
         argv,
         returncode: int = 0,
         stdout: str = "",
+        stderr: str = "",
         raise_timeout_once: bool = False,
         leftover_after_timeout: str = "",
+        leftover_stderr_after_timeout: str = "",
     ) -> None:
         self.argv = argv
         self.pid = 4242
         self.returncode = returncode
         self._stdout = stdout.encode("utf-8")
+        self._stderr = stderr.encode("utf-8")
         self._raise_timeout_once = raise_timeout_once
         self._leftover_after_timeout = leftover_after_timeout.encode("utf-8")
+        self._leftover_stderr_after_timeout = leftover_stderr_after_timeout.encode("utf-8")
         self.communicate_calls = 0
 
     def communicate(self, input=None, timeout=None):  # noqa: A002 - matches subprocess.Popen's own signature
@@ -68,8 +82,8 @@ class _FakeProc:
         if self._raise_timeout_once and self.communicate_calls == 1:
             raise subprocess.TimeoutExpired(cmd=self.argv, timeout=timeout)
         if self._raise_timeout_once:
-            return self._leftover_after_timeout, None
-        return self._stdout, None
+            return self._leftover_after_timeout, self._leftover_stderr_after_timeout
+        return self._stdout, self._stderr
 
 
 def _install_fake_popen(monkeypatch, **fake_proc_kwargs):
@@ -114,38 +128,37 @@ def test_claude_argv_shape(monkeypatch, prompt_file) -> None:
 
 
 # ---------------------------------------------------------------------------------------------
-# --bare's conditional presence — a P1 finding from a live Codex review on this PR: an earlier
-# version passed --bare unconditionally, which (per Claude Code's own official headless docs)
-# ALSO skips OAuth/system-keychain login — a real usability regression for the CLI lane's
-# documented primary auth path (docs/SETUP.md's Way C, `claude auth login`, no env var at all).
-# --bare must appear only when an explicit credential env var is present.
+# --bare is DROPPED entirely (issue #26 item 3 — see pantheon.providers._claude's own docstring
+# for the full history: was conditional on an explicit credential for a time, removed once this
+# lane also started passing --json-schema, because this repo's own committed history already
+# shows that flag pair breaking structured_output on the sibling Action lane, and re-verifying
+# compatibility on THIS lane's own invocation shape needed a credential unavailable in the
+# environment the removal was authored in). These fixtures lock in "never present, regardless of
+# credential" — the inverse of what this section used to assert.
 # ---------------------------------------------------------------------------------------------
 
 
-def test_claude_argv_includes_bare_when_explicit_api_key_present(monkeypatch, prompt_file) -> None:
+def test_claude_argv_never_includes_bare_with_explicit_api_key_present(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     captured = _install_fake_popen(monkeypatch)
 
     providers.provider_run("claude", "", prompt_file, "")
-    assert "--bare" in captured["argv"]
+    assert "--bare" not in captured["argv"]
 
 
-def test_claude_argv_includes_bare_when_explicit_oauth_token_present(monkeypatch, prompt_file) -> None:
+def test_claude_argv_never_includes_bare_with_explicit_oauth_token_present(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test-456")
     captured = _install_fake_popen(monkeypatch)
 
     providers.provider_run("claude", "", prompt_file, "")
-    assert "--bare" in captured["argv"]
+    assert "--bare" not in captured["argv"]
 
 
-def test_claude_argv_omits_bare_when_no_explicit_credential_present(monkeypatch, prompt_file) -> None:
-    # The locally-authenticated-session case the Codex finding names: no explicit token env var
-    # (e.g. `claude auth login`'s stored keychain credential instead) -- --bare must be absent so
-    # Claude Code's own normal (keychain-capable) startup still works.
+def test_claude_argv_never_includes_bare_with_no_credential_present(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
@@ -155,44 +168,36 @@ def test_claude_argv_omits_bare_when_no_explicit_credential_present(monkeypatch,
     assert "--bare" not in captured["argv"]
 
 
-def test_claude_cwd_stays_neutral_regardless_of_bare_flag_presence(monkeypatch, prompt_file) -> None:
-    # "Prove both directions": making --bare conditional (the usability fix above) must NOT
-    # reopen CRITICAL-1's own vulnerability (a provider's startup-time config/MCP/hooks
-    # auto-discovery reaching the PR checkout). The neutral cwd is layer 1 of that fix and is
-    # UNCONDITIONAL -- it does not depend on whether --bare fires. Proven here by checking the
-    # actual Popen cwd kwarg (not just the argv) across both the with-credential and
-    # without-credential cases: in neither case does cwd ever become repo_root.
+def test_claude_cwd_stays_neutral_regardless_of_credential_presence(monkeypatch, prompt_file) -> None:
+    # The neutral cwd (CRITICAL-1's own PRIMARY, unconditional control) never depended on --bare
+    # in the first place, and --bare is gone entirely now -- proven here by checking the actual
+    # Popen cwd kwarg regardless of whether a credential env var happens to be set.
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
-
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    captured_no_bare = _install_fake_popen(monkeypatch)
+    captured = _install_fake_popen(monkeypatch)
     providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
-    assert "--bare" not in captured_no_bare["argv"]
-    assert captured_no_bare["kwargs"]["cwd"] == "/some/scratch/dir"
-    assert captured_no_bare["kwargs"]["cwd"] != "/some/repo/root"
+    assert captured["kwargs"]["cwd"] == "/some/scratch/dir"
+    assert captured["kwargs"]["cwd"] != "/some/repo/root"
 
 
 # ---------------------------------------------------------------------------------------------
 # CLAUDE_CONFIG_DIR reopening CRITICAL-1 through the provider's ENV (adversarial review, round 6,
-# Codex P1). The --bare fix above (previous section) closed CRITICAL-1's cwd door; this section
-# proves the (separate) env door is closed too, on BOTH the --bare (explicit token) and no-bare
-# (stored keychain) paths -- neither "prove both directions" fixture above actually exercised
-# CLAUDE_CONFIG_DIR at all, which is exactly how this reopened without either of them catching it.
+# Codex P1) -- the containment property (pantheon.providers._safe_path_env_value) is independent
+# of --bare and stays proven here regardless of credential presence, now that --bare itself is
+# gone (issue #26 item 3).
 # ---------------------------------------------------------------------------------------------
 
 
-def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root_with_bare(
+def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root(
     monkeypatch, prompt_file, tmp_path
 ) -> None:
-    # The --bare (explicit-token) path: an attacker sets CLAUDE_CONFIG_DIR (via ANY mechanism
-    # that can influence this process's ambient env before it runs -- a repo-local .envrc, an
-    # environment-setting CI step reading repo content) to a directory inside the checkout
-    # containing a marker MCP-server/hook config. That marker directory's PATH must never reach
-    # the subprocess env at all -- if it did, Claude Code's own normal startup would load it
-    # (config/MCP/hook auto-discovery happens before --allowedTools's reach), even with --bare
-    # present, since --bare only skips OAuth/keychain login, not an EXPLICIT CLAUDE_CONFIG_DIR
-    # override.
+    # An attacker sets CLAUDE_CONFIG_DIR (via ANY mechanism that can influence this process's
+    # ambient env before it runs -- a repo-local .envrc, an environment-setting CI step reading
+    # repo content) to a directory inside the checkout containing a marker MCP-server/hook
+    # config. That marker directory's PATH must never reach the subprocess env at all -- if it
+    # did, Claude Code's own normal startup would load it (config/MCP/hook auto-discovery happens
+    # before --allowedTools's reach).
     repo_root = tmp_path / "checkout"
     repo_root.mkdir()
     marker_config_dir = repo_root / ".claude-hijacked"
@@ -209,45 +214,15 @@ def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_r
         "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
     )
 
-    assert "--bare" in captured["argv"]  # still the credential-present path
+    assert "--bare" not in captured["argv"]
     env = captured["kwargs"]["env"]
     assert "CLAUDE_CONFIG_DIR" not in env, "the marker config directory's path must never reach the subprocess env"
 
 
-def test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root_without_bare(
-    monkeypatch, prompt_file, tmp_path
-) -> None:
-    # The no-bare (stored-keychain-session) path -- the coordinator's own naming of this as the
-    # door CRITICAL-1's --bare fix correctly left open (for usability) but that a blindly-
-    # forwarded CLAUDE_CONFIG_DIR reopened anyway, --bare or not.
-    repo_root = tmp_path / "checkout"
-    repo_root.mkdir()
-    marker_config_dir = repo_root / ".claude-hijacked"
-    marker_config_dir.mkdir()
-    (marker_config_dir / "settings.json").write_text('{"hooks": {"marker": "FIRED"}}')
-
-    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(marker_config_dir))
-    captured = _install_fake_popen(monkeypatch)
-
-    providers.provider_run(
-        "claude", "", prompt_file, "", repo_root=str(repo_root), neutral_cwd=str(tmp_path / "scratch")
-    )
-
-    assert "--bare" not in captured["argv"]  # still the stored-keychain-session path
-    env = captured["kwargs"]["env"]
-    assert "CLAUDE_CONFIG_DIR" not in env, "the marker config directory's path must never reach the subprocess env"
-
-
-def test_claude_env_still_forwards_a_legitimate_claude_config_dir_without_bare(
-    monkeypatch, prompt_file, tmp_path
-) -> None:
-    # Regression guard (fixture (c) -- "don't re-break what you just fixed"): a real local
-    # multi-account CLAUDE_CONFIG_DIR override that resolves OUTSIDE any trusted root must still
-    # reach the subprocess env, on the stored-keychain (no --bare) path an operator actually uses
-    # day to day.
+def test_claude_env_still_forwards_a_legitimate_claude_config_dir(monkeypatch, prompt_file, tmp_path) -> None:
+    # Regression guard -- "don't re-break what you just fixed": a real local multi-account
+    # CLAUDE_CONFIG_DIR override that resolves OUTSIDE any trusted root must still reach the
+    # subprocess env.
     repo_root = tmp_path / "checkout"
     repo_root.mkdir()
     legitimate_config_dir = tmp_path / "not-the-checkout" / ".claude-alt-account"
@@ -267,13 +242,6 @@ def test_claude_env_still_forwards_a_legitimate_claude_config_dir_without_bare(
     env = captured["kwargs"]["env"]
     assert env["CLAUDE_CONFIG_DIR"] == str(legitimate_config_dir)
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
-    captured_with_bare = _install_fake_popen(monkeypatch)
-    providers.provider_run("claude", "", prompt_file, "", repo_root="/some/repo/root", neutral_cwd="/some/scratch/dir")
-    assert "--bare" in captured_with_bare["argv"]
-    assert captured_with_bare["kwargs"]["cwd"] == "/some/scratch/dir"
-    assert captured_with_bare["kwargs"]["cwd"] != "/some/repo/root"
-
 
 def test_claude_omits_model_flag_when_empty(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
@@ -292,6 +260,154 @@ def test_claude_falls_back_to_default_allowed_tools_when_empty(monkeypatch, prom
     assert tools == providers.default_allowed_tools()
     assert providers._WRAPPER_SCRIPT_NAME in tools
     assert tools.endswith("wrapper *)")
+
+
+# ---------------------------------------------------------------------------------------------
+# --json-schema / --output-format json enforcement (issue #26 item 3) — the CLI lane used to
+# invoke `claude -p ...` and merely hope the model's raw text ended with a trailing JSON object,
+# relying entirely on pantheon.verdict's own extraction fallback. Confirmed live (this fix's own
+# investigation): with --json-schema and --output-format json, stdout is one JSON envelope
+# carrying a `structured_output` key. These fixtures prove both the new argv shape AND the
+# envelope-to-plain-verdict-text unwrapping (_extract_structured_output).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_claude_argv_includes_json_schema_and_output_format(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+    argv = captured["argv"]
+    assert "--output-format" in argv
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert "--json-schema" in argv
+    assert argv[argv.index("--json-schema") + 1] == providers.VERDICT_JSON_SCHEMA
+
+
+def test_claude_unwraps_structured_output_from_the_envelope(monkeypatch, prompt_file) -> None:
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,'
+        '"result":"{\\"agent\\":\\"artemis\\"}",'
+        '"structured_output":{"agent":"artemis","verdict":"SHIP","has_blocker":false,'
+        '"findings":[],"summary":"looks fine"}}'
+    )
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    _install_fake_popen(monkeypatch, stdout=envelope)
+
+    out = providers.provider_run("claude", "", prompt_file, "")
+
+    parsed = jqjson.loads(out)
+    assert parsed == {
+        "agent": "artemis",
+        "verdict": "SHIP",
+        "has_blocker": False,
+        "findings": [],
+        "summary": "looks fine",
+    }
+
+
+def test_claude_falls_back_to_envelope_text_when_structured_output_missing(monkeypatch, prompt_file) -> None:
+    # Schema validation failed on the CLI's own side (e.g. is_error: true) -- no
+    # `structured_output` key at all. Must fall back to the raw envelope text unchanged, not
+    # raise -- pantheon.verdict.decide()'s own required-keys check then lands on UNVERIFIED
+    # ("verdict JSON missing required keys"), the same fail-closed posture every other malformed
+    # provider output already gets.
+    envelope = (
+        '{"type":"result","is_error":true,'
+        '"result":"--json-schema was provided but Claude did not return structured_output."}'
+    )
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    _install_fake_popen(monkeypatch, stdout=envelope)
+
+    out = providers.provider_run("claude", "", prompt_file, "")
+    assert out == envelope
+
+
+def test_claude_falls_back_to_raw_text_when_envelope_itself_is_not_json(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    _install_fake_popen(monkeypatch, stdout="not json at all")
+
+    out = providers.provider_run("claude", "", prompt_file, "")
+    assert out == "not json at all"
+
+
+def test_extract_structured_output_unit() -> None:
+    assert providers._extract_structured_output('{"structured_output":{"a":1}}') == jqjson.dumps({"a": 1})
+    assert providers._extract_structured_output('{"no_such_key":true}') == '{"no_such_key":true}'
+    assert providers._extract_structured_output("not json") == "not json"
+    assert providers._extract_structured_output("[1,2,3]") == "[1,2,3]"
+
+
+def test_extract_structured_output_isolates_the_envelope_from_leading_noise() -> None:
+    # A leading warning/diagnostic line (from a MERGED stream, or a stray banner some CLI
+    # version might print to stdout) must not defeat the extraction -- verdict.extract_last_json
+    # is a rightmost-parseable-JSON-suffix scan, so leading noise is naturally skipped.
+    noisy = 'npm warn deprecated something\n{"structured_output":{"agent":"artemis","verdict":"SHIP"}}'
+    out = providers._extract_structured_output(noisy)
+    assert jqjson.loads(out) == {"agent": "artemis", "verdict": "SHIP"}
+
+
+# ---------------------------------------------------------------------------------------------
+# Streams captured SEPARATELY on the claude lane (_run's own merge_stderr=False) — a live Codex
+# review finding (P2) on this PR: a stderr diagnostic landing AFTER the JSON envelope on a
+# MERGED stream defeats verdict.extract_last_json's own trailing scan (which requires nothing
+# after the JSON object's own closing brace), discarding a valid verdict. Fixed by never merging
+# this lane's streams at all -- these fixtures prove both the wiring (the real Popen kwarg) and
+# the end-to-end behavior (a real trailing-stderr-noise scenario, verdict still parses).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_claude_popen_uses_separate_stderr_pipe_not_merged(monkeypatch, prompt_file) -> None:
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("claude", "", prompt_file, "")
+
+    assert captured["kwargs"]["stderr"] is subprocess.PIPE
+    assert captured["kwargs"]["stderr"] is not subprocess.STDOUT
+
+
+def test_other_lanes_still_merge_stdout_and_stderr(monkeypatch, prompt_file) -> None:
+    # Regression-direction guard: merge_stderr=False is a claude-lane-ONLY opt-in -- every other
+    # lane keeps the ORIGINAL merged-stream contract (bash-parity, this module's own default).
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("codex"))
+    captured = _install_fake_popen(monkeypatch)
+
+    providers.provider_run("codex", "", prompt_file, "")
+
+    assert captured["kwargs"]["stderr"] is subprocess.STDOUT
+
+
+def test_claude_verdict_survives_a_trailing_stderr_warning_after_the_json_envelope(monkeypatch, prompt_file) -> None:
+    # THE exact scenario the Codex finding named: a successful invocation whose stderr emits a
+    # warning AFTER the valid JSON envelope was already written to stdout. With streams captured
+    # separately, that stderr content never reaches `envelope_text` at all -- the verdict must
+    # still parse and decide, not silently degrade to UNVERIFIED.
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    envelope = jqjson.dumps(
+        {
+            "type": "result",
+            "is_error": False,
+            "structured_output": {
+                "agent": "artemis",
+                "verdict": "SHIP",
+                "has_blocker": False,
+                "findings": [],
+                "summary": "clean",
+            },
+        }
+    )
+    _install_fake_popen(monkeypatch, stdout=envelope, stderr="warning: some harmless deprecation notice\n")
+
+    out = providers.provider_run("claude", "", prompt_file, "")
+
+    parsed = jqjson.loads(out)
+    assert parsed["agent"] == "artemis"
+    assert parsed["verdict"] == "SHIP"
+
+    decision = verdict.decide("artemis", out)
+    assert decision["color"] == "green"
+    assert decision["reason"] == ""
 
 
 def test_codex_pipes_prompt_via_stdin(monkeypatch, prompt_file) -> None:
@@ -910,3 +1026,281 @@ def test_resolve_cli_does_not_find_an_executable_planted_in_a_nested_repo_bin(mo
 
     # _resolve_cli(name, repo_root) must never return it.
     assert providers._resolve_cli("claude", str(repo_root)) is None
+
+
+# ---------------------------------------------------------------------------------------------
+# Readonly-tier end-to-end proof (issue #26 item 2) — "a fixture that proves the FEATURE works,
+# not just that attacks are refused: a readonly-tier run that produces a parseable verdict end
+# to end. This is the test whose absence caused the whole problem." Before this fix, this repo's
+# own CI never dogfooded the shipped default: the self-check job runs `execution: trusted` (no
+# wrapper at all), and every other fixture in this file/tests/test-git-readonly-wrapper.sh proves
+# either "the wrapper refuses hostile input" or "argv construction looks right" — never that the
+# WHOLE chain (prompt -> provider -> a real Bash-tool-shaped wrapper call against a real repo ->
+# a schema-shaped verdict -> pantheon.verdict.decide()) produces a real, non-UNVERIFIED decision.
+#
+# Fixture-level, not a live Anthropic model call (this repo's own posture: no metered API key,
+# `claude` here is a stand-in the same way every other test in this file replaces the real CLI
+# with `_resolve_cli`/`Popen` fakes) — but everything AROUND that one stand-in is genuinely real:
+# a real two-commit git repo, the REAL installed `pantheon-git-readonly` console script (skips if
+# not installed), a real `execution.build_readonly_argv`/`run_readonly_wrapper` subprocess call
+# reading real `git diff --stat` output (deliverable 1's own safe-flag allowlist), the real
+# `pantheon.cli._build_prompt` (deliverable 7's cwd fix), and the real
+# `pantheon.verdict.decide()` decision function (deliverable 4's schema-envelope unwrapping).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_readonly_tier_end_to_end_produces_a_parseable_verdict(tmp_path, monkeypatch) -> None:
+    import json
+    import subprocess
+
+    from pantheon import cli as cli_module
+    from pantheon import verdict
+
+    wrapper_script = execution.resolve_console_script("pantheon-git-readonly")
+    if wrapper_script is None:
+        pytest.skip("pantheon-git-readonly console script is not installed in this test environment")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("one\ntwo\nthree\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "first"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("one\ntwo\nthree\nfour\nfive\n")
+    subprocess.run(["git", "commit", "-q", "-am", "second"], cwd=repo, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    parent = subprocess.run(
+        ["git", "rev-parse", "HEAD~1"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    diff_range = f"{parent}...{head}"
+
+    neutral_cwd = tmp_path / "neutral-scratch"
+    neutral_cwd.mkdir()
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+
+    ctx = cli_module.GateContext(
+        repo_root=str(repo),
+        pr_number="1",
+        pr_title="test pr",
+        diff_range=diff_range,
+        base_ref="main",
+        base_sha=parent,
+        execution_tier="readonly",
+        rules_file="",
+        spec_file="",
+    )
+    prompt_file = cli_module._build_prompt(ctx, "artemis", str(workdir), str(neutral_cwd))
+    prompt_text = Path(prompt_file).read_text(encoding="utf-8")
+
+    # Deliverable 7's own fix, proved here as a side effect of this same end-to-end chain: the
+    # prompt states the REAL cwd (the neutral scratch dir), never the false "you are in the
+    # repo's working tree" claim that (per issue #26's own report) likely compounded the
+    # wrapper's flag refusals.
+    assert str(neutral_cwd) in prompt_text
+    assert "NOT the target repo's working tree" in prompt_text
+
+    # A fake "claude" standing in for the model: parses the SAME Run-context lines a real agent
+    # reads, then ACTUALLY invokes the real readonly wrapper -- exactly the Bash-tool call a real
+    # agent makes under `Bash(<wrapper> wrapper --repo-root <root> *)` -- with a safe flag from
+    # deliverable 1's own allowlist (`--stat`), before emitting a --json-schema-shaped envelope
+    # (deliverable 4).
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, re, subprocess, sys\n"
+        "argv = sys.argv[1:]\n"
+        "prompt = argv[argv.index('-p') + 1]\n"
+        "repo_root = re.search(r'Repo root \\(absolute path[^)]*\\): (\\S+)', prompt).group(1)\n"
+        "diff_range = re.search(r'Diff range \\(read-only git refs, already fetched\\): (\\S+)', prompt).group(1)\n"
+        f"wrapper = {wrapper_script!r}\n"
+        "result = subprocess.run(\n"
+        "    [wrapper, 'wrapper', '--repo-root', repo_root, 'diff', '--stat', diff_range],\n"
+        "    capture_output=True, text=True,\n"
+        ")\n"
+        "assert result.returncode == 0, ('wrapper failed: ' + result.stdout + result.stderr)\n"
+        "stat_output = result.stdout.strip()\n"
+        "assert 'f.txt' in stat_output, ('no f.txt in wrapper --stat output: ' + stat_output)\n"
+        "f_txt_line = [line for line in stat_output.splitlines() if 'f.txt' in line][0]\n"
+        "verdict_obj = {\n"
+        "    'agent': 'artemis',\n"
+        "    'verdict': 'FIX_FIRST',\n"
+        "    'has_blocker': False,\n"
+        "    'findings': [{\n"
+        "        'severity': 'should_fix',\n"
+        "        'file': 'f.txt',\n"
+        "        'line': 4,\n"
+        "        'issue': 'grew via the readonly wrapper --stat flag',\n"
+        "        'scenario': 'issue #26 end-to-end proof',\n"
+        "    }],\n"
+        "    'summary': 'readonly wrapper --stat output: ' + f_txt_line,\n"
+        "}\n"
+        "envelope = {\n"
+        "    'type': 'result', 'is_error': False,\n"
+        "    'result': json.dumps(verdict_obj),\n"
+        "    'structured_output': verdict_obj,\n"
+        "}\n"
+        "print(json.dumps(envelope))\n"
+    )
+    fake_claude.chmod(0o755)
+
+    monkeypatch.setattr(
+        providers,
+        "_resolve_cli",
+        lambda name, repo_root=None: str(fake_claude) if name == "claude" else None,
+    )
+
+    wrapper_invocation = f"{wrapper_script} wrapper --repo-root {repo}"
+    allowed_tools = execution.allowed_tools_for("readonly", wrapper_invocation)
+
+    raw_output = providers.provider_run(
+        "claude",
+        "",
+        prompt_file,
+        allowed_tools,
+        timeout=30,
+        repo_root=str(repo),
+        neutral_cwd=str(neutral_cwd),
+    )
+
+    # provider_run's own return value is already the unwrapped, schema-validated verdict text
+    # (deliverable 4's _extract_structured_output) -- parseable on its own, not just buried
+    # inside a provider envelope.
+    parsed_raw = json.loads(raw_output)
+    assert parsed_raw["agent"] == "artemis"
+
+    decision = verdict.decide("artemis", raw_output)
+
+    # THE proof: a readonly-tier run produces a real, PARSEABLE, non-UNVERIFIED verdict -- not
+    # the 3x UNVERIFIED issue #26 reported live.
+    assert decision["color"] == "yellow", decision
+    assert decision["verdict"] == "FIX_FIRST"
+    assert decision["invariant_fired"] is False
+    assert decision["reason"] == ""
+    # The verdict content reflects REAL data that flowed through the readonly wrapper's own
+    # --stat flag against the real repo (not a canned string unrelated to the actual diff).
+    assert "f.txt" in decision["verdict_json"]["summary"]
+
+
+def test_verdict_json_schema_stays_byte_identical_across_ALL_THREE_surfaces() -> None:
+    """VERDICT_JSON_SCHEMA promises byte-identity with every surface that enforces a schema.
+    Nothing enforced it until this test (a live self-hosted-gate finding, artemis @ PR #28).
+
+    THREE copies, not two -- and the third is why this test enumerates its own targets instead of
+    grepping for a variable name. `action.yml` assigns `JSON_SCHEMA='...'`, but `action/review.yml`
+    embeds the schema INLINE as `--json-schema '...'` with no variable at all. A search for the
+    NAME finds two copies and reports the third absent; only a search for the CONTENT finds all
+    three. That is exactly how the third copy drifted a full revision behind (Codex, PR #28) after
+    the first two were fixed together.
+
+    Compares raw TEXT, not parsed-and-re-serialized JSON: the claim is byte-identity, and a parsed
+    comparison would pass while the surfaces disagreed on key order -- the drift a reader diffing
+    them by eye is being promised is absent.
+    """
+    surfaces = {
+        "action.yml": r"JSON_SCHEMA='([^']*)'",
+        "action/review.yml": r"--json-schema '(\{[^']*\})'",
+    }
+
+    for relpath, pattern in surfaces.items():
+        text = (REPO_ROOT / relpath).read_text(encoding="utf-8")
+        matches = re.findall(pattern, text)
+        # Fail loudly if the extraction anchor drifts, rather than vacuously passing on zero found.
+        assert len(matches) == 1, (
+            f"expected exactly one schema occurrence in {relpath}, found {len(matches)} -- the "
+            "extraction anchor drifted; fix this test's regex, do not delete the check"
+        )
+        assert matches[0] == providers.VERDICT_JSON_SCHEMA, (
+            f"{relpath} has DRIFTED from pantheon.providers.VERDICT_JSON_SCHEMA -- that surface "
+            "would enforce a different verdict shape than the others. Update every copy together, "
+            "or drop the byte-identity claim."
+        )
+
+
+def test_verdict_schema_is_never_stricter_than_the_decider() -> None:
+    """The provider schema must not reject a verdict `pantheon.verdict.decide()` ACCEPTS.
+
+    A schema stricter than the decider fails closed in the WRONG direction: a real, reviewable
+    verdict is rejected before the decider ever sees it and surfaces as UNVERIFIED / NOT GATED.
+    A live Codex review on PR #28 caught exactly that -- `line` typed `integer` and all five
+    display fields `required`, while DESIGN.md's "The display surface -- deliberately NOT
+    schema-validated" section reserves those fields for the render layer, which coerces a
+    non-numeric or absent `.line` to "?".
+
+    Pinned structurally rather than by running a JSON-Schema validator: this package is
+    stdlib-only by design, so there is no validator to call. These assertions compare the schema's
+    own constraint surface against the decider's, which is the property that actually matters.
+    """
+    schema = json.loads(providers.VERDICT_JSON_SCHEMA)
+
+    # The decision surface: exactly the keys decide() demands, no more.
+    assert set(schema["required"]) == set(verdict.REQUIRED_KEYS)
+
+    props = schema["properties"]
+    # Strict where decide() branches -- these types are what the blocker invariant relies on.
+    assert props["has_blocker"]["type"] == "boolean"
+    assert props["verdict"]["type"] == "string"
+    assert props["agent"]["type"] == "string"
+    assert props["findings"]["type"] == "array"
+
+    item = props["findings"]["items"]
+    # severity is the only findings field decide() reads, so it is the only one required.
+    assert item["required"] == ["severity"], (
+        "findings items must require ONLY severity -- requiring a display field rejects verdicts "
+        "decide() accepts (see this test's docstring)"
+    )
+    assert item["properties"]["severity"]["type"] == "string"
+
+    # UNCONSTRAINED on every display field. decide() accepts ANY JSON type there (verified
+    # directly in the companion test below -- objects, arrays, booleans and numbers all come back
+    # green), so permitting only string+null would still be stricter than the decider. An earlier
+    # revision of this very test asserted merely that "null" was allowed, which passed against a
+    # string|null schema that was still too strict -- the assertion was weaker than the guarantee
+    # it claimed to pin. Enumerate every JSON type explicitly so that cannot recur.
+    every_json_type = {"string", "number", "boolean", "object", "array", "null"}
+    for field in ("file", "line", "issue", "scenario"):
+        assert every_json_type <= set(item["properties"][field]["type"]), (
+            f"findings[].{field} is constrained more tightly than decide() -- a verdict the "
+            "binding contract accepts would be rejected as UNVERIFIED"
+        )
+    assert every_json_type <= set(props["summary"]["type"])
+
+
+def test_decider_really_does_accept_the_loose_shape_the_schema_now_permits() -> None:
+    """Companion to the test above: proves the leniency being permitted is REAL, not assumed.
+
+    Without this, the schema could be loosened toward a decider behavior nobody verified -- the
+    two tests together pin both halves (schema permits it AND decide() accepts it), so neither
+    can drift into the gap alone.
+    """
+    # Every JSON type the schema now permits in a display field, proven accepted -- not assumed.
+    for label, finding, summary in [
+        ("string line", {"severity": "note", "line": "section X"}, None),
+        ("object file", {"severity": "note", "file": {"a": 1}}, None),
+        ("array issue", {"severity": "note", "issue": [1, 2]}, None),
+        ("boolean scenario", {"severity": "note", "scenario": True}, None),
+        ("number file", {"severity": "note", "file": 42}, None),
+        ("object summary", {"severity": "note"}, {"nested": "obj"}),
+        ("display fields absent entirely", {"severity": "note"}, "ok"),
+    ]:
+        loose = json.dumps(
+            {
+                "agent": "artemis",
+                "verdict": "SHIP",
+                "has_blocker": False,
+                "findings": [finding],
+                "summary": summary,
+            }
+        )
+
+        decision = verdict.decide("artemis", loose)
+
+        assert decision["color"] == "green", (label, decision)
+        assert decision["verdict"] == "SHIP", label
+        assert decision["invariant_fired"] is False, label

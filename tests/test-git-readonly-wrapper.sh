@@ -156,6 +156,32 @@ accept "git log (bare, no flags)" log
 accept "git log HEAD (bare ref, no flags)" log HEAD
 accept "git show HEAD:README.md (ref:path)" show "HEAD:README.md"
 
+# Safe-flag allowlist (issue #26). The wrapper's original "refuse every flag, no exceptions" rule
+# was too strict to be usable: the personas are told to run `git diff --stat`, `git log --oneline`
+# and friends, so a blanket refusal left agents with no way to read the diff at all (the live
+# 3x-UNVERIFIED counsel run that opened #26). These fixtures pin the narrow allowlist that makes
+# the tier usable WITHOUT reopening the exec-surface class the wrapper exists to close.
+section "Safe-flag allowlist (issue #26) — legit invocations agents actually reach for"
+
+accept "git status --short" status --short
+accept "git status -s" status -s
+accept "git status --porcelain" status --porcelain
+# NOT "--no-color" -- a self-hosted-gate finding (Artemis, live, PR #28): real `git status`
+# has no such flag at all (verified live: `git status --no-color` -> `error: unknown option
+# 'no-color'`, exit 129) -- it must stay off status's own safe-flag allowlist, unlike
+# diff/show/log (which genuinely do accept it).
+refuse "git status --no-color (real git status has no such flag -- must stay refused)" status --no-color
+accept "git log --oneline" log --oneline
+accept "git log --oneline HEAD" log --oneline HEAD
+accept "git show --stat HEAD" show --stat HEAD
+accept "git show --name-only HEAD" show --name-only HEAD
+accept "git show --no-color HEAD" show --no-color HEAD
+
+refuse "git status --stat (a diff-shaped flag, not on status's own allowlist)" status --stat
+refuse "git log --exec-path=/tmp (still refused — not on the safe-flag allowlist)" log --exec-path=/tmp
+refuse "git status -c core.pager=curl (still refused — not on status's own allowlist)" status -c core.pager=curl
+refuse "git show --output=/tmp/pantheon-wrapper-test-pwned3 (still refused)" show --output=/tmp/pantheon-wrapper-test-pwned3 HEAD
+
 # Range-based fixtures (`HEAD~1...HEAD`) run against a dedicated two-commit scratch repo, not
 # $ROOT — see accept_in()'s own comment for why $ROOT's checkout depth can't be relied on here.
 SCRATCH_REPO="$(mktemp -d)"
@@ -169,6 +195,34 @@ echo "second" >> "$SCRATCH_REPO/file.txt"
 git -C "$SCRATCH_REPO" commit -q -am "second commit"
 
 accept_in "$SCRATCH_REPO" "git diff HEAD~1...HEAD (bare range)" diff "HEAD~1...HEAD"
+
+section "Safe-flag allowlist (issue #26) — diff with a real range"
+
+accept_in "$SCRATCH_REPO" "git diff --stat HEAD~1...HEAD" diff --stat "HEAD~1...HEAD"
+accept_in "$SCRATCH_REPO" "git diff --numstat HEAD~1...HEAD" diff --numstat "HEAD~1...HEAD"
+accept_in "$SCRATCH_REPO" "git diff --name-only HEAD~1...HEAD" diff --name-only "HEAD~1...HEAD"
+accept_in "$SCRATCH_REPO" "git diff --name-status HEAD~1...HEAD" diff --name-status "HEAD~1...HEAD"
+accept_in "$SCRATCH_REPO" "git diff -U0 HEAD~1...HEAD" diff -U0 "HEAD~1...HEAD"
+accept_in "$SCRATCH_REPO" "git diff --unified=0 HEAD~1...HEAD" diff --unified=0 "HEAD~1...HEAD"
+accept_in "$SCRATCH_REPO" "git diff --find-renames HEAD~1...HEAD" diff --find-renames "HEAD~1...HEAD"
+accept_in "$SCRATCH_REPO" "git diff --stat --no-color HEAD~1...HEAD (multiple safe flags together)" \
+  diff --stat --no-color "HEAD~1...HEAD"
+
+refuse_in_scratch() {
+  local name="$1"; shift
+  local out status
+  out="$(cd "$SCRATCH_REPO" && "${WRAPPER_CMD[@]}" "$@" 2>&1)"
+  status=$?
+  if [[ $status -ne 0 ]] && grep -q '^pantheon-git-readonly:' <<<"$out"; then
+    pass "$name: refused ($out)"
+  else
+    fail "$name: NOT refused (status=$status, output: $out)"
+  fi
+}
+refuse_in_scratch "git diff --stat -- HEAD~1...HEAD (a safe flag does not license a caller-supplied '--')" \
+  diff --stat -- "HEAD~1...HEAD"
+refuse_in_scratch "git diff --ext-diff HEAD~1...HEAD (still refused even alongside a real range)" \
+  diff --ext-diff "HEAD~1...HEAD"
 
 # Round 2 (Codex, issue #7): the 'range + -- pathspec separator + path' form this suite used to
 # accept is now REFUSED outright — diff takes exactly one argument and the caller can never supply
@@ -251,6 +305,59 @@ fi
 
 rm -f "$HELPER_FIRED_MARKER" "$HELPER_SCRIPT"
 rm -rf "$DRIVER_REPO"
+
+# ---------------------------------------------------------------------------
+# Configured textconv bypass via `log -U<n>` (Codex P1, PR #28 — a live self-hosted-gate finding
+# against issue #26's own safe-flag allowlist). git's own docs: -U<n>/--unified=<n> on `log`
+# IMPLIES --patch, making `log` a second diff-producing subcommand needing the same
+# --no-ext-diff/--no-textconv forcing diff/show already get — missing for `log` in the allowlist's
+# own first landing.
+# ---------------------------------------------------------------------------
+section "Configured textconv bypass via 'log -U<n>' (Codex P1, PR #28)"
+
+TEXTCONV_REPO="$(mktemp -d)"
+git -C "$TEXTCONV_REPO" init -q
+git -C "$TEXTCONV_REPO" config user.email "test@example.com"
+git -C "$TEXTCONV_REPO" config user.name "test"
+echo "a" > "$TEXTCONV_REPO/file.evil"
+git -C "$TEXTCONV_REPO" add file.evil
+git -C "$TEXTCONV_REPO" commit -q -m "first"
+echo "b" > "$TEXTCONV_REPO/file.evil"
+git -C "$TEXTCONV_REPO" commit -q -am "second"
+
+echo "*.evil diff=pwn" > "$TEXTCONV_REPO/.gitattributes"
+TEXTCONV_MARKER="$(mktemp -u)"
+rm -f "$TEXTCONV_MARKER"
+TEXTCONV_HELPER="$(mktemp)"
+cat > "$TEXTCONV_HELPER" <<EOF
+#!/bin/sh
+touch "$TEXTCONV_MARKER"
+cat "\$1"
+EOF
+chmod +x "$TEXTCONV_HELPER"
+git -C "$TEXTCONV_REPO" config "diff.pwn.textconv" "$TEXTCONV_HELPER"
+
+# Negative control: RAW git, same fixture repo, same configured textconv driver, MUST fire the
+# marker via 'log -U0' (proves the fixture is live, and reproduces exactly what the pre-fix
+# wrapper — which forced no --no-ext-diff/--no-textconv on log at all — forwarded straight to).
+rm -f "$TEXTCONV_MARKER"
+( cd "$TEXTCONV_REPO" && git log -U0 "HEAD~1..HEAD" >/dev/null 2>&1 )
+if [[ -f "$TEXTCONV_MARKER" ]]; then
+  pass "negative control: RAW git (no wrapper) DOES fire the configured textconv driver via 'log -U0' — fixture is live"
+else
+  fail "negative control FAILED: raw git did not fire the configured textconv driver via 'log -U0' at all — this fixture is not exercising anything"
+fi
+
+rm -f "$TEXTCONV_MARKER"
+( cd "$TEXTCONV_REPO" && "${WRAPPER_CMD[@]}" log -U0 "HEAD~1..HEAD" >/dev/null 2>&1 )
+if [[ -f "$TEXTCONV_MARKER" ]]; then
+  fail "configured textconv driver FIRED via the wrapper's 'log -U0' — --no-ext-diff/--no-textconv regression on log"
+else
+  pass "configured textconv driver did NOT fire via the wrapper's 'log -U0' — --no-ext-diff/--no-textconv forced on log closes it"
+fi
+
+rm -f "$TEXTCONV_MARKER" "$TEXTCONV_HELPER"
+rm -rf "$TEXTCONV_REPO"
 
 # ---------------------------------------------------------------------------
 # Index-write hygiene (Codex P2): `git status` performs an optional index refresh that writes
@@ -742,9 +849,8 @@ fi
 rm -rf "$LAZY_ORIGIN" "$LAZY_CLONE_RAW" "$LAZY_CLONE_WRAP"
 
 # ---------------------------------------------------------------------------
-# Untrusted-checkout PATH-injection (Codex P1, python-mode only — the vector is specific to how
-# pantheon/execution.py resolves the `git` binary; the bash wrapper's `exec git ...` has no
-# equivalent TRUSTED_GIT_DIRS mechanism to test). Round 1 of this finding: a bare
+# Untrusted-checkout PATH-injection (Codex P1) — the vector is specific to how
+# pantheon/execution.py resolves the `git` binary. Round 1 of this finding: a bare
 # `shutil.which("git")` resolves a RELATIVE PATH entry (e.g. `.`), letting a PR-committed `./git`
 # impostor run in place of the real binary. Round 2 (fresh evidence after round 1's fix): even an
 # ABSOLUTE PATH entry is not automatically trustworthy — `PATH=$PWD/bin:/usr/bin` with a
