@@ -12,10 +12,13 @@
 # read from $GITHUB_WORKSPACE (the PR's own checkout) — the read-only git wrapper, the
 # persona (.md) the agent runs as, and the verdict decider it's graded by. The verdict decider is
 # the `pantheon.verdict` module, which itself depends on `pantheon.jqjson` — so "the verdict
-# decider" is TWO base-pinned files (`pantheon/__init__.py`, `pantheon/jqjson.py`, plus
-# `pantheon/verdict.py` itself: three files total), each resolved by the identical base-pinned
-# mechanism, into a package-shaped `$RUNNER_TEMP` directory the "Decide verdict" step below
-# points `PYTHONPATH` at. The read-only git wrapper (`pantheon/execution.py`) is resolved the
+# decider" is several base-pinned files (`pantheon/__init__.py`, `pantheon/jqjson.py`, plus
+# `pantheon/verdict.py` itself), each resolved by the identical base-pinned mechanism, into a
+# package-shaped `$RUNNER_TEMP` directory the "Decide verdict" step below points `PYTHONPATH` at.
+# `pantheon/render.py` rides the same mechanism: its `sanitize_inline` is what stops model-authored
+# prose from breaking out of the posted comment's markdown table, and it must be base-pinned for
+# the same reason the decider is — a PR that could swap the escaping rules could un-escape
+# itself. The read-only git wrapper (`pantheon/execution.py`) is resolved the
 # same way, separately — see "Resolve read-only git wrapper (base-pinned)" below. Only
 # REVIEW_RULES.md/DESIGN.md (judgment CONTENT, not gate behavior) remain a documented exception
 # on this one lane — see DESIGN.md's "Lane differences".
@@ -54,8 +57,48 @@ permissions:
   # empty, and the gate correctly fails closed as NOT GATED.
 
 jobs:
+  # FORK PRs ARE NOT GATED, AND SAY SO.
+  #
+  # GitHub does not give a `pull_request` run from a fork access to `secrets.*` — deliberately,
+  # because the PR's own code executes in that job and a leaked credential would be a stranger's
+  # for the taking. So the OAuth-token secret is the EMPTY STRING on a fork, and the
+  # gate cannot call a provider at all.
+  #
+  # What this used to do: hit the auth assertion and fail with "CLAUDE_CODE_OAUTH_TOKEN secret is
+  # not set". That message is FALSE here — the secret IS set on the repo, GitHub withheld it. A
+  # contributor read it as maintainer misconfiguration, could do nothing about it, and the check
+  # was permanently red on every community PR with no way for anyone to turn it green.
+  #
+  # What it does now: the `review` job simply does not run on a fork (skipped, not failed), and
+  # `fork-notice` states plainly what happened and what it means. **A fork PR is NOT REVIEWED** —
+  # do not read the absence of a red X as a passing gate. Review it yourself.
+  #
+  # DO NOT "FIX" THIS WITH `pull_request_target`. That trigger DOES expose secrets, and this
+  # workflow's entire job is to fetch and process the PR's diff — it is the textbook setup for
+  # handing a stranger's content your token. Everything else this file does (base-pinned personas
+  # and decider, the read-only git wrapper, the argv allowlist) sits BELOW the trigger and cannot
+  # protect you from that choice. See SECURITY.md's "Fork pull requests" section for the
+  # `workflow_run` pattern if you genuinely need fork review.
+  fork-notice:
+    if: ${{ vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name != github.repository }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain why this PR is not gated
+        run: |
+          set -euo pipefail
+          echo "::notice::review-pantheon: NOT GATED — this PR comes from a fork, and GitHub withholds repository secrets from fork runs by design, so the gate has no credential to call a review provider with. This is expected and is not a misconfiguration. The PR has NOT been reviewed by Artemis or Apollo; review it manually."
+          {
+            echo "### ⚠️ review-pantheon: NOT GATED (fork pull request)"
+            echo
+            echo "This PR comes from a fork. GitHub withholds repository secrets from fork runs by"
+            echo "design, so the gate cannot authenticate to a review provider."
+            echo
+            echo "**This PR has not been reviewed by Artemis or Apollo.** A green check here means"
+            echo "the gate skipped, not that the change passed. Review it manually before merging."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   review:
-    if: ${{ vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false }}
+    if: ${{ vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository }}
     strategy:
       fail-fast: false
       matrix:
@@ -63,9 +106,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Assert CLAUDE_CODE_OAUTH_TOKEN secret is present
+        # Via env:, never `${{ secrets.* }}` inside the script. An interpolated secret is pasted
+        # into the script TEXT before bash parses it, so a token containing a shell metacharacter
+        # breaks or injects into this step — and the secret's own value ends up in the generated
+        # script rather than only in the process environment. GitHub's own hardening guidance
+        # calls this out; caught here by tests/check_action_expressions.py.
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" ]; then
+          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
             echo "::error::CLAUDE_CODE_OAUTH_TOKEN secret is not set — the gate fails loud, it does not skip."
             exit 1
           fi
@@ -185,6 +235,19 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          # Belt-and-braces, and NOT the thing doing the work: with the `:?` below present,
+          # local shellcheck stays quiet even without the directive (mutation-tested both ways).
+          # It is kept only because CI's shellcheck version differs from a dev box's — precisely
+          # how an SC2015 finding reached CI after passing locally earlier in this branch. If you
+          # delete anything here, delete the directive, never the `:?` — that one is load-bearing.
+          # BASE_SHA is provided by the `env:` block on this step
+          # shellcheck disable=SC2153
+          # above — GitHub exports it before bash starts, so it is never assigned inside this
+          # script. shellcheck sees only the body, and the `local base_sha` inside
+          # pantheon_base_pinned_read below makes it guess a misspelling. The `:?` on the next
+          # line is the real guard: if the env binding is ever dropped, this dies immediately
+          # rather than base-pinning against an empty ref.
+          : "${BASE_SHA:?BASE_SHA must be set by the env: block on this step}"
 
           # ---- BEGIN inlined copy of pantheon/basepin.py's algorithm — keep in sync by hand ----
           pantheon_normalize_repo_path() {
@@ -344,6 +407,19 @@ jobs:
           AGENT_NAME: ${{ matrix.agent }}
         run: |
           set -euo pipefail
+          # Belt-and-braces, and NOT the thing doing the work: with the `:?` below present,
+          # local shellcheck stays quiet even without the directive (mutation-tested both ways).
+          # It is kept only because CI's shellcheck version differs from a dev box's — precisely
+          # how an SC2015 finding reached CI after passing locally earlier in this branch. If you
+          # delete anything here, delete the directive, never the `:?` — that one is load-bearing.
+          # BASE_SHA is provided by the `env:` block on this step
+          # shellcheck disable=SC2153
+          # above — GitHub exports it before bash starts, so it is never assigned inside this
+          # script. shellcheck sees only the body, and the `local base_sha` inside
+          # pantheon_base_pinned_read below makes it guess a misspelling. The `:?` on the next
+          # line is the real guard: if the env binding is ever dropped, this dies immediately
+          # rather than base-pinning against an empty ref.
+          : "${BASE_SHA:?BASE_SHA must be set by the env: block on this step}"
 
           # ---- BEGIN inlined copy of pantheon/basepin.py's algorithm — keep in sync by hand ----
           pantheon_normalize_repo_path() {
@@ -475,7 +551,7 @@ jobs:
           # package directory instead of one file at $RUNNER_TEMP's top level.
           PANTHEON_PKG_DIR="$RUNNER_TEMP/pantheon-verdict/pantheon"
           mkdir -p "$PANTHEON_PKG_DIR"
-          for pyfile in __init__.py jqjson.py verdict.py; do
+          for pyfile in __init__.py jqjson.py verdict.py render.py; do
             pyfile_rc=0
             pantheon_base_pinned_read "$BASE_SHA" ".github/review-agents/pantheon/${pyfile}" "$PANTHEON_PKG_DIR/${pyfile}" || pyfile_rc=$?
             if [ "$pyfile_rc" -eq 1 ]; then
@@ -828,25 +904,67 @@ jobs:
 
       - name: Save verdict artifact
         if: always()
+        # EVERY value below travels through `env:`, never `${{ }}` inside `run:`. `top_finding`
+        # and `findings_json` are built verbatim from the MODEL'S OWN PROSE (pantheon/verdict.py's
+        # top_finding_of), and `${{ }}` is expanded by the expression engine BEFORE bash parses
+        # the script — so an interpolated value is not data, it is script text. A finding whose
+        # `issue` contained a quote and a `;` would execute on the runner, in the same job that
+        # holds CLAUDE_CODE_OAUTH_TOKEN, and could rewrite these very artifacts before upload to
+        # forge a green comment. Even an ordinary apostrophe ("doesn't", "the caller's cwd") broke
+        # the step. action.yml has always done this correctly via `env:`; this vendored copy had
+        # diverged. (Both caught by a pre-flip security review; see also the actionlint CI step,
+        # which exists so this class fails the build instead of shipping.)
         env:
           AGENT_NAME: ${{ matrix.agent }}
+          DOCS_ONLY: ${{ steps.docs-check.outputs.docs_only }}
+          DECIDED_COLOR: ${{ steps.decide.outputs.color }}
+          DECIDED_VERDICT: ${{ steps.decide.outputs.verdict }}
+          DECIDED_TOP: ${{ steps.decide.outputs.top_finding }}
+          DECIDED_FINDINGS: ${{ steps.decide.outputs.findings_json }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/verdicts"
-          if [ "$AGENT_NAME" = "apollo" ] && [ "${{ steps.docs-check.outputs.docs_only }}" = "true" ]; then
+          if [ "$AGENT_NAME" = "apollo" ] && [ "$DOCS_ONLY" = "true" ]; then
             color="yellow"; verdict="SKIPPED"; top="docs-only diff: apollo skipped by design"
             findings='{"agent":"apollo","verdict":"SKIPPED","has_blocker":false,"findings":[],"summary":"docs-only diff: apollo skipped by design"}'
           else
-            color="${{ steps.decide.outputs.color || 'unverified' }}"
-            verdict="${{ steps.decide.outputs.verdict || 'UNVERIFIED' }}"
-            top='${{ steps.decide.outputs.top_finding || "decide step did not run" }}'
-            findings='${{ steps.decide.outputs.findings_json || "{}" }}'
+            color="${DECIDED_COLOR:-}"; [ -n "$color" ] || color="unverified"
+            verdict="${DECIDED_VERDICT:-}"; [ -n "$verdict" ] || verdict="UNVERIFIED"
+            top="${DECIDED_TOP:-}"; [ -n "$top" ] || top="decide step did not run"
+            findings="${DECIDED_FINDINGS:-}"; [ -n "$findings" ] || findings='{}'
           fi
-          cat > "$RUNNER_TEMP/verdicts/${AGENT_NAME}.json" <<EOF
-          {"agent":"${AGENT_NAME}","color":"$color","verdict":"$verdict"}
-          EOF
+          # SANITIZE HERE, not in the combine job. `verdict` and `top` are model-authored prose,
+          # and the combine job interpolates them straight into a markdown TABLE ROW. Unescaped,
+          # a `|` fractures the row, an `@team` fires a real GitHub mention on every gate run, and
+          # raw HTML passes through -- pantheon/render.py's sanitize_inline exists precisely to
+          # stop that ("so a model's text can't page an entire team", its own docstring) and the
+          # action.yml lane has always used it. This lane could not: the combine job is a SEPARATE
+          # job with no checkout, so it has no pantheon package to call. This job does -- it is
+          # base-pinned right above -- so the values are sanitized at WRITE time and everything
+          # downstream consumes text that is already safe. One implementation, both lanes, no
+          # second copy of the escaping rules to drift.
+          #
+          # json.dumps (not a hand-quoted heredoc) for the same reason one layer down: a quote or
+          # newline in a model-derived value would otherwise emit malformed JSON, which the
+          # combine step cannot parse. Worth stating precisely, because the obvious guess is wrong:
+          # the combine step does NOT fall back to its `.get(...)` default. json.load raises, the
+          # command substitution yields the EMPTY STRING, no `case` arm matches it, and `overall`
+          # stays GREEN -- a red laundered into "all clear", not into an UNVERIFIED. Both ends are
+          # now closed: malformed JSON cannot be produced here, and the combine step re-defaults
+          # an empty read back to "unverified".
+          AGENT="$AGENT_NAME" COLOR="$color" VERDICT="$verdict" TOP="$top" \
+          PYTHONPATH="$RUNNER_TEMP/pantheon-verdict" python3 -c '
+          import json, os
+          from pantheon.render import sanitize_inline
+          agent = os.environ["AGENT"]
+          out = {"agent": agent, "color": os.environ["COLOR"],
+                 "verdict": sanitize_inline(os.environ["VERDICT"])}
+          with open(os.environ["RUNNER_TEMP"] + "/verdicts/" + agent + ".json", "w") as fh:
+              json.dump(out, fh)
+          with open(os.environ["RUNNER_TEMP"] + "/verdicts/" + agent + "-top.txt", "w") as fh:
+              fh.write(sanitize_inline(os.environ["TOP"]))
+          '
           printf '%s' "$findings" > "$RUNNER_TEMP/verdicts/${AGENT_NAME}-findings.json"
-          printf '%s' "$top" > "$RUNNER_TEMP/verdicts/${AGENT_NAME}-top.txt"
 
       # Matrix legs each get their own job-output namespace and cannot expose distinct static
       # `jobs.<id>.outputs` back to a downstream job (the last leg to finish would silently
@@ -862,7 +980,10 @@ jobs:
 
   post-comment:
     needs: [review]
-    if: ${{ always() && vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false }}
+    # Same fork exclusion as `review` above: with no matrix run there are no verdict artifacts,
+    # so this job would post a NOT GATED comment for a PR that was never meant to be gated —
+    # and on a fork it could not post at all (GITHUB_TOKEN is read-only for fork runs).
+    if: ${{ always() && vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -891,8 +1012,18 @@ jobs:
             dir="$VERDICTS_DIR/verdict-$agent"
             color="unverified"; verdict="UNVERIFIED"; top="job did not report a result"
             if [ -f "$dir/$agent.json" ]; then
-              color="$(python3 -c "import json,sys; print(json.load(open('$dir/$agent.json')).get('color','unverified'))")"
-              verdict="$(python3 -c "import json,sys; print(json.load(open('$dir/$agent.json')).get('verdict','UNVERIFIED'))")"
+              # Path passed via env, not interpolated into the python source. And BOTH values are
+              # re-defaulted after the read: on a malformed artifact json.load raises, the command
+              # substitution yields the EMPTY STRING, and that empty string would otherwise
+              # CLOBBER the fail-closed "unverified" set two lines above -- no `case` arm matches
+              # "", so `overall` would stay green and the posted comment would read "all clear"
+              # with this agent silently missing. Fail-open, in the one place a human reads the
+              # result. (action/lib/combine_verdicts.sh guards this the same way for the other
+              # lane; this vendored copy did not.)
+              color="$(V_JSON="$dir/$agent.json" python3 -c "import json,os; print(json.load(open(os.environ['V_JSON'])).get('color','unverified'))" 2>/dev/null || true)"
+              verdict="$(V_JSON="$dir/$agent.json" python3 -c "import json,os; print(json.load(open(os.environ['V_JSON'])).get('verdict','UNVERIFIED'))" 2>/dev/null || true)"
+              [ -n "$color" ] || color="unverified"
+              [ -n "$verdict" ] || verdict="UNVERIFIED"
             fi
             if [ -f "$dir/$agent-top.txt" ]; then
               top="$(cat "$dir/$agent-top.txt")"
@@ -902,12 +1033,16 @@ jobs:
             case "$color" in
               red) overall="red" ;;
               unverified) [ "$overall" = "red" ] || overall="unverified" ;;
-              yellow) [ "$overall" = "green" ] && overall="yellow" || true ;;
+              # `if`, not `[ ... ] && x || true`: shellcheck's SC2015 is right that A && B || C
+              # is not if-then-else — C runs whenever B fails, which is a real trap even though
+              # an assignment cannot fail here. Written plainly so the next edit to this line
+              # cannot introduce the bug the idiom invites.
+              yellow) if [ "$overall" = "green" ]; then overall="yellow"; fi ;;
             esac
 
             has_findings=false
             if [ -f "$dir/$agent-findings.json" ]; then
-              has_findings="$(python3 -c "import json; d=json.load(open('$dir/$agent-findings.json')); print('true' if d.get('findings') else 'false')" 2>/dev/null || echo false)"
+              has_findings="$(F_JSON="$dir/$agent-findings.json" python3 -c "import json,os; d=json.load(open(os.environ['F_JSON'])); print('true' if d.get('findings') else 'false')" 2>/dev/null || echo false)"
             fi
             if [ "$has_findings" = "true" ]; then
               any_findings=true

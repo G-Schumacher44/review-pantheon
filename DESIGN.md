@@ -268,13 +268,16 @@ just no longer the primary read. `pantheon.render` is the one implementation of 
 by `pantheon gate` directly and by `action/lib/combine_verdicts.sh` (the published action's
 renderer), so the CLI surface and the published-action surface read identically by construction,
 not by hand-kept-in-sync wording. `action/review.yml` (the vendored, install.sh-Way-A workflow)
-is the one surface that still can't reach it — a target repo never gets a copy of `pantheon/`
-except the specific files base-pinned into `$RUNNER_TEMP` for the verdict decider and the
-read-only git wrapper (see "Security posture" below), and `render.py` isn't among them — so its
-"Build and post combined comment" step remains a hand-synced inline copy of the pre-existing
-(plainer) table + raw-JSON-dump shape; bringing it up to the same format needs either
-base-pinning `pantheon/render.py` into that surface's own footprint or duplicating the renderer
-inline in that YAML, neither done here.
+reaches it PARTIALLY. A target repo only ever gets the specific files base-pinned into
+`$RUNNER_TEMP` (see "Security posture" below), and `render.py` is now among them: `install.sh`
+vendors it and the workflow base-pins it, so that lane calls the real `sanitize_inline` on
+model-authored `verdict`/`top_finding` at WRITE time — the escaping is one implementation shared
+with the composite lane, not a second copy of the rules. What remains hand-synced on that surface
+is only the comment's LAYOUT: its "Build and post combined comment" step still assembles the
+plainer table + raw-JSON-dump shape in bash rather than calling `render_comment`, because the
+combine step runs in a separate job with no checkout and therefore no `pantheon` package. Closing
+that last gap needs the renderer reachable from that job (a second base-pin, or passing the
+rendered comment forward as an artifact) — not done here.
 
 ## House rules are pluggable
 
@@ -338,7 +341,7 @@ history, not here — a contract describes what's true now, not how it got that 
   | File read | CLI (`pantheon gate`) | Published action (`action.yml`) | Vendored workflow (`action/review.yml`) |
   |---|---|---|---|
   | Personas (`agents/*.md`) | ✅ review-pantheon's own installed copy, never the target repo's | ✅ `$ACTION_PATH/agents` by default; ✅ base-pinned into `$RUNNER_TEMP` when `personas_path` is set | ✅ base-pinned into `$RUNNER_TEMP` |
-  | Verdict decider (`pantheon.verdict`) | ✅ this repo's own installed package | ✅ `$ACTION_PATH/pantheon/verdict.py` | ✅ base-pinned into `$RUNNER_TEMP` (its `__init__.py`/`jqjson.py`/`verdict.py` dependency closure) |
+  | Verdict decider (`pantheon.verdict`) | ✅ this repo's own installed package | ✅ `$ACTION_PATH/pantheon/verdict.py` | ✅ base-pinned into `$RUNNER_TEMP` (its `__init__.py`/`jqjson.py`/`verdict.py` dependency closure, plus `render.py` for write-time `sanitize_inline`) |
   | Read-only git wrapper (`pantheon.execution`) | ✅ this repo's own installed package | ✅ `$ACTION_PATH/pantheon/execution.py` | ✅ base-pinned into `$RUNNER_TEMP` |
   | House rules / spec (`REVIEW_RULES.md` / `DESIGN.md`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned into `$RUNNER_TEMP` |
   | `gate.conf`'s `execution=`/`provider=`/`rules_file=`/`spec_file=`/`agents=` keys | ✅ base-pinned (all five, one `git show`+parse) | — (no `gate.conf`; these are explicit inputs, operator-typed, not PR content) | — (no config surface at all) |
@@ -598,8 +601,9 @@ identical tools. Differences are intentional, not oversights:
 `action/review.yml`: a composite GitHub Action a target repo consumes with a `uses:
 G-Schumacher44/review-pantheon@v1` reference and nothing else — zero files land in that repo
 (contrast with `install.sh`'s Way A, which vendors personas + `action/review.yml` + the
-`pantheon` package's verdict-decision and read-only-git modules (`pantheon/__init__.py`,
-`pantheon/jqjson.py`, `pantheon/verdict.py`, `pantheon/execution.py` — the base-pinned quartet
+`pantheon` package's verdict-decision, sanitizer and read-only-git modules (`pantheon/__init__.py`,
+`pantheon/jqjson.py`, `pantheon/verdict.py`, `pantheon/render.py`, `pantheon/execution.py` — the
+five base-pinned files
 `action/review.yml`'s own steps invoke by their own absolute path, never `python3 -m
 pantheon.verdict`/`python3 -m pantheon.execution` — see "Security posture" above for why) into
 the target repo precisely so its own runner can see them; the published action instead reads

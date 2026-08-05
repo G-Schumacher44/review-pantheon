@@ -61,6 +61,10 @@ the CLI at all, only the Action.
    matches a release you trust before relying on this gate.
 4. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
 5. Only after step 4 passes, consider making the check required.
+   On a repository that accepts outside contributions, read
+   [SECURITY.md's "Fork pull requests"](../SECURITY.md#fork-pull-requests) first: fork PRs
+   cannot be gated (GitHub withholds secrets from fork runs), so the check passes on them
+   **because it skipped** — a required green there does not mean the PR was reviewed.
 
 </details>
 
@@ -189,6 +193,10 @@ which is then yours to edit — add the cloud-provider inputs to its `with:` blo
 2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
 3. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
 4. Only after step 3 passes, consider making the check required.
+   On a repository that accepts outside contributions, read
+   [SECURITY.md's "Fork pull requests"](../SECURITY.md#fork-pull-requests) first: fork PRs
+   cannot be gated (GitHub withholds secrets from fork runs), so the check passes on them
+   **because it skipped** — a required green there does not mean the PR was reviewed.
 
 Still want the Action surface but prefer the files reviewable in your own repo's history (or don't
 want to depend on this repo being public)? That's Way A, not Way C — `install.sh` vendors

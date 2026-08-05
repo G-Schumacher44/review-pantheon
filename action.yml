@@ -8,7 +8,7 @@
 # the one implementation every lane calls), action/lib/*.sh, the JSON schema below — is read
 # from `${{ github.action_path }}`, i.e.
 # review-pantheon's own checkout as GitHub Actions pulls it for the `uses:` reference (run via
-# `PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py"`
+# `PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py"`
 # — a `pip install` is not needed, a stdlib-only package runs straight from its own checkout).
 #
 # Deliberately NOT `python3 -m pantheon.verdict` (a Codex P1 finding on this port's own PR): `-m`
@@ -262,10 +262,15 @@ runs:
     # bumped, re-verify `restoreConfigFromBase`'s call site still exists and is still
     # unconditional for PR events before assuming this protection still holds.
     - name: Assert exactly one auth input is set
+      id: auth
       shell: bash
       env:
         OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
         API_KEY: ${{ inputs.anthropic_api_key }}
+        # Gated on the event: off a pull_request, `github.event.pull_request` is null, so a bare
+        # inequality would report "this PR is from a fork" on a push/workflow_dispatch run with a
+        # genuinely missing secret — the same false diagnosis this whole change removes.
+        IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       run: |
         set -euo pipefail
         if [ -n "$OAUTH_TOKEN" ] && [ -n "$API_KEY" ]; then
@@ -273,9 +278,40 @@ runs:
           exit 1
         fi
         if [ -z "$OAUTH_TOKEN" ] && [ -z "$API_KEY" ]; then
+          # A FORK PR IS NOT A MISCONFIGURATION — say which one this is.
+          #
+          # GitHub withholds `secrets.*` from a `pull_request` run originating in a fork, on
+          # purpose: the PR's own code runs in that job, so an available credential would be a
+          # stranger's for the taking. The caller's secrets input therefore arrives here as
+          # the empty string, and no provider call is possible.
+          #
+          # Reporting that as "you forgot to set a secret" is simply false, and it sent every
+          # fork contributor looking for a setting the maintainer had already configured. The
+          # gate now names the real cause and, on a fork, exits 0 rather than pinning a
+          # permanently-red required check to a PR nobody can turn green.
+          #
+          # It is NOT a pass. The step summary says NOT GATED in as many words, because the one
+          # dangerous reading of a green check is "this was reviewed".
+          #
+          # NEVER "fix" this with `pull_request_target` — see SECURITY.md's "Fork pull requests".
+          if [ "$IS_FORK" = "true" ]; then
+            echo "::notice::review-pantheon: NOT GATED — this PR is from a fork, and GitHub withholds repository secrets from fork runs by design, so there is no credential to review with. Expected, not a misconfiguration. The PR has NOT been reviewed; review it manually."
+            {
+              echo "### ⚠️ review-pantheon: NOT GATED (fork pull request)"
+              echo
+              echo "GitHub withholds repository secrets from fork runs by design, so the gate had"
+              echo "no credential to authenticate with."
+              echo
+              echo "**This PR has not been reviewed by Artemis or Apollo.** A green check here means"
+              echo "the gate skipped, not that the change passed. Review it manually before merging."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "gated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "::error::review-pantheon: set one of claude_code_oauth_token / anthropic_api_key — the gate fails loud, it does not skip."
           exit 1
         fi
+        echo "gated=true" >> "$GITHUB_OUTPUT"
 
     # PR metadata is attacker-controlled on forks (DESIGN.md's "Security posture") — validated
     # before it touches any shell command, same posture as the CLI lane's PR-number/branch-name/
@@ -285,6 +321,7 @@ runs:
     # step that touches either SHA in a shell command; a failure here fails the whole composite
     # action closed (no continue-on-error on this step) before anything downstream executes.
     - name: Validate PR base/head SHAs
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -303,6 +340,7 @@ runs:
 
     - name: Resolve gate configuration
       id: resolve
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         PERSONAS_PATH: ${{ inputs.personas_path }}
@@ -515,6 +553,7 @@ runs:
 
     - name: Detect docs-only diff
       id: docs-check
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -541,9 +580,11 @@ runs:
     # -------------------------------------------------------------------------------------
     - name: Build prompt (artemis)
       id: build-prompt-artemis
-      if: contains(inputs.agents, 'artemis')
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
+        PERSONAS_DIR: ${{ steps.resolve.outputs.personas_dir }}
         REPO_NAME: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
@@ -558,7 +599,7 @@ runs:
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/artemis-prompt.md"
-        bash "${{ github.action_path }}/action/lib/build_prompt.sh" artemis "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        bash "$ACTION_PATH/action/lib/build_prompt.sh" artemis "$PERSONAS_DIR" "$PROMPT_FILE"
         delim="pantheon_$(openssl rand -hex 16)"
         {
           echo "prompt<<$delim"
@@ -568,7 +609,7 @@ runs:
 
     - name: Run artemis
       id: run-agent-artemis
-      if: contains(inputs.agents, 'artemis')
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -580,7 +621,7 @@ runs:
 
     - name: Save raw output (artemis)
       id: save-raw-artemis
-      if: contains(inputs.agents, 'artemis')
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -589,24 +630,28 @@ runs:
 
     - name: Decide verdict (artemis)
       id: decide-artemis
-      if: contains(inputs.agents, 'artemis')
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" artemis "$RUNNER_TEMP/artemis-raw.txt"
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" artemis "$RUNNER_TEMP/artemis-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # apollo — the docs-only exception: skips loudly instead of running (DESIGN.md)
     # -------------------------------------------------------------------------------------
     - name: Log docs-only skip (apollo)
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only == 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only == 'true') && steps.auth.outputs.gated != 'false' }}
       shell: bash
       run: echo "::notice::docs-only diff — skipping apollo loudly (nothing but docs changed)."
 
     - name: Build prompt (apollo)
       id: build-prompt-apollo
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
+        PERSONAS_DIR: ${{ steps.resolve.outputs.personas_dir }}
         REPO_NAME: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
@@ -624,7 +669,7 @@ runs:
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/apollo-prompt.md"
-        bash "${{ github.action_path }}/action/lib/build_prompt.sh" apollo "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        bash "$ACTION_PATH/action/lib/build_prompt.sh" apollo "$PERSONAS_DIR" "$PROMPT_FILE"
         delim="pantheon_$(openssl rand -hex 16)"
         {
           echo "prompt<<$delim"
@@ -634,7 +679,7 @@ runs:
 
     - name: Run apollo
       id: run-agent-apollo
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -646,7 +691,7 @@ runs:
 
     - name: Save raw output (apollo)
       id: save-raw-apollo
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -655,10 +700,12 @@ runs:
 
     - name: Decide verdict (apollo)
       id: decide-apollo
-      if: contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true'
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" apollo "$RUNNER_TEMP/apollo-raw.txt"
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" apollo "$RUNNER_TEMP/apollo-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # socrates / diogenes / plato — counsel agents. Not part of the default `agents` panel;
@@ -667,9 +714,11 @@ runs:
     # -------------------------------------------------------------------------------------
     - name: Build prompt (socrates)
       id: build-prompt-socrates
-      if: contains(inputs.agents, 'socrates')
+      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
+        PERSONAS_DIR: ${{ steps.resolve.outputs.personas_dir }}
         REPO_NAME: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
@@ -684,7 +733,7 @@ runs:
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/socrates-prompt.md"
-        bash "${{ github.action_path }}/action/lib/build_prompt.sh" socrates "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        bash "$ACTION_PATH/action/lib/build_prompt.sh" socrates "$PERSONAS_DIR" "$PROMPT_FILE"
         delim="pantheon_$(openssl rand -hex 16)"
         {
           echo "prompt<<$delim"
@@ -694,7 +743,7 @@ runs:
 
     - name: Run socrates
       id: run-agent-socrates
-      if: contains(inputs.agents, 'socrates')
+      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -706,7 +755,7 @@ runs:
 
     - name: Save raw output (socrates)
       id: save-raw-socrates
-      if: contains(inputs.agents, 'socrates')
+      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -715,16 +764,20 @@ runs:
 
     - name: Decide verdict (socrates)
       id: decide-socrates
-      if: contains(inputs.agents, 'socrates')
+      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" socrates "$RUNNER_TEMP/socrates-raw.txt"
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" socrates "$RUNNER_TEMP/socrates-raw.txt"
 
     - name: Build prompt (diogenes)
       id: build-prompt-diogenes
-      if: contains(inputs.agents, 'diogenes')
+      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
+        PERSONAS_DIR: ${{ steps.resolve.outputs.personas_dir }}
         REPO_NAME: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
@@ -739,7 +792,7 @@ runs:
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/diogenes-prompt.md"
-        bash "${{ github.action_path }}/action/lib/build_prompt.sh" diogenes "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        bash "$ACTION_PATH/action/lib/build_prompt.sh" diogenes "$PERSONAS_DIR" "$PROMPT_FILE"
         delim="pantheon_$(openssl rand -hex 16)"
         {
           echo "prompt<<$delim"
@@ -749,7 +802,7 @@ runs:
 
     - name: Run diogenes
       id: run-agent-diogenes
-      if: contains(inputs.agents, 'diogenes')
+      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -761,7 +814,7 @@ runs:
 
     - name: Save raw output (diogenes)
       id: save-raw-diogenes
-      if: contains(inputs.agents, 'diogenes')
+      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -770,16 +823,20 @@ runs:
 
     - name: Decide verdict (diogenes)
       id: decide-diogenes
-      if: contains(inputs.agents, 'diogenes')
+      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" diogenes "$RUNNER_TEMP/diogenes-raw.txt"
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" diogenes "$RUNNER_TEMP/diogenes-raw.txt"
 
     - name: Build prompt (plato)
       id: build-prompt-plato
-      if: contains(inputs.agents, 'plato')
+      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
+        PERSONAS_DIR: ${{ steps.resolve.outputs.personas_dir }}
         REPO_NAME: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
@@ -794,7 +851,7 @@ runs:
       run: |
         set -euo pipefail
         PROMPT_FILE="$RUNNER_TEMP/plato-prompt.md"
-        bash "${{ github.action_path }}/action/lib/build_prompt.sh" plato "${{ steps.resolve.outputs.personas_dir }}" "$PROMPT_FILE"
+        bash "$ACTION_PATH/action/lib/build_prompt.sh" plato "$PERSONAS_DIR" "$PROMPT_FILE"
         delim="pantheon_$(openssl rand -hex 16)"
         {
           echo "prompt<<$delim"
@@ -804,7 +861,7 @@ runs:
 
     - name: Run plato
       id: run-agent-plato
-      if: contains(inputs.agents, 'plato')
+      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
       with:
@@ -816,7 +873,7 @@ runs:
 
     - name: Save raw output (plato)
       id: save-raw-plato
-      if: contains(inputs.agents, 'plato')
+      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -825,10 +882,12 @@ runs:
 
     - name: Decide verdict (plato)
       id: decide-plato
-      if: contains(inputs.agents, 'plato')
+      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
-      run: PYTHONPATH="${{ github.action_path }}" python3 "${{ github.action_path }}/pantheon/verdict.py" plato "$RUNNER_TEMP/plato-raw.txt"
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" plato "$RUNNER_TEMP/plato-raw.txt"
 
     # -------------------------------------------------------------------------------------
     # Combine + enforce — runs regardless of which/whether prior steps failed, because every
@@ -839,8 +898,10 @@ runs:
     # -------------------------------------------------------------------------------------
     - name: Build and post combined comment
       id: combine
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         GH_TOKEN: ${{ github.token }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -876,9 +937,11 @@ runs:
         PLATO_FINDINGS: ${{ steps.decide-plato.outputs.findings_json }}
         PLATO_INVARIANT: ${{ steps.decide-plato.outputs.invariant_fired }}
         PLATO_REASON: ${{ steps.decide-plato.outputs.reason }}
-      run: bash "${{ github.action_path }}/action/lib/combine_verdicts.sh" "${{ inputs.agents }}"
+        AGENTS: ${{ inputs.agents }}
+      run: bash "$ACTION_PATH/action/lib/combine_verdicts.sh" "$AGENTS"
 
     - name: Enforce gate result
+      if: ${{ steps.auth.outputs.gated != 'false' }}
       shell: bash
       env:
         OVERALL_COLOR: ${{ steps.combine.outputs.overall_color }}

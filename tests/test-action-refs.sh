@@ -25,25 +25,48 @@ fail() { echo "FAIL $1"; FAIL=$((FAIL + 1)); }
 [[ -f "$ACTION_YML" ]] || { fail "action.yml exists"; echo "FAIL: $FAIL, PASS: $PASS"; exit 1; }
 pass "action.yml exists"
 
-# Every `${{ github.action_path }}/<relative-path>` reference in action.yml must resolve to a
-# real file in this repo (the composite action never checks out its own repo — it IS the
-# checkout, at github.action_path — so a typo'd path here is a silent runtime failure, not a
-# YAML error).
-refs="$(grep -oE '\$\{\{ *github\.action_path *\}\}/[A-Za-z0-9_./-]+' "$ACTION_YML" | sed -E 's#^\$\{\{ *github\.action_path *\}\}/##' | sort -u)"
+# Every action-relative path reference in action.yml must resolve to a real file in this repo
+# (the composite action never checks out its own repo — it IS the checkout, at
+# github.action_path — so a typo'd path here is a silent runtime failure, not a YAML error).
+#
+# Matches BOTH spellings: the `env:` binding `ACTION_PATH: ${{ github.action_path }}` consumed as
+# `"$ACTION_PATH/..."` inside run: blocks (the required form — a security review established that
+# `${{ }}` must never appear inside a run: script, since the expression engine substitutes before
+# bash parses; see tests/check_action_expressions.py), and any surviving direct
+# `${{ github.action_path }}/...` interpolation outside a run: block, which is still legal.
+# shellcheck disable=SC2016  # the single quotes are the point: these are grep/sed REGEXES that
+# must match the literal text `$ACTION_PATH` in action.yml, not expand a shell variable here.
+refs="$( { grep -oE '\$\{\{ *github\.action_path *\}\}/[A-Za-z0-9_./-]+' "$ACTION_YML" | sed -E 's#^\$\{\{ *github\.action_path *\}\}/##'
+           grep -oE '\$ACTION_PATH/[A-Za-z0-9_./-]+' "$ACTION_YML" | sed -E 's#^.ACTION_PATH/##'
+           grep -oE '\$\{ACTION_PATH\}/[A-Za-z0-9_./-]+' "$ACTION_YML" | sed -E 's#^.\{ACTION_PATH\}/##'
+         } | sort -u )"
 
 if [[ -z "$refs" ]]; then
-  fail "action.yml contains at least one github.action_path reference"
+  fail "action.yml contains at least one action-path file reference"
 else
-  pass "action.yml contains github.action_path references ($(printf '%s\n' "$refs" | wc -l | tr -d ' ') found)"
+  pass "action.yml contains action-path file references ($(printf '%s\n' "$refs" | wc -l | tr -d ' ') found)"
+fi
+
+# The env: binding itself must exist — otherwise every "$ACTION_PATH/..." above expands to
+# "/..." at run time and every referenced file silently resolves to the filesystem root.
+if grep -qE '^\s+ACTION_PATH: \$\{\{ *github\.action_path *\}\}\s*$' "$ACTION_YML"; then
+  pass "action.yml binds ACTION_PATH from github.action_path in env:"
+else
+  fail "action.yml uses \$ACTION_PATH but never binds it to github.action_path in an env: block"
 fi
 
 while IFS= read -r rel; do
   [[ -z "$rel" ]] && continue
   assert_path="$ROOT/$rel"
+  # -e, not -f: `$ACTION_PATH/agents` is the bundled persona DIRECTORY, a legitimate reference.
+  # The property under test is "this path exists in the repo the action ships as", not "it is a
+  # regular file" — a missing path is a silent runtime failure either way.
   if [[ -f "$assert_path" ]]; then
     pass "referenced file exists: $rel"
+  elif [[ -d "$assert_path" ]]; then
+    pass "referenced directory exists: $rel/"
   else
-    fail "referenced file MISSING: $rel (action.yml points at github.action_path/$rel)"
+    fail "referenced path MISSING: $rel (action.yml points at the action checkout's $rel)"
   fi
 done <<< "$refs"
 

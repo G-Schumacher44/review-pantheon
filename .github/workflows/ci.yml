@@ -78,6 +78,61 @@ jobs:
               print(f + ': OK')
           "
 
+      # actionlint, NOT just the YAML parse above. A pre-flip security review found
+      # action/review.yml carrying `|| "literal"` inside a `${{ }}` expression — the expression
+      # grammar accepts SINGLE-quoted literals only, so GitHub rejected the file at queue time and
+      # the vendored workflow every Way-A adopter installs reviewed exactly zero PRs. The YAML
+      # parse above could never catch it: the file IS valid YAML, and ci.yml's own header notes
+      # review.yml never runs against this repo, so nothing executed it either. A check that
+      # cannot fail for the actual failure mode is green by construction; this is the check that
+      # can.
+      #
+      # SCOPE, precisely — actionlint does NOT catch the shell-injection shape. An earlier version
+      # of this comment claimed it did; that was verified FALSE (re-inserting
+      # `top='${{ steps.decide.outputs.top_finding }}'` inside a `run:` block lints clean, exit 0).
+      # actionlint's untrusted-input rule fires only for an allowlist of `github.*` contexts and
+      # never for `steps.*.outputs.*` — which is exactly the model-derived vector this repo cares
+      # about. Claiming coverage you do not have is worse than having none: the next maintainer
+      # trusts the check and ships the injection. The separate grep guard below is what actually
+      # backs that promise.
+      - name: Lint the workflows with actionlint
+        env:
+          # Pinned to a COMMIT SHA, not `main` and not a tag. This runs on every push/PR, and an
+          # unpinned installer from a third-party repo is arbitrary code execution in this job on
+          # someone else's commit. A tag is not a pin — its owner can move it. This repo already
+          # fails its own build if `claude-code-action` is not pinned to a full 40-char SHA
+          # (tests/test-action-refs.sh), so applying a weaker standard to its own tooling was the
+          # inconsistency a pre-flip review flagged. 03d0035246f3e81f36aed592ffb4bebf33a03106 is v1.7.7,
+          # resolved via `gh api repos/rhysd/actionlint/git/ref/tags/v1.7.7`.
+          ACTIONLINT_SHA: "03d0035246f3e81f36aed592ffb4bebf33a03106"
+          ACTIONLINT_VERSION: "1.7.7"
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/${ACTIONLINT_SHA}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
+          # action/review.yml is a vendored workflow that lives outside .github/workflows, so
+          # actionlint's own auto-discovery does not see it — name it explicitly. Passing it as an
+          # argument is what makes this step cover the file that actually shipped broken.
+          #
+          # action.yml is NOT lintable here and cannot be: it is composite-action metadata, so
+          # actionlint rejects it ("\"jobs\" section is missing in workflow"). That leaves the
+          # flagship published surface — the `@v1` path every non-vendoring adopter uses — without
+          # expression-grammar coverage, which is why the next step exists.
+          #
+          # -ignore SC2016 ("expressions don't expand in single quotes"): informational only. All
+          # occurrences are deliberate single-quoted `grep`/`sed` regex patterns in this file and
+          # release.yml (verified: removing the flag surfaces exactly those, nothing else).
+          ./actionlint -color -ignore 'SC2016' .github/workflows/*.yml action/review.yml
+
+      # The guard actionlint cannot provide, for BOTH Action surfaces including action.yml.
+      # Two classes, both found live on this repo by a pre-flip security review:
+      #   1. double-quoted string literals inside `${{ }}` — invalid grammar, rejected at queue
+      #      time, workflow silently never runs.
+      #   2. `${{ }}` interpolated into a `run:` block — the expression engine substitutes BEFORE
+      #      bash parses, so model-authored prose becomes script text (RCE in a job holding
+      #      CLAUDE_CODE_OAUTH_TOKEN). Values must travel via `env:` and be read as "$VAR".
+      - name: Guard both Action surfaces against expression-injection shapes
+        run: python3 tests/check_action_expressions.py
+
       - name: Run verdict-decision fixture tests
         run: bash tests/test-verdict-decision-python.sh
 
@@ -165,19 +220,23 @@ jobs:
           # it still cites a stale number (exactly how the bash count drifted to 18 silently
           # across three slices before this check existed); assert the digit, not just the rows.
           sh_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '\.sh$')
-          py_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '\.py$')
+          # test_*.py, not *.py: the sentence this is checked against says "tests/test_*.py", and
+          # tests/ also holds CI guard scripts that pytest never collects (check_action_expressions.py).
+          # Those coincided until the first non-test .py landed here, at which point counting all
+          # .py made the check demand a number the sentence does not describe.
+          py_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '/test_.*\.py$')
           # sort -u: the count sentence is deliberately allowed to appear more than once (the
           # table intro and its own subsection heading both cite it) — dedupe identical repeats,
           # but a genuine mismatch between two citations still surfaces as more than one line,
           # which the single-value check below correctly rejects.
           sh_count_prose="$(grep -oE '\([0-9]+ files; verified against `git ls-tree -r tests/\*\.sh`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
-          py_count_prose="$(grep -oE '\([0-9]+ files, `tests/test_\*\.py`; verified against `git ls-tree -r tests/\*\.py`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
+          py_count_prose="$(grep -oE '\([0-9]+ files, `tests/test_\*\.py`; verified against `git ls-tree -r tests/test_\*\.py`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
           [[ -n "$sh_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's bash-suite prose count sentence — did its wording change? update this check's regex to match"; status=1; }
           [[ -n "$py_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's pytest prose count sentence — did its wording change? update this check's regex to match"; status=1; }
           [[ "$(wc -l <<<"$sh_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct bash-suite count across its mentions: $sh_count_prose"; status=1; }
           [[ "$(wc -l <<<"$py_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct pytest count across its mentions: $py_count_prose"; status=1; }
           [[ "$sh_count_prose" == "$sh_count_tree" ]] || { echo "::error::CONTRIBUTING.md's bash-suite prose count ($sh_count_prose) != actual tests/*.sh count ($sh_count_tree)"; status=1; }
-          [[ "$py_count_prose" == "$py_count_tree" ]] || { echo "::error::CONTRIBUTING.md's pytest prose count ($py_count_prose) != actual tests/*.py count ($py_count_tree)"; status=1; }
+          [[ "$py_count_prose" == "$py_count_tree" ]] || { echo "::error::CONTRIBUTING.md's pytest prose count ($py_count_prose) != actual tests/test_*.py count ($py_count_tree)"; status=1; }
 
           exit "$status"
 
