@@ -35,7 +35,7 @@ Run the suites — each is a standalone fixture test, no runner needed. **This t
 canonical, complete list of the bash fixture suites (15 files; verified against `git ls-tree -r tests/*.sh`)**
 — DESIGN.md's "Layout" section points here instead of re-listing them, see DESIGN.md rule 5 on
 the two staying in sync. A separate pytest unit layer (9 files, `tests/test_*.py`; verified
-against `git ls-tree -r tests/*.py`) is its own documented category below — CI's sync-check
+against `git ls-tree -r tests/test_*.py`) is its own documented category below — CI's sync-check
 (`.github/workflows/ci.yml`) asserts both tables' rows AND both prose counts against
 `git ls-tree -r tests/` on every PR, so a drift between either number and the actual tree fails
 closed instead of rotting silently:

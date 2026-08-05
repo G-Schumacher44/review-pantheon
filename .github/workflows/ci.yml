@@ -236,7 +236,7 @@ jobs:
           [[ "$(wc -l <<<"$sh_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct bash-suite count across its mentions: $sh_count_prose"; status=1; }
           [[ "$(wc -l <<<"$py_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct pytest count across its mentions: $py_count_prose"; status=1; }
           [[ "$sh_count_prose" == "$sh_count_tree" ]] || { echo "::error::CONTRIBUTING.md's bash-suite prose count ($sh_count_prose) != actual tests/*.sh count ($sh_count_tree)"; status=1; }
-          [[ "$py_count_prose" == "$py_count_tree" ]] || { echo "::error::CONTRIBUTING.md's pytest prose count ($py_count_prose) != actual tests/*.py count ($py_count_tree)"; status=1; }
+          [[ "$py_count_prose" == "$py_count_tree" ]] || { echo "::error::CONTRIBUTING.md's pytest prose count ($py_count_prose) != actual tests/test_*.py count ($py_count_tree)"; status=1; }
 
           exit "$status"
 

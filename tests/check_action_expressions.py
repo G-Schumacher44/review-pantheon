@@ -73,7 +73,14 @@ def _run_block_spans(text: str) -> list[tuple[int, int]]:
         # YAML spelling — was never scanned, and the guard printed "clean" over six live
         # interpolations in action.yml. A check that cannot fail for half the syntax it claims to
         # cover is green by construction.
-        single = re.match(r"^(\s*)run:\s*(?![|>]\s*$)\S", lines[i])
+        # The negative lookahead must reject EVERY block-scalar header spelling, not just a bare
+        # `|`/`>`. YAML allows an indentation indicator and a chomping indicator in either order
+        # (`|-`, `|+`, `>-`, `|2`, `|2-`) and a trailing comment (`| # note`). An earlier version
+        # matched only `[|>]\s*$`, so `run: |-` — the commonest spelling in real workflows — was
+        # classified as a single-line command: the span recorded was the header line alone and the
+        # BODY WAS NEVER SCANNED. That made this guard narrower than the version it replaced, in
+        # the commit that claimed to widen it. tests/test_action_guard.py now pins every spelling.
+        single = re.match(r"^(\s*)run:\s*(?![|>][0-9+-]*\s*(?:#.*)?$)\S", lines[i])
         if single:
             spans.append((offsets[i], offsets[i] + len(lines[i]) + 1))
             i += 1
@@ -236,7 +243,13 @@ def main() -> int:
     # The pull_request_target prohibition is repo-wide, not surface-specific: the one-word change
     # that voids the threat model is just as fatal in a NEW workflow file as in these two, and a
     # guard scoped to two paths would never see it.
-    for wf in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+    workflows = sorted(
+        # BOTH extensions: GitHub accepts .yaml equally, and a guard whose whole purpose is to be
+        # un-bypassable must not be bypassable by choosing the other spelling.
+        set((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+        | set((REPO_ROOT / ".github" / "workflows").glob("*.yaml"))
+    )
+    for wf in workflows:
         all_findings.extend(check_no_pull_request_target(wf))
 
     if all_findings:

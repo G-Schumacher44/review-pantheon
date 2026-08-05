@@ -103,10 +103,17 @@ What that means in practice:
   manually. This is the one dangerous misreading, so it is stated at every surface a maintainer
   might look at.
 - Consequently, think twice before making this a **required** status check on a repository that
-  accepts outside contributions. It will pass on fork PRs — because it skipped — so a required
-  check does not block them; the hazard is the opposite one, that "required check green" reads as
-  "reviewed" when nothing was reviewed. If you want required-means-reviewed, adopt one of the
-  patterns below first.
+  accepts outside contributions — and note the two lanes report differently, which matters under
+  branch protection:
+  - **Published-action lane:** the job runs and succeeds with every step skipped, so the check
+    reports **success**. A required check does not block the PR; the hazard is the opposite one —
+    "required check green" reads as "reviewed" when nothing was reviewed.
+  - **Vendored lane:** the `review` job is skipped at *job* level, so the check reports
+    **skipped** rather than success. Branch protection treats that differently again, and this
+    project has not tested it end to end — verify the behavior on your own repository before
+    relying on it.
+
+  If you want required-means-reviewed, adopt one of the patterns below first.
 
 ### Never use `pull_request_target`
 

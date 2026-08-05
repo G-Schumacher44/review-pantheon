@@ -36,21 +36,45 @@ def _write(tmp_path: Path, body: str) -> Path:
 # --------------------------------------------------------------------------------------------
 
 
-def test_flags_interpolation_in_a_block_scalar_run(tmp_path: Path) -> None:
+# Every YAML spelling of `run:`, each carrying the SAME planted interpolation. A table, not
+# hand-picked examples: the guard is a regex approximating a YAML parser, so its blind spots are
+# exactly the spellings nobody thought to type. `run: |-` shipped unscanned for one commit because
+# the suite had a `|` case and a single-line case and nothing in between — adding a spelling must
+# be a row here, not a fresh test someone remembers to write.
+RUN_SPELLINGS = [
+    "|",  # plain block scalar
+    "|-",  # strip chomping — the commonest spelling in real workflows
+    "|+",  # keep chomping
+    ">",  # folded
+    ">-",  # folded + strip
+    ">+",  # folded + keep
+    "|2",  # explicit indentation indicator
+    "|2-",  # indentation + chomping
+    "| # trailing comment",
+]
+
+
+@pytest.mark.parametrize("indicator", RUN_SPELLINGS)
+def test_flags_interpolation_in_every_block_scalar_spelling(tmp_path: Path, indicator: str) -> None:
+    """A block-scalar header must never be mistaken for a single-line command.
+
+    When it is, the recorded span is the header line alone and the body — where the interpolation
+    actually lives — is walked past unscanned, so the guard reports "clean" on a live finding.
+    """
     path = _write(
         tmp_path,
-        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        f"jobs:\n  a:\n    steps:\n      - name: x\n        run: {indicator}\n"
         '          echo "${{ steps.decide.outputs.top_finding }}"\n',
     )
     findings = guard.check(path)
-    assert any("run: block" in f for f in findings), findings
+    assert any("run: block" in f for f in findings), (indicator, findings)
 
 
 def test_flags_interpolation_in_a_SINGLE_LINE_run(tmp_path: Path) -> None:
-    """The blind spot that shipped: identical risk, different YAML spelling.
+    """The blind spot that shipped first: identical risk, different YAML spelling.
 
-    An earlier `_run_block_spans` matched only `run: |`/`run: >`, so this form was invisible and
-    the guard reported "clean" over six real interpolations in action.yml.
+    An earlier `_run_block_spans` matched only block scalars, so this form was invisible and the
+    guard reported "clean" over six real interpolations in action.yml.
     """
     path = _write(
         tmp_path,

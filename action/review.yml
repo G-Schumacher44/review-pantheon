@@ -235,7 +235,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2153  # BASE_SHA is provided by the `env:` block on this step
+          # Belt-and-braces, and NOT the thing doing the work: with the `:?` below present,
+          # local shellcheck stays quiet even without the directive (mutation-tested both ways).
+          # It is kept only because CI's shellcheck version differs from a dev box's — precisely
+          # how an SC2015 finding reached CI after passing locally earlier in this branch. If you
+          # delete anything here, delete the directive, never the `:?` — that one is load-bearing.
+          # BASE_SHA is provided by the `env:` block on this step
+          # shellcheck disable=SC2153
           # above — GitHub exports it before bash starts, so it is never assigned inside this
           # script. shellcheck sees only the body, and the `local base_sha` inside
           # pantheon_base_pinned_read below makes it guess a misspelling. The `:?` on the next
@@ -401,7 +407,13 @@ jobs:
           AGENT_NAME: ${{ matrix.agent }}
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2153  # BASE_SHA is provided by the `env:` block on this step
+          # Belt-and-braces, and NOT the thing doing the work: with the `:?` below present,
+          # local shellcheck stays quiet even without the directive (mutation-tested both ways).
+          # It is kept only because CI's shellcheck version differs from a dev box's — precisely
+          # how an SC2015 finding reached CI after passing locally earlier in this branch. If you
+          # delete anything here, delete the directive, never the `:?` — that one is load-bearing.
+          # BASE_SHA is provided by the `env:` block on this step
+          # shellcheck disable=SC2153
           # above — GitHub exports it before bash starts, so it is never assigned inside this
           # script. shellcheck sees only the body, and the `local base_sha` inside
           # pantheon_base_pinned_read below makes it guess a misspelling. The `:?` on the next
