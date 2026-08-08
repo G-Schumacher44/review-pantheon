@@ -1486,8 +1486,9 @@ def _add_gate_flags(parser: argparse.ArgumentParser, *, with_agents: bool) -> No
         const="",
         metavar="BASE",
         help=(
-            "Review the current branch's diff against BASE instead of a PR "
-            "(default BASE: gate.conf base_branch, else the repo default). "
+            "Review the current branch's diff against BASE instead of a PR. "
+            "Default BASE: the remote's default branch (origin/HEAD), else 'main' — never the "
+            "reviewed tree's gate.conf, which would let the branch pick its own policy anchor. "
             "Prints the verdict; posts nothing."
         ),
     )

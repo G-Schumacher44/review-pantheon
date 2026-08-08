@@ -27,7 +27,7 @@ branch you are standing on, **before any PR exists**, and prints the verdict ins
 | Flag | Required | Default | What it does |
 |---|---|---|---|
 | `--pr <number>` | one of | — | The PR to review. Digits only — anything else fails closed before any network call. |
-| `--branch [BASE]` | one of | `gate.conf`'s `base_branch=` | Review `merge-base(origin/BASE, HEAD)...HEAD` — the current branch's own diff. Needs no PR, no `gh`, and no push; works offline against an already-fetched `origin/BASE`. Prints the verdict to stdout and posts nothing. See [Pre-PR mode](#pre-pr-mode---branch). |
+| `--branch [BASE]` | one of | `origin/HEAD`, else `main` | Review `merge-base(origin/BASE, HEAD)...HEAD` — the current branch's own diff. Needs no PR, no `gh`, and no push; works offline against an already-fetched `origin/BASE`. Prints the verdict to stdout and posts nothing. See [Pre-PR mode](#pre-pr-mode---branch). |
 | `--provider <lane>` | no | `gate.conf`'s `provider=`, else `claude` | Provider lane in `pantheon.providers` (`claude`, `codex`, `gemini`, `cursor`). Unknown lane name fails fast. |
 | `--agents "a b c"` | no | `gate.conf`'s `agents=`, else `"artemis apollo"` | Space-separated agent list. Each name must be one of `artemis apollo diogenes plato socrates`; an empty resolved list is a hard error. |
 | `--execution <tier>` | no | `gate.conf`'s `execution=` (base-pinned — see below), else `readonly` | `readonly` restricts Bash to the read-only git wrapper; `trusted` restores full Bash. See [Execution tiers](#execution-tiers-readonly-vs-trusted). |
@@ -203,7 +203,7 @@ fixed in a tight loop and the PR opens hardened.
 
 ```bash
 git commit -am "..."            # the gate reads COMMITS, not the dirty tree
-pantheon gate --branch          # base from gate.conf; or: --branch main
+pantheon gate --branch          # base: origin/HEAD, else main; or: --branch main
 ```
 
 It answers a different question than `--pr` — *"is this branch ready to become a PR?"* — which
@@ -211,7 +211,7 @@ is why it is a separate mode rather than a flag:
 
 | | `--pr` | `--branch` |
 |---|---|---|
-| Base comes from | `gh pr view` → `baseRefName` | `git merge-base origin/BASE HEAD` |
+| Base comes from | `gh pr view` → `baseRefName` | operator-typed `BASE`, else the remote's default branch (`origin/HEAD`), else `main` — never the reviewed tree's `gate.conf` |
 | Needs a PR to exist | yes | no |
 | Needs `gh` / network | yes | no — local git only |
 | Verdict goes to | a PR comment | stdout |

@@ -1033,3 +1033,40 @@ def test_branch_resolver_ignores_the_working_tree_gate_conf_for_the_base(tmp_pat
     resolver = inspect.getsource(cli_module._resolve_branch_context)
     assert "_remote_default_branch(repo_root)" in resolver
     assert "conf.base_branch" not in resolver
+
+
+def test_branch_resolver_warns_but_proceeds_on_a_dirty_working_tree(tmp_path, capsys) -> None:
+    """Documented behavior: warn, do not refuse.
+
+    The diff comes from commits, but agents get the repo root and can Read the working tree — so
+    an uncommitted edit can influence a verdict stamped with a head_sha that lacks it. Reviewing
+    mid-edit is sometimes deliberate, so this warns loudly instead of blocking.
+    """
+    root, run = _git_repo(tmp_path)
+    run("checkout", "-q", "-b", "feature")
+    (root / "f.txt").write_text("two\n", encoding="utf-8")
+    run("commit", "-q", "-am", "work")
+    (root / "f.txt").write_text("uncommitted edit\n", encoding="utf-8")
+
+    cli_module._resolve_branch_context(str(root), "main")
+
+    err = capsys.readouterr().err
+    assert "uncommitted change" in err
+    assert "COMMITS" in err
+
+
+def test_branch_resolver_names_a_detached_head_without_failing(tmp_path) -> None:
+    """Detached HEAD has no branch name; the resolver must still produce a usable label rather
+    than emitting the literal string "HEAD" into the prompt as if it were a branch."""
+    root, run = _git_repo(tmp_path)
+    run("checkout", "-q", "-b", "feature")
+    (root / "f.txt").write_text("two\n", encoding="utf-8")
+    run("commit", "-q", "-am", "work")
+    head = run("rev-parse", "HEAD").stdout.strip()
+    run("checkout", "-q", "--detach", head)
+
+    _, _, branch_name, *_ = cli_module._resolve_branch_context(str(root), "main")
+
+    assert branch_name != "HEAD"
+    assert "detached" in branch_name
+    assert head[:8] in branch_name

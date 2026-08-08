@@ -22,7 +22,7 @@
   first (the gate reads commits, not the dirty tree), then:
 
   ```bash
-  pantheon gate --branch          # base from gate.conf, or: --branch main
+  pantheon gate --branch          # base: origin/HEAD, else main; or: --branch main
   ```
 
   Bound yourself to 2–3 runs. If a finding survives and you judge it invalid, refute it in the PR
@@ -91,7 +91,7 @@ it complements, not repeats. This table is the canonical, up-to-date file list a
 |---|---|
 | `tests/test_action_guard.py` | `tests/check_action_expressions.py` itself — one planted violation per YAML syntax form (block-scalar `run:`, single-line `run:`, `pull_request_target`, missing `env:` binding) plus the clean counterparts. The guard is CI's only enforcement of three SECURITY.md claims, so it needs a test that proves it can fail. |
 | `tests/test_cli_agents_dir.py` | `pantheon.cli._agents_dir()`'s fallback-selection logic (mocked) — persona resolution from a real, non-editable `pip`/`pipx` install vs. a dev-checkout sibling directory. |
-| `tests/test_cli_helpers.py` | `pantheon.cli`'s pure-function seams no black-box suite drives directly — `_parse_conf_text` (the `gate.conf` key=value parser). |
+| `tests/test_cli_helpers.py` | `pantheon.cli`'s pure-function seams no black-box suite drives directly — `_parse_conf_text` (the `gate.conf` key=value parser) — plus `_build_prompt`'s per-mode header shape and `_resolve_branch_context` against real git fixtures (both fail-closed refusals, the base-tip policy anchor, detached HEAD, dirty-tree warning). |
 | `tests/test_execution.py` | `pantheon.execution.resolve_console_script`, the shared function behind both `pantheon.cli`'s and `pantheon.providers`' own console-script resolution. |
 | `tests/test_jqjson.py` | `pantheon.jqjson`'s four functions directly and in isolation, parametrized across the JSON-boundary edge-case matrix. |
 | `tests/test_providers.py` | `pantheon.providers`' argv-construction, PATH-resolution, environment-construction, and timeout/process-group seams — the ONLY coverage this module has (no black-box `test-providers.sh` exists either; a disclosed pre-existing gap, closed at this layer). |
