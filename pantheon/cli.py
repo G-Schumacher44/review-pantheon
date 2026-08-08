@@ -1343,10 +1343,18 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
         comment = render.render_comment(head_sha, agents, agent_data, repo_root=repo_root)
 
         if branch_mode:
-            # Print and stop. There is nowhere to post — no PR exists — and the exit code below
-            # carries the verdict, which is what a pre-push ritual actually consumes.
+            # Print and stop. There is nowhere to post — no PR exists — and the exit code carries
+            # the verdict, which is what a pre-push ritual actually consumes.
+            #
+            # EXCEPT under --dry-run, which exits 0 exactly as the PR lane's dry-run does. A dry
+            # run calls no provider, so every agent is DRY_RUN/unverified by construction; letting
+            # that fail the command would make `--dry-run` report "not gated" as though it were a
+            # finding, and would differ from --pr for no reason a caller could predict. Dry-run is
+            # an inspection mode in both lanes; a real run's exit code is the verdict in both.
             _note(f"branch {branch_name} vs origin/{base_ref} — verdict below, nothing posted:")
             sys.stdout.write(comment)
+            if args.dry_run:
+                return 0
             return 0 if overall in ("green", "yellow") else 1
 
         if args.dry_run:
