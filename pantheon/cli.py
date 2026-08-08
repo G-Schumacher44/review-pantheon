@@ -1010,7 +1010,7 @@ def _resolve_branch_context(repo_root: str, base_branch: str) -> tuple[str, str,
     """
     # No network. A merge-base against the already-fetched remote-tracking ref works offline and
     # before any push, which is the point — this runs while the work is still local.
-    base_ref = base_branch or "dev"
+    base_ref = base_branch or _DEFAULT_BASE_BRANCH
     if not _BRANCH_RE.match(base_ref):
         _die(f"unsafe base branch name '{base_ref}' — UNVERIFIED, reviewing nothing")
 
@@ -1025,17 +1025,45 @@ def _resolve_branch_context(repo_root: str, base_branch: str) -> tuple[str, str,
     if not _SHA_RE.match(head_sha):
         _die(f"unsafe head SHA '{head_sha}' — UNVERIFIED, reviewing nothing")
 
-    mb = _git(["merge-base", remote_ref, "HEAD"], cwd=repo_root)
-    if mb.returncode != 0:
-        _die(f"no merge-base between origin/{base_ref} and HEAD — UNVERIFIED, reviewing nothing")
-    base_sha = mb.stdout.strip()
+    # POLICY pins to the base branch TIP, exactly as the PR lane does (`rev-parse` of the fetched
+    # base ref), NOT to the merge-base. This distinction is security-relevant and was gotten wrong
+    # in this function's first version, caught by running this very gate on its own branch:
+    # base_sha is what every base-pinned read resolves against — gate.conf's execution=/provider=/
+    # agents=, REVIEW_RULES.md, the spec, and the personas. Pinning those to the merge-base means a
+    # branch cut BEFORE the base tightened its policy is gated under the stale, weaker one — a
+    # branch old enough to predate `execution=readonly` would launch agents with full trusted Bash.
+    # The tip is the policy in force now, which is the only policy worth enforcing.
+    base_sha = _git(["rev-parse", remote_ref], cwd=repo_root).stdout.strip()
     if not _SHA_RE.match(base_sha):
         _die(f"unsafe base SHA '{base_sha}' — UNVERIFIED, reviewing nothing")
 
-    if base_sha == head_sha:
+    # The DIFF still uses merge-base semantics — three-dot below does that internally, so the
+    # review covers what this branch changed and not what the base moved on to. Same construction
+    # as the PR lane's `{base}...{head}`; only the policy anchor above differs from a naive
+    # merge-base implementation.
+    mb = _git(["merge-base", remote_ref, "HEAD"], cwd=repo_root)
+    if mb.returncode != 0:
+        _die(f"no merge-base between origin/{base_ref} and HEAD — UNVERIFIED, reviewing nothing")
+    merge_base = mb.stdout.strip()
+
+    if merge_base == head_sha:
         _die(
             f"HEAD is identical to the merge-base with origin/{base_ref} — there is nothing to "
             "review. Commit your work first (this gate reads commits, not the dirty tree)."
+        )
+
+    # "This gate reads commits, not the dirty tree" is true of the DIFF and false of everything
+    # else: the agents get repo_root and can Read/Grep the working tree directly. So an uncommitted
+    # fix can green a verdict whose head_sha does not contain it, and the PR then opens unhardened.
+    # Warn rather than refuse — the operator may be reviewing deliberately mid-edit — but never let
+    # that go unsaid.
+    dirty = _git(["status", "--porcelain"], cwd=repo_root).stdout.strip()
+    if dirty:
+        n = len(dirty.splitlines())
+        _note(
+            f"WARNING: {n} uncommitted change(s) in the working tree. The diff under review comes "
+            f"from COMMITS ({head_sha[:8]}), but agents can read the working tree directly — a "
+            "verdict may reflect edits that are not in the range. Commit first for a clean signal."
         )
 
     branch_result = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root)
@@ -1046,7 +1074,8 @@ def _resolve_branch_context(repo_root: str, base_branch: str) -> tuple[str, str,
         _die(f"unsafe branch name '{branch_name}' — UNVERIFIED, reviewing nothing")
 
     # SHAs, not symbolic refs: HEAD moves if the operator commits mid-run, and the verdict must
-    # describe the tree that was actually reviewed.
+    # describe the tree that was actually reviewed. Three-dot, so git resolves the merge-base
+    # itself — identical to the PR lane's range construction.
     diff_range = f"{base_sha}...{head_sha}"
 
     # pr_number/pr_title are the PR lane's identifiers and have no meaning here. Empty rather
@@ -1229,10 +1258,15 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
     # Mirrors bash's own posture instead: cli/review-gate's SEEN_SHA="$(jq -r ...
     # "$STATE_FILE")" runs under `set -euo pipefail`, aborting the whole script on a malformed
     # read, before any agent runs or any comment posts.
-    try:
-        gate_state = state.load_state_or_raise(state_file)
-    except state.StateFileMalformed as e:
-        _die(f"{e} — UNVERIFIED, posting nothing (fix or remove the file, then retry)")
+    # Branch mode neither reads nor writes state, so a malformed .review-gate-state.json — a
+    # PR-lane artifact — must not block an offline pre-PR review, which is the mode's whole point.
+    if branch_mode:
+        gate_state = {}
+    else:
+        try:
+            gate_state = state.load_state_or_raise(state_file)
+        except state.StateFileMalformed as e:
+            _die(f"{e} — UNVERIFIED, posting nothing (fix or remove the file, then retry)")
     # Branch mode keeps no state. The PR lane dedupes by head SHA so a re-run on an unchanged PR
     # is a no-op; a pre-PR gate run is always deliberate — you just committed a fix and want to
     # know if it worked — and a "nothing new to gate" refusal there would defeat the whole loop.
@@ -1351,7 +1385,8 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
             # that fail the command would make `--dry-run` report "not gated" as though it were a
             # finding, and would differ from --pr for no reason a caller could predict. Dry-run is
             # an inspection mode in both lanes; a real run's exit code is the verdict in both.
-            _note(f"branch {branch_name} vs origin/{base_ref} — verdict below, nothing posted:")
+            marker = "[dry-run] " if args.dry_run else ""
+            _note(f"{marker}branch {branch_name} vs origin/{base_ref} — verdict below, nothing posted:")
             sys.stdout.write(comment)
             if args.dry_run:
                 return 0

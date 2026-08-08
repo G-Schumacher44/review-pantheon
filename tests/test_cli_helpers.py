@@ -902,3 +902,97 @@ def test_pr_mode_prompt_is_unchanged(monkeypatch, tmp_path) -> None:
     assert "- PR: #42" in prompt
     assert "BEGIN PR TITLE" in prompt
     assert "LOCAL BRANCH" not in prompt
+
+
+# ---------------------------------------------------------------------------------------------
+# _resolve_branch_context — the resolver that IS --branch mode.
+#
+# Added after the gate reviewed its own branch and pointed out that only the prompt HEADER was
+# pinned: every documented refusal, and the security-relevant choice of what base_sha anchors to,
+# were untested. Real git fixtures, since the whole function is git behavior.
+# ---------------------------------------------------------------------------------------------
+
+
+def _git_repo(tmp_path):
+    import subprocess
+
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    def run(*a):
+        return subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True)
+
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "t@example.com")
+    run("config", "user.name", "t")
+    (root / "f.txt").write_text("one\n", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-q", "-m", "base commit")
+    # A remote-tracking ref without a real remote: the resolver only ever reads refs/remotes/*.
+    run("update-ref", "refs/remotes/origin/main", "HEAD")
+    return root, run
+
+
+def test_branch_resolver_refuses_when_the_remote_base_ref_is_absent(tmp_path, monkeypatch) -> None:
+    """Never silently diff against something else — a missing base is fail-closed."""
+    root, _ = _git_repo(tmp_path)
+    with pytest.raises(cli_module.GateError) as e:
+        cli_module._resolve_branch_context(str(root), "nonexistent-base")
+    assert "not found locally" in str(e.value)
+
+
+def test_branch_resolver_refuses_when_head_equals_the_merge_base(tmp_path) -> None:
+    """Nothing to review is a refusal, not an empty green."""
+    root, _ = _git_repo(tmp_path)
+    with pytest.raises(cli_module.GateError) as e:
+        cli_module._resolve_branch_context(str(root), "main")
+    assert "nothing to review" in str(e.value)
+
+
+def test_branch_resolver_anchors_policy_to_the_BASE_TIP_not_the_merge_base(tmp_path) -> None:
+    """base_sha must be the base branch TIP, matching the PR lane.
+
+    This is the security-relevant one. base_sha is what every base-pinned read resolves against —
+    gate.conf's execution=/provider=/agents=, REVIEW_RULES.md, the spec, the personas. Anchoring
+    it to the merge-base would gate a branch cut before the base tightened its policy under the
+    STALE, weaker policy: old enough, and it predates `execution=readonly` and the agents get
+    full trusted Bash. The first version of this resolver had exactly that bug.
+    """
+    root, run = _git_repo(tmp_path)
+    merge_base = run("rev-parse", "HEAD").stdout.strip()
+
+    run("checkout", "-q", "-b", "feature")
+    (root / "f.txt").write_text("two\n", encoding="utf-8")
+    run("commit", "-q", "-am", "feature work")
+
+    # The base moves on AFTER the branch was cut — this is what creates the divergence.
+    run("checkout", "-q", "main")
+    (root / "g.txt").write_text("base moved\n", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-q", "-m", "base advances")
+    new_tip = run("rev-parse", "HEAD").stdout.strip()
+    run("update-ref", "refs/remotes/origin/main", new_tip)
+    run("checkout", "-q", "feature")
+
+    _, _, branch_name, base_ref, base_sha, head_sha, diff_range = cli_module._resolve_branch_context(str(root), "main")
+
+    assert base_sha == new_tip, "policy must pin to the CURRENT base tip"
+    assert base_sha != merge_base, "pinning to the merge-base is the bug this test exists for"
+    assert branch_name == "feature"
+    assert base_ref == "main"
+    # The DIFF still uses merge-base semantics via three-dot, so the review covers what this
+    # branch changed and not what the base moved on to.
+    assert diff_range == f"{base_sha}...{head_sha}"
+
+
+def test_branch_resolver_returns_no_pr_identity(tmp_path) -> None:
+    """pr_number/pr_title stay EMPTY rather than fabricated — a made-up number is the
+    plausible-but-false artifact this project keeps finding in its own records."""
+    root, run = _git_repo(tmp_path)
+    run("checkout", "-q", "-b", "feature")
+    (root / "f.txt").write_text("two\n", encoding="utf-8")
+    run("commit", "-q", "-am", "work")
+
+    pr_number, pr_title, *_ = cli_module._resolve_branch_context(str(root), "main")
+    assert pr_number == ""
+    assert pr_title == ""
