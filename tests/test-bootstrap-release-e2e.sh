@@ -185,7 +185,12 @@ else
   fail "--version $TAG: \$PREFIX/venv/bin/pantheon-git-readonly is MISSING or not executable"
 fi
 
-pantheon_help_out="$(cd "$NEUTRAL_DIR" && "$PREFIX_OK/venv/bin/pantheon" --help 2>&1)"
+# NO_COLOR: Python 3.14's argparse colorizes --help, and it honors FORCE_COLOR even when
+# stdout is a pipe. A contributor with FORCE_COLOR set in their shell would otherwise get
+# ANSI escapes wrapped around "usage:" and this anchored grep would fail on a perfectly
+# healthy install. CI does not set it, so the breakage only ever shows up locally — the
+# environment-dependent-test shape this repo keeps finding.
+pantheon_help_out="$(cd "$NEUTRAL_DIR" && NO_COLOR=1 "$PREFIX_OK/venv/bin/pantheon" --help 2>&1)"
 pantheon_help_status=$?
 if [[ $pantheon_help_status -eq 0 ]] && grep -q "^usage: pantheon " <<<"$pantheon_help_out"; then
   pass "--version $TAG: installed pantheon --help runs from the prefix venv"

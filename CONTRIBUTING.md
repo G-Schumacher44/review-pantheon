@@ -17,6 +17,17 @@
   green — DESIGN.md rule 2), but CI passing does not by itself guarantee a twin review ran at all.
   A human still reads and decides either way; the gate informs that decision when present, it
   never replaces it.
+- **Gate your branch before you open the PR.** `pantheon gate --branch` runs the same twins
+  against your local diff, so the PR opens hardened instead of becoming the debugger. Commit
+  first (the gate reads commits, not the dirty tree), then:
+
+  ```bash
+  pantheon gate --branch          # base from gate.conf, or: --branch main
+  ```
+
+  Bound yourself to 2–3 runs. If a finding survives and you judge it invalid, refute it in the PR
+  body under a "Pre-gate: unresolved findings" heading — never drop it silently. CI's twins
+  remain the enforcement floor; this makes their pass cheap.
 - **Findings get fixed or tracked — never silently dropped.** Address a finding in the same PR, or
   open an issue for it and resolve the review thread pointing at that issue number. A review
   thread left unresolved with nothing linked is the one state this repo doesn't allow.
