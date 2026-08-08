@@ -919,8 +919,19 @@ def _git_repo(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
 
-    def run(*a):
-        return subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True)
+    def run(*a, check=True):
+        # check=True by default, and commit.gpgsign forced off: a contributor with global signing
+        # configured and no non-interactive key would otherwise get a silent commit failure here,
+        # then a confusing "not found locally" from a DIFFERENT assertion — the
+        # environment-dependent-test shape this file's NO_COLOR comments already call out.
+        r = subprocess.run(
+            ["git", "-C", str(root), "-c", "commit.gpgsign=false", *a],
+            capture_output=True,
+            text=True,
+        )
+        if check and r.returncode != 0:
+            raise AssertionError(f"git {' '.join(a)} failed in fixture: {r.stderr.strip()}")
+        return r
 
     run("init", "-q", "-b", "main")
     run("config", "user.email", "t@example.com")
@@ -996,3 +1007,29 @@ def test_branch_resolver_returns_no_pr_identity(tmp_path) -> None:
     pr_number, pr_title, *_ = cli_module._resolve_branch_context(str(root), "main")
     assert pr_number == ""
     assert pr_title == ""
+
+
+def test_branch_resolver_ignores_the_working_tree_gate_conf_for_the_base(tmp_path, monkeypatch) -> None:
+    """The base must never come from a file in the tree under review.
+
+    base_sha is the policy anchor — it supplies execution=, provider=, agents=, the rules file,
+    the spec and the personas. If the reviewed branch could name its own base, it could point at
+    a ref whose gate.conf says execution=trusted and the agents would launch with full Bash
+    against hostile content. The realistic path is an operator running `gh pr checkout <n>` then
+    a bare `pantheon gate --branch` on a contributor's branch.
+
+    Pinned by construction: _resolve_branch_context takes the base as an argument and the caller
+    passes args.branch only, so a gate.conf in the tree has no way in.
+    """
+    import inspect
+
+    src = inspect.getsource(cli_module.run_gate)
+    assert "_resolve_branch_context(repo_root, args.branch)" in src, (
+        "branch mode must pass ONLY the operator-typed base; reintroducing conf.base_branch here "
+        "hands the reviewed tree control of the policy anchor"
+    )
+
+    # And with no operator-typed base, the fallback chain is remote-derived, never tree-derived.
+    resolver = inspect.getsource(cli_module._resolve_branch_context)
+    assert "_remote_default_branch(repo_root)" in resolver
+    assert "conf.base_branch" not in resolver

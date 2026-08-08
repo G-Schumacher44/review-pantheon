@@ -594,7 +594,7 @@ Only three things differ. Everything else is the same code path:
 
 | | `--pr` | `--branch` |
 |---|---|---|
-| Base branch from | `gh pr view` → `baseRefName` | `--branch BASE`, else `gate.conf`'s `base_branch=`, else `main` |
+| Base branch from | `gh pr view` → `baseRefName` | operator-typed `--branch BASE`, else `refs/remotes/origin/HEAD`, else `main` — **never** the reviewed tree's `gate.conf`, which would let the branch pick its own policy anchor |
 | Requires a PR / `gh` / network | yes | no — local git only, works offline and pre-push |
 | Verdict destination | PR comment via `gh pr comment` | stdout |
 | Exit code | 0 green/yellow, 1 otherwise (`--dry-run` always 0) | identical |
@@ -605,7 +605,9 @@ place a naive implementation goes wrong: `base_sha` is what every base-pinned re
 against — `gate.conf`'s `execution=`/`provider=`/`agents=`, `REVIEW_RULES.md`, the spec, the
 personas. Anchoring it to the merge-base instead would gate a branch cut *before* the base
 tightened its policy under the **stale, weaker** policy — a branch old enough to predate
-`execution=readonly` would launch its agents with full trusted Bash. The diff still uses
+`execution=readonly` would launch its agents with full trusted Bash. Note the honest limit:
+`--branch` never fetches, so this is the LOCAL `origin/BASE` as of your last fetch — run
+`git fetch` first if the base has moved. The diff still uses
 merge-base semantics (three-dot), so a review covers what the branch changed rather than what the
 base moved on to. Same construction on both lanes.
 
