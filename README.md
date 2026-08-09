@@ -37,9 +37,9 @@ Zero footprint — drop this into a workflow file (plus a PR trigger and `pull-r
   with: { claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} }
 ```
 
-*(The `@v1` tag lands with this repo's first release — see [RELEASING.md](RELEASING.md). Until
-then, pin a commit SHA or point `uses:` at a local checkout instead; a bare `@v1` 404s on a
-brand-new checkout, not a typo.)*
+*(`@v1` tracks the latest release — it moves when a new one is cut (see
+[RELEASING.md](RELEASING.md)). Prefer updates on your own schedule? Pin a full commit SHA
+instead — that's exactly what `install.sh`'s generated workflow does.)*
 
 Nothing else lands in your repo. The CLI installs from PyPI or Homebrew:
 
