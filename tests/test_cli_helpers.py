@@ -714,11 +714,11 @@ def test_build_prompt_writes_non_ascii_pr_title_as_utf8_bytes_on_disk(tmp_path, 
 
 # ---------------------------------------------------------------------------------------------
 # PR_TITLE/BASE_REF fencing in the CLI lane — a should_fix finding from this repo's OWN
-# self-hosted gate, run live against this PR's own fdd7aaf commit: the two GitHub Action
-# surfaces (action/review.yml, action/lib/build_prompt.sh) got the randomized BEGIN/END
-# anti-injection fence treatment for these two PR-event-context values (medium finding 9
-# elsewhere in this same PR), but pantheon.cli's own _build_prompt was never carried forward to
-# match — a real gap in an otherwise-complete fencing sweep, now closed on all three surfaces.
+# self-hosted gate, run live against this PR's own fdd7aaf commit: action/lib/build_prompt.sh got
+# the randomized BEGIN/END anti-injection fence treatment for these two PR-event-context values
+# (medium finding 9 elsewhere in this same PR), but pantheon.cli's own _build_prompt was never
+# carried forward to match — a real gap in an otherwise-complete fencing sweep, now closed on
+# both surfaces.
 # ---------------------------------------------------------------------------------------------
 
 

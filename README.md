@@ -85,8 +85,8 @@ Full persona definitions, verdict vocabulary, and the gate-flow diagram: [DESIGN
 ## How the gate stays honest
 
 - Reviewing untrusted PR content runs read-only by default (`execution=readonly`).
-- That tool-scoping covers three surfaces — the CLI, the published action, and the vendored
-  workflow — all of which invoke Claude; non-Claude provider lanes aren't covered.
+- That tool-scoping covers both surfaces — the CLI and the published action — which invoke
+  Claude; non-Claude provider lanes aren't covered.
 - Nothing here eliminates a fully-compromised agent handing back a deceptive-but-schema-valid
   verdict — cross-review by a second agent is the real backstop, not a guarantee.
 

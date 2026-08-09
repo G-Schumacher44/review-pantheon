@@ -159,8 +159,6 @@ fi
 
 for f in \
   ".github/review-agents/artemis.md" \
-  ".github/review-agents/pantheon/verdict.py" \
-  ".github/review-agents/pantheon/execution.py" \
   ".github/workflows/review.yml" \
   "REVIEW_RULES.md" \
   ".claude/agents/artemis.md" \
@@ -175,6 +173,14 @@ do
     fail "install.sh: $f missing"
   fi
 done
+
+# No vendored pantheon/ package any more (issue #36) — the generated thin caller delegates all
+# gate logic to review-pantheon's own action.yml checkout at github.action_path.
+if [[ ! -e "$SCRATCH_REPO/.github/review-agents/pantheon" ]]; then
+  pass "install.sh: no vendored pantheon/ package (nothing left to base-pin against)"
+else
+  fail "install.sh: a pantheon/ package was vendored — should be dead weight since action/review.yml was deleted"
+fi
 
 rm -rf "$SCRATCH_REPO"
 

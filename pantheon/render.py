@@ -3,8 +3,10 @@
 Ports the retired bash CLI's ``render_comment.sh`` (removed in #29) — the ONE bash implementation
 shared by ``review-gate`` and ``action/lib/combine_verdicts.sh`` (see DESIGN.md's "Combined PR
 comment" section) — to Python. Byte-identical OUTPUT to the bash renderer for identical inputs
-was the bar the Slice-2 charter set for this module; ``action/review.yml``'s own hand-synced
-inline copy is a separate, pre-existing surface this port does not touch.
+was the bar the Slice-2 charter set for this module. A hand-synced inline copy used to live in
+the vendored ``action/review.yml`` as a separate, pre-existing surface this port never touched;
+issue #36 deleted that copy, leaving this module and ``action/lib/combine_verdicts.sh`` as the
+only two.
 
 Two public entry points, mirroring the bash file's contract exactly:
 

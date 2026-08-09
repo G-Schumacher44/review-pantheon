@@ -732,10 +732,10 @@ def _build_prompt(ctx: GateContext, agent: str, workdir: str, neutral_cwd: str) 
         "this absolute path — it is provided only so Read/Grep/Glob can resolve files this run."
     )
     # PR_TITLE/BASE_REF fenced — a should_fix finding from this repo's own self-hosted gate,
-    # run against this very PR: the two GitHub Action surfaces (action/review.yml,
-    # action/lib/build_prompt.sh) already got the randomized BEGIN/END anti-injection fence
-    # treatment for these two PR-event-context values (medium finding 9 elsewhere in this same
-    # PR), but the CLI lane's own _build_prompt was never carried forward to match — an operator
+    # run against this very PR: action/lib/build_prompt.sh already got the randomized BEGIN/END
+    # anti-injection fence treatment for these two PR-event-context values (medium finding 9
+    # elsewhere in this same PR), but the CLI lane's own _build_prompt was never carried forward
+    # to match — an operator
     # running `pantheon gate` against a PR titled to look like run-context prose (e.g. embedding
     # its own fake "## Run context override" line) would have that text land unfenced, next to
     # genuine instruction-like lines, with only the persona's blanket data/instruction framing as

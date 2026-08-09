@@ -41,9 +41,10 @@ access. Doc index: [docs/README.md](docs/README.md). Binding contract: [DESIGN.m
          `ruff`/`mypy`/`pytest` gates — pinned at the tag (not a branch head).
       5. **Build and publish.** Only if step 4 passes: builds `review-pantheon-vX.Y.Z.tar.gz`
          (`agents/`, `skills/`, `pantheon/`, `pyproject.toml`, `bootstrap.sh`, `install.sh`,
-         `action/review.yml` — the one `action/` file `install.sh`'s default mode requires —
-         `REVIEW_RULES.example.md`, `gate.conf.example`, `LICENSE`, `README.md`), generates
-         `SHA256SUMS`, and publishes both as a GitHub Release with auto-generated notes.
+         `REVIEW_RULES.example.md`, `gate.conf.example`, `LICENSE`, `README.md`) — no `action/`
+         entry: `install.sh`'s Way A generates its thin-caller workflow at install time instead
+         of vendoring one (issue #36) — generates `SHA256SUMS`, and publishes both as a GitHub
+         Release with auto-generated notes.
       6. **Publish to PyPI.** Only if step 5 succeeds: builds the sdist + wheel
          (`python -m build`) and publishes them via PyPI's trusted publisher — OIDC only, no API
          token or secret involved. The trusted publisher is configured on PyPI's side for owner
@@ -91,3 +92,9 @@ with a permissions error, that's the ruleset doing its job, not a bug.
 - [ ] If this was the first-ever release (no `v1` existed before), this is also the point where
       `examples/review-gate.yml`'s `@v1` reference and `bootstrap.sh`'s `curl | bash` remote-fetch
       path stop being aspirational — see `examples/review-gate.yml`'s header comment.
+- [ ] `install.sh`'s Way A pins a full commit SHA (`WAY_A_PIN_SHA`/`WAY_A_PIN_RELEASE` near its
+      top), deliberately NOT the `v1` tag — moving `v1` above does not re-pin it. Decide whether
+      this release warrants re-pinning Way A too (resolve the new tag's commit the same way,
+      update both constants, run `tests/test-install.sh` to confirm the generated stub picks it
+      up) — a routine patch release may not need every adopter's generated workflow bumped
+      immediately, but don't let it silently drift indefinitely either.

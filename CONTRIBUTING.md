@@ -57,7 +57,7 @@ closed instead of rotting silently:
 | `tests/test-base-pinned-read-python.sh` | `pantheon.basepin` — base-SHA-pinned reads, including the symlink-resolution edge case and issue #10's trailing-slash class. Drives `python -m pantheon.basepin` as a real subprocess. |
 | `tests/test-render-comment-python.sh` | `pantheon.render` — the combined-PR-comment renderer, driven via `python3 -m pantheon.render` as a real subprocess. |
 | `tests/test-json-boundary.sh` | `pantheon/jqjson.py`, the single jq-compatible JSON parse/serialize boundary — a mechanical assertion that `pantheon/verdict.py` and `pantheon/render.py` route every JSON parse/serialize through it, never Python's `json` module directly. |
-| `tests/test-install.sh` | `install.sh`'s editor/CLI projection targets and its gate-file vendoring (personas, the vendored `pantheon` package, the workflow). |
+| `tests/test-install.sh` | `install.sh`'s editor/CLI projection targets and its gate-file install (personas, the generated thin-caller workflow — including the GENERATED-marker refresh/skip ownership contract). |
 | `tests/test-prompt-assembly-python.sh` | `pantheon.cli`'s prompt-assembly path — `_strip_frontmatter`/fence-id unit coverage, a real tokened `pantheon gate --dry-run` run (conditional on `gh`/network), and `_build_prompt()`'s base-SHA-pinning/apollo-spec-gating/fence-collision fixtures against real local git repos. |
 | `tests/test-state-persistence-python.sh` | `pantheon.state` — `update_state()`'s follow-up-mode scenarios (driven via `python -m pantheon.state update ...`), plus `load_state`/`reviewed_sha_for`/`is_ancestor` coverage. |
 | `tests/test-git-readonly-wrapper.sh` | `pantheon.execution`'s read-only git wrapper (the argv-validating, EXEC/WRITE-SURFACE-MATRIX-driven `python -m pantheon.execution wrapper ...` CLI entry point) — every hostile-shape/live-fire negative-control fixture. |
@@ -139,11 +139,8 @@ docker run --rm review-pantheon-smoke
   contains one of those markers — see that step's own comment for the exact pattern.
 - **Base-pinned provenance for anything the gate reads that shapes its own behavior** (personas,
   the verdict decider, the read-only git wrapper, house-rules/spec files) — read from the PR's
-  base commit or this repo's own trusted checkout, per DESIGN.md's read-provenance matrix,
-  including its disclosed exceptions (the vendored `action/review.yml` workflow reads
-  house-rules/spec content from the checked-out working tree instead — a documented, narrower
-  exception, not a precedent to extend). See DESIGN.md's ["Security
-  posture"](DESIGN.md#security-posture) for the full matrix and why.
+  base commit or this repo's own trusted checkout, per DESIGN.md's read-provenance matrix. See
+  DESIGN.md's ["Security posture"](DESIGN.md#security-posture) for the full matrix and why.
 - **Every new fixture must be shown failing against the pre-fix code.** A test that was never red
   proves nothing about the fix it's supposed to cover — this repo's own fixture tests follow that
   pattern (see `tests/test-git-readonly-wrapper.sh`'s negative-control fixtures for a worked

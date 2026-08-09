@@ -3,12 +3,19 @@
 #
 # Usage: install.sh /abs/path/to/target-repo [--claude] [--cursor] [--codex] [--gemini]
 #
-# With no flags: gate-only install (unchanged from prior behavior) — copies the review
-# personas, the vendored `pantheon` verdict/read-only-git package, and the GitHub Action into
-# the target repo so its own CI checkout can see them (the Action runs inside the target repo's
-# checkout and needs its own copy of everything it uses — see DESIGN.md rule 4). Never
-# overwrites a file that's been customized: a file that differs from the shipped version is left
-# alone and reported as skipped.
+# With no flags: gate-only install — copies the review personas and the REVIEW_RULES.md
+# house-rules template into the target repo, and GENERATES a thin-caller
+# `.github/workflows/review.yml` that calls this repo's own published composite action
+# (`uses: G-Schumacher44/review-pantheon@<pinned-SHA>` — see generate_way_a_workflow below for
+# the pin and how to re-pin it). The composite action reads its own gate logic (personas, the
+# verdict decider, the read-only git wrapper) from ITS OWN checkout at run time
+# (`github.action_path`), not from anything vendored into the target repo — collapsed from a
+# second, hand-synced ~1,000-line reimplementation that used to live at action/review.yml (see
+# DESIGN.md's "Published action" section and issue #36). The personas copied here exist so a
+# target repo can maintain its own fork and point the generated workflow's commented-out
+# `personas_path:` input at it; REVIEW_RULES.md is the one file the gate reads FROM the target
+# repo by design (DESIGN.md's "House rules are pluggable"). Never overwrites a file that's been
+# customized: a file that differs from the shipped version is left alone and reported as skipped.
 #
 # Does NOT install gate.conf — that file only matters to the CLI lane, and copying it into
 # every repo by default meant most installs got a config file they never look at. CLI-lane
@@ -108,16 +115,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 AGENTS_SRC="$SCRIPT_DIR/agents"
 SKILLS_SRC="$SCRIPT_DIR/skills"
-ACTION_SRC="$SCRIPT_DIR/action/review.yml"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
-# action/review.yml's "Resolve gate scripts (base-pinned)" step base-pin-reads __init__.py/
-# jqjson.py/verdict.py (the verdict decider's dependency closure) plus render.py (its
-# sanitize_inline is what keeps model-authored text from breaking out of the posted comment's
-# markdown table — see that workflow's "Save verdict artifact" step), and its "Resolve read-only
-# git wrapper (base-pinned)" step base-pin-reads execution.py (the read-only git wrapper) at the
-# PR's base commit — all five need to exist HERE, vendored into the target repo, for base-pinning
-# to ever find them.
-PANTHEON_PKG_SRC="$SCRIPT_DIR/pantheon"
+
+# The thin caller's pin — the full commit SHA the `v1` tag (v0.1.0's release) dereferences to,
+# verified live via `gh api repos/G-Schumacher44/review-pantheon/git/ref/tags/v1` and then
+# dereferencing the returned tag object's `object.sha`. A full 40-char commit SHA, not a moving
+# tag, matching how action.yml itself pins anthropics/claude-code-action (see that file's header
+# comment for the rationale: a tag's owner can move it, a commit SHA cannot). To re-pin to a
+# newer release: resolve the new tag's commit the same way and replace the two constants below.
+WAY_A_PIN_SHA="ef8f2c8466c6cf45c6e265e721fc61542f5736b5"
+WAY_A_PIN_RELEASE="v0.1.0"
 
 SKIPPED=()
 
@@ -141,42 +148,128 @@ install_file() {
 [[ -d "$AGENTS_SRC" ]] || die "missing $AGENTS_SRC — run this from a review-pantheon checkout"
 [[ -d "$SKILLS_SRC" ]] || die "missing $SKILLS_SRC — run this from a review-pantheon checkout"
 
-# Gate files (personas into .github/review-agents, the workflow, the house rules template,
-# .gitignore) are a repo concept — a PR gate belongs to one repo's CI — so --user skips this
-# whole section and installs only the per-tool projections below.
+# generate_way_a_workflow <dest> — writes the thin-caller workflow to a tmp file and installs it
+# via install_file (cmp-and-skip idempotency, same as every other generated file in this script).
+# ~25 lines: checkout, then one `uses:` step against this repo's own published composite action
+# (action.yml), pinned to WAY_A_PIN_SHA. Mirrors examples/review-gate.yml (the Way C stub) almost
+# verbatim — same trigger, same permissions, same job gate, same inputs — but pins a full commit
+# SHA instead of the floating `v1` major tag: Way A is the install a repo commits and controls
+# deliberately (re-pinned by re-running this script, or by hand), where Way C's whole pitch is
+# "copy 20 lines and move on," so a moving tag is the right tradeoff there and the wrong one here.
+# personas_path points at the persona copies this script vendors into .github/review-agents/ —
+# commented out, matching action.yml's own default of using its bundled agents/ — so a repo that
+# forks a persona has a ready-made path to point it at, without this script inventing a second
+# generator for that content.
+generate_way_a_workflow() {
+  local dest="$1"
+  local workflow_tmp
+  workflow_tmp="$(mktemp)"
+  cat > "$workflow_tmp" <<EOF
+# .github/workflows/review.yml — GENERATED by install.sh (Way A). Re-run install.sh to refresh
+# when a newer review-pantheon release moves the pin. While this GENERATED marker line is
+# present, install.sh treats the file as installer-owned and regenerates it on rerun — DELETE
+# THIS LINE (or the word GENERATED in it) to take ownership; install.sh then never touches the
+# file again.
+#
+# Thin caller — no gate logic lives in this file or anywhere else in this repo. It calls
+# review-pantheon's own published composite action, pinned to a full commit SHA rather than a
+# moving tag (matching how action.yml itself pins anthropics/claude-code-action — see that
+# file's header comment for the rationale). Pinned to ${WAY_A_PIN_RELEASE}'s release commit,
+# verified via \`gh api repos/G-Schumacher44/review-pantheon/git/ref/tags/v1\` and dereferencing
+# the tag object. To re-pin: resolve the new tag's commit the same way and re-run install.sh (or
+# edit the SHA below directly).
+#
+# This makes Way A depend on review-pantheon existing as a public GitHub repo at gate-run time —
+# a \`uses:\` reference resolves at RUN time, not install time. If that's a blocker (an air-gapped
+# runner with no path to github.com), vendor this repo's action.yml + action/lib/*.sh + agents/ +
+# pantheon/ into your own tree and pin a SHA yourself instead — see docs/SETUP.md's "Way A" note.
+name: review-pantheon
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # Repo variable gate (no silent start), plus a draft skip — both must live at job level.
+    if: \${{ vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history: the action needs base...head to compute the diff
+
+      # FORK PRs: this job still runs, but the action detects that GitHub withheld the secret
+      # from a fork run and skips every step, emitting a NOT GATED notice and step summary
+      # instead of failing. The check goes green BECAUSE IT SKIPPED — it does not mean the PR
+      # was reviewed. Review fork PRs yourself, and do not make this a required check on a repo
+      # that accepts outside contributions until you have read SECURITY.md's "Fork pull requests".
+      - uses: G-Schumacher44/review-pantheon@${WAY_A_PIN_SHA} # ${WAY_A_PIN_RELEASE} — see this file's header comment for how to re-pin
+        with:
+          # Set exactly one of these two — it fails loud otherwise. No Bedrock/Vertex/Foundry/
+          # OIDC passthrough here — or in ANY install method (the composite action declares no
+          # cloud-provider inputs). If you need pure cloud-provider auth, the supported path is
+          # maintaining your own workflow that wires anthropics/claude-code-action directly —
+          # see docs/SETUP.md's "Bedrock/Vertex/Foundry" note for the full recipe.
+          claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          # Way A's point is personas your repo owns: this installer vendors them into
+          # .github/review-agents/ (base-pinned reads — see action.yml's personas_path input),
+          # and this input makes the gate actually USE them. At install time they're
+          # byte-identical to the bundled set, so behavior starts identical; edits (or
+          # customizations carried over from a pre-collapse install) apply on the next PR.
+          # Delete this line to use review-pantheon's bundled personas instead.
+          personas_path: .github/review-agents
+          # execution: trusted   # DANGER: grants every agent full Bash instead of the default
+          #                      # read-only git allowlist (diff/show/log/status). Own-repo/
+          #                      # trusted-author use only — never for reviewing a fork PR you
+          #                      # don't control. Default is "readonly"; leave this commented
+          #                      # out unless you have a specific reason to change it.
+EOF
+  # Unlike every other install_file target, THIS file must be replaceable on rerun: the whole
+  # documented re-pin flow is "re-run install.sh when a release moves WAY_A_PIN_SHA", and
+  # pre-collapse installs carry the retired ~1,000-line vendored implementation at this exact
+  # path. install_file's "different means customized" rule would strand both forever (Codex
+  # finding on the collapse PR). Ownership signal: the GENERATED marker line in the file itself
+  # — present means installer-owned (regenerate), absent means a pre-collapse vendored copy or
+  # a deliberately owned file (never overwritten; the skip report says how to migrate).
+  if [[ -f "$dest" ]] && ! cmp -s "$workflow_tmp" "$dest"; then
+    if grep -q "GENERATED by install.sh" "$dest"; then
+      cp "$workflow_tmp" "$dest"
+      note "refreshed $dest (installer-generated; pin/template updated)"
+    else
+      SKIPPED+=("$dest — not installer-generated (a pre-collapse vendored workflow, or one you own): delete it and re-run to migrate to the thin caller")
+    fi
+    rm -f "$workflow_tmp"
+    return 0
+  fi
+  install_file "$workflow_tmp" "$dest"
+  rm -f "$workflow_tmp"
+}
+
+# Gate files (personas into .github/review-agents, the generated workflow, the house rules
+# template, .gitignore) are a repo concept — a PR gate belongs to one repo's CI — so --user skips
+# this whole section and installs only the per-tool projections below.
 if [[ "$DO_USER" != "true" ]]; then
-  [[ -f "$ACTION_SRC" ]] || die "missing $ACTION_SRC"
   [[ -f "$RULES_SRC" ]] || die "missing $RULES_SRC"
-  [[ -f "$PANTHEON_PKG_SRC/__init__.py" ]] || die "missing $PANTHEON_PKG_SRC/__init__.py"
-  [[ -f "$PANTHEON_PKG_SRC/jqjson.py" ]] || die "missing $PANTHEON_PKG_SRC/jqjson.py"
-  [[ -f "$PANTHEON_PKG_SRC/verdict.py" ]] || die "missing $PANTHEON_PKG_SRC/verdict.py"
-  [[ -f "$PANTHEON_PKG_SRC/render.py" ]] || die "missing $PANTHEON_PKG_SRC/render.py"
-  [[ -f "$PANTHEON_PKG_SRC/execution.py" ]] || die "missing $PANTHEON_PKG_SRC/execution.py"
 
   AGENTS_DEST="$TARGET/.github/review-agents"
   WORKFLOW_DEST="$TARGET/.github/workflows/review.yml"
   RULES_DEST="$TARGET/REVIEW_RULES.md"
   GITIGNORE_DEST="$TARGET/.gitignore"
-  # Base-pinned by action/review.yml's "Resolve gate scripts (base-pinned)" (verdict.py's
-  # dependency closure) and "Resolve read-only git wrapper (base-pinned)" (execution.py) steps —
-  # installed here is required (it's what gets committed and read at the PR's base), but the
-  # literal path used at run time is always the base-pinned $RUNNER_TEMP copy, never this one. A
-  # bare $GITHUB_WORKSPACE-pinned prefix would let a PR replace either file and still be trusted
-  # (Codex P1) — see those steps' own comments in action/review.yml.
-  PANTHEON_PKG_DEST="$TARGET/.github/review-agents/pantheon"
 
   mkdir -p "$AGENTS_DEST"
   for persona in "$AGENTS_SRC"/*.md; do
     install_file "$persona" "$AGENTS_DEST/$(basename "$persona")"
   done
 
-  install_file "$ACTION_SRC" "$WORKFLOW_DEST"
+  generate_way_a_workflow "$WORKFLOW_DEST"
   install_file "$RULES_SRC" "$RULES_DEST"
-
-  mkdir -p "$PANTHEON_PKG_DEST"
-  for pyfile in __init__.py jqjson.py verdict.py render.py execution.py; do
-    install_file "$PANTHEON_PKG_SRC/$pyfile" "$PANTHEON_PKG_DEST/$pyfile"
-  done
 
   # .gitignore: append the state-file entry if not already present.
   if [[ -f "$GITIGNORE_DEST" ]]; then
@@ -492,8 +585,8 @@ EOF
   done
   cat <<EOF
 
-No gate files were installed (workflow, the vendored pantheon package, REVIEW_RULES.md) — those
-are repo concepts. Run install.sh (without --user) inside each repo you want the CI gate in.
+No gate files were installed (the generated workflow, personas, REVIEW_RULES.md) — those are
+repo concepts. Run install.sh (without --user) inside each repo you want the CI gate in.
 EOF
   exit 0
 fi
@@ -508,23 +601,21 @@ Post-install checklist:
      then store it with: gh secret set CLAUDE_CODE_OAUTH_TOKEN.
   2. Set the repo variable REVIEW_GATE_ENABLED=true (Settings -> Secrets and variables ->
      Actions -> Variables) — the workflow no-ops until this is set.
-  3. .github/workflows/review.yml ships pinned to anthropics/claude-code-action's v1.0.183
-     commit SHA — confirm that SHA still matches a release you trust
-     (gh api repos/anthropics/claude-code-action/git/ref/tags/v1.0.183, or check
-     github.com/anthropics/claude-code-action/releases) before relying on this gate. If you
-     re-pin to a newer release, re-verify the with: inputs and output below against that
-     release's action.yml too — the interface can change between releases.
-  4. What review.yml uses today, already confirmed against v1.0.183's real action.yml:
-     claude_code_oauth_token, prompt, claude_args (with --allowedTools and --json-schema —
-     v1 has no allowed_tools input), and the structured_output output (v1 has no "result"
-     output). See review.yml's own header comment for the sources this was verified against.
-  5. Open a test PR with a deliberately planted blocker (a secret in a diff, an unguarded
+  3. .github/workflows/review.yml calls G-Schumacher44/review-pantheon@$WAY_A_PIN_SHA
+     ($WAY_A_PIN_RELEASE) — confirm that pin still points at a release you trust
+     (gh api repos/G-Schumacher44/review-pantheon/git/ref/tags/v1, or check
+     github.com/G-Schumacher44/review-pantheon/releases) before relying on this gate. The
+     anthropics/claude-code-action pin that release itself uses lives inside its own
+     action.yml, not in anything this script generated — re-pinning review-pantheon picks up
+     whatever claude-code-action pin that release shipped with.
+  4. Open a test PR with a deliberately planted blocker (a secret in a diff, an unguarded
      rm, whatever your REVIEW_RULES.md forbids) and confirm the gate goes RED before you
      trust a green result on a real PR.
-  6. Only after step 5 passes, consider adding this workflow as a required status check.
-  7. Using the CLI lane too? Copy gate.conf.example to gate.conf at your repo root and edit
+  5. Only after step 4 passes, consider adding this workflow as a required status check.
+  6. Using the CLI lane too? Copy gate.conf.example to gate.conf at your repo root and edit
      it — it isn't installed automatically (see docs/CLI.md's gate.conf section).
 
-Prefer zero repo footprint? Skip install.sh's gate files entirely and use the published
-action instead — see examples/review-gate.yml and docs/SETUP.md's "Way C — published action."
+Prefer a moving tag over a pinned SHA you re-pin by hand? Skip install.sh's gate files
+entirely and use examples/review-gate.yml instead — see docs/SETUP.md's "Way C — published
+action."
 EOF

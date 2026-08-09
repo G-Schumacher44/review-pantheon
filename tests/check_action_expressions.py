@@ -2,7 +2,8 @@
 """tests/check_action_expressions.py — the expression guard actionlint cannot provide.
 
 Two defect classes, both found LIVE on this repo by a pre-flip security review, both on the same
-three lines of ``action/review.yml``:
+three lines of the since-deleted vendored ``action/review.yml`` (issue #36 collapsed it into a
+thin caller of ``action.yml`` — see DESIGN.md's "Published action" section):
 
 1. **Double-quoted string literals inside ``${{ }}``.** The GitHub Actions expression grammar
    accepts SINGLE-quoted literals only. ``${{ x || "fallback" }}`` is rejected at queue time, so
@@ -29,14 +30,18 @@ Exit 0 = clean, exit 1 = findings printed with file:line.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Both Action surfaces. review.yml is a workflow; action.yml is composite-action metadata that
-# actionlint cannot parse — covering it here is the entire reason this file exists.
-TARGETS = ("action.yml", "action/review.yml")
+# The one Action surface (since issue #36 deleted the vendored action/review.yml duplicate).
+# action.yml is composite-action metadata that actionlint cannot parse — covering it here is the
+# entire reason this file exists.
+TARGETS = ("action.yml",)
 
 EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 
@@ -251,6 +256,34 @@ def main() -> int:
     )
     for wf in workflows:
         all_findings.extend(check_no_pull_request_target(wf))
+
+    # The generated Way A workflow is an Action surface too — it just doesn't exist as a tracked
+    # file (install.sh renders it from a heredoc). A pull_request_target planted in that template
+    # would ship to every NEW install while every scan above stayed green, exactly the gap the
+    # deleted action/review.yml never had because it was tracked (Codex finding on the collapse
+    # PR). So: render it for real — run install.sh against a scratch dir — and scan the OUTPUT,
+    # not the heredoc source, so the guard survives any future refactor of how the template is
+    # produced. Render failure is itself a finding: a guard that can't see its surface must not
+    # report the surface clean.
+    scratch = Path(tempfile.mkdtemp(prefix="way-a-render-"))
+    try:
+        render = subprocess.run(
+            ["bash", str(REPO_ROOT / "install.sh"), str(scratch)],
+            capture_output=True,
+            text=True,
+        )
+        rendered_wf = scratch / ".github" / "workflows" / "review.yml"
+        if render.returncode != 0 or not rendered_wf.is_file():
+            all_findings.append(
+                "install.sh render for the generated-workflow scan failed "
+                f"(exit {render.returncode}, {rendered_wf} exists={rendered_wf.is_file()}) — "
+                "the Way A surface could not be checked, which is a failure, not a pass. stderr: "
+                + render.stderr.strip()[-300:]
+            )
+        else:
+            all_findings.extend(check_no_pull_request_target(rendered_wf))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     if all_findings:
         print("Action-expression guard FAILED:\n", file=sys.stderr)
