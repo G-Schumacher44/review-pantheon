@@ -4,23 +4,23 @@
 # action's final "Enforce gate result" step can fail loud on red/unverified.
 #
 # The comment itself (headline + verdict table + human-first findings fold + machine-readable
-# JSON tail) is built by cli/lib/render_comment.sh, sourced below via a path relative to this
-# file — safe because the published action ships this whole repo at github.action_path, unlike
-# bootstrap.sh's CLI-only install footprint (which never touches action/). That renderer is
-# also what cli/review-gate uses, so the two runtimes read identically on purpose (DESIGN.md's
-# "Two runtimes, one rule") — this file's job is just to normalize this job's per-agent step
-# outputs (env vars, see below) into the renderer's <NAME>_* contract and call it.
-# action/review.yml (the vendored, install.sh-Way-A workflow) is the one render path that can't
-# source this — a target repo never gets a copy of cli/lib/ — so it stays a hand-synced third
-# copy; see its own header comment.
+# JSON tail) is built by `pantheon.render`, invoked below via a path relative to this file — safe
+# because the published action ships this whole repo at github.action_path, unlike
+# bootstrap.sh's CLI-only install footprint (which never touches action/). `pantheon.render` is
+# the one renderer implementation every lane calls — this file's job is just to normalize this
+# job's per-agent step outputs (env vars, see below) into its `<NAME>_*` env-var contract and
+# call it. action/review.yml (the vendored, install.sh-Way-A workflow) is the one render path
+# that can't invoke it directly — a target repo never gets a copy of pantheon/ except as a
+# base-pinned $RUNNER_TEMP read — so it stays a hand-synced inline copy; see its own header
+# comment.
 #
 # Usage: combine_verdicts.sh <space-separated agent list, e.g. "artemis apollo">
 #
 # Per agent NAME (upper-cased for the env var lookup), reads:
 #   <NAME>_COLOR, <NAME>_VERDICT, <NAME>_TOP, <NAME>_FINDINGS, <NAME>_INVARIANT, <NAME>_REASON
 #   — the matching decide-<agent> step's outputs (color / verdict / top_finding /
-#   findings_json / invariant_fired / reason — see action/decide_verdict.py's
-#   emit_github_output). An agent whose <NAME>_COLOR is empty is treated as "did not run" ->
+#   findings_json / invariant_fired / reason — see pantheon/verdict.py's emit_github_output).
+#   An agent whose <NAME>_COLOR is empty is treated as "did not run" ->
 #   unverified, same fail-closed rule as everywhere else in this repo.
 # Also reads from env:
 #   PR_NUMBER        - the PR to comment on (skips posting, with a warning, if unset)
@@ -39,8 +39,20 @@ AGENTS="${1:?usage: combine_verdicts.sh <space-separated agent list>}"
 RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/../../cli/lib/render_comment.sh"
+PANTHEON_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# pantheon.render's own CLI shim — invoked via its OWN ABSOLUTE PATH (never `python3 -m
+# pantheon.render`, which would prepend this process's cwd to sys.path and risk shadowing by a
+# PR-committed pantheon/render.py). Both subcommands read the same `<NAME>_COLOR`/`<NAME>_VERDICT`/
+# `<NAME>_TOP`/`<NAME>_FINDINGS` env-var contract this file's own per-agent loop below populates
+# — those vars are already part of this step's process environment (GitHub Actions `env:` block),
+# so the python subprocess inherits them same as the old sourced-bash-function call did.
+pantheon_overall_color() {
+  PYTHONPATH="$PANTHEON_ROOT" python3 "$PANTHEON_ROOT/pantheon/render.py" overall "$@"
+}
+pantheon_render_comment() {
+  PYTHONPATH="$PANTHEON_ROOT" python3 "$PANTHEON_ROOT/pantheon/render.py" comment "$@"
+}
 
 # Word-split $AGENTS into an array once, so downstream calls into the shared renderer can pass
 # it as "${AGENT_LIST[@]}" instead of relying on unquoted-expansion word splitting everywhere.

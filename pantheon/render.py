@@ -462,7 +462,9 @@ def _headline_lines(overall: str) -> tuple[str, str]:
 
 
 def _finding_line_or_placeholder(raw_line: Any) -> str:
-    """``.line`` is schema'd as a number, but it's still model output — coerce anything that
+    """``.line`` is NOT schema-constrained at all (the provider schema permits every JSON type on
+    the display fields — see ``providers.VERDICT_JSON_SCHEMA``), so this coercion is the ONLY
+    guard, not a redundant second one — coerce anything that
     isn't a plain non-negative integer to the same "?" placeholder used when the key is missing
     entirely, rather than interpolating arbitrary text where a line number is expected. Mirrors
     the bash renderer's ``[[ "$ln" =~ ^[0-9]+$ ]] || ln="?"`` coercion, applied to whatever

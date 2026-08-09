@@ -1,7 +1,6 @@
-# CI for review-pantheon itself — "the review tool must survive its own review" (see
-# tests/test-verdict-decision.sh's header). Syntax-checks and lints every shell script, byte-
-# compiles the Python decision script, and runs the verdict-decision and combined-comment-
-# renderer fixture tests.
+# CI for review-pantheon itself — "the review tool must survive its own review". Syntax-checks
+# and lints every shell script, byte-compiles every Python module, and runs the verdict-decision
+# and combined-comment-renderer fixture tests.
 #
 # The review.yml gate (lint-and-test/setup-smoke) does NOT run against itself — that requires
 # CLAUDE_CODE_OAUTH_TOKEN and REVIEW_GATE_ENABLED, which this repo doesn't set for its own CI.
@@ -45,7 +44,7 @@ jobs:
           while IFS= read -r -d '' f; do
             echo "bash -n $f"
             bash -n "$f" || status=1
-          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
           exit "$status"
 
       - name: shellcheck on every shell script
@@ -55,7 +54,7 @@ jobs:
           while IFS= read -r -d '' f; do
             echo "shellcheck $f"
             shellcheck "$f" || status=1
-          done < <(find . -type f \( -name '*.sh' -o -name 'review-gate' \) -not -path './.git/*' -print0)
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
           exit "$status"
 
       - name: py_compile every Python file
@@ -79,55 +78,90 @@ jobs:
               print(f + ': OK')
           "
 
-      - name: Run verdict-decision fixture tests
-        run: bash tests/test-verdict-decision.sh
+      # actionlint, NOT just the YAML parse above. A pre-flip security review found
+      # action/review.yml carrying `|| "literal"` inside a `${{ }}` expression — the expression
+      # grammar accepts SINGLE-quoted literals only, so GitHub rejected the file at queue time and
+      # the vendored workflow every Way-A adopter installs reviewed exactly zero PRs. The YAML
+      # parse above could never catch it: the file IS valid YAML, and ci.yml's own header notes
+      # review.yml never runs against this repo, so nothing executed it either. A check that
+      # cannot fail for the actual failure mode is green by construction; this is the check that
+      # can.
+      #
+      # SCOPE, precisely — actionlint does NOT catch the shell-injection shape. An earlier version
+      # of this comment claimed it did; that was verified FALSE (re-inserting
+      # `top='${{ steps.decide.outputs.top_finding }}'` inside a `run:` block lints clean, exit 0).
+      # actionlint's untrusted-input rule fires only for an allowlist of `github.*` contexts and
+      # never for `steps.*.outputs.*` — which is exactly the model-derived vector this repo cares
+      # about. Claiming coverage you do not have is worse than having none: the next maintainer
+      # trusts the check and ships the injection. The separate grep guard below is what actually
+      # backs that promise.
+      - name: Lint the workflows with actionlint
+        env:
+          # Pinned to a COMMIT SHA, not `main` and not a tag. This runs on every push/PR, and an
+          # unpinned installer from a third-party repo is arbitrary code execution in this job on
+          # someone else's commit. A tag is not a pin — its owner can move it. This repo already
+          # fails its own build if `claude-code-action` is not pinned to a full 40-char SHA
+          # (tests/test-action-refs.sh), so applying a weaker standard to its own tooling was the
+          # inconsistency a pre-flip review flagged. 03d0035246f3e81f36aed592ffb4bebf33a03106 is v1.7.7,
+          # resolved via `gh api repos/rhysd/actionlint/git/ref/tags/v1.7.7`.
+          ACTIONLINT_SHA: "03d0035246f3e81f36aed592ffb4bebf33a03106"
+          ACTIONLINT_VERSION: "1.7.7"
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/${ACTIONLINT_SHA}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
+          # action/review.yml is a vendored workflow that lives outside .github/workflows, so
+          # actionlint's own auto-discovery does not see it — name it explicitly. Passing it as an
+          # argument is what makes this step cover the file that actually shipped broken.
+          #
+          # action.yml is NOT lintable here and cannot be: it is composite-action metadata, so
+          # actionlint rejects it ("\"jobs\" section is missing in workflow"). That leaves the
+          # flagship published surface — the `@v1` path every non-vendoring adopter uses — without
+          # expression-grammar coverage, which is why the next step exists.
+          #
+          # -ignore SC2016 ("expressions don't expand in single quotes"): informational only. All
+          # occurrences are deliberate single-quoted `grep`/`sed` regex patterns in this file and
+          # release.yml (verified: removing the flag surfaces exactly those, nothing else).
+          ./actionlint -color -ignore 'SC2016' .github/workflows/*.yml action/review.yml
 
-      - name: Run verdict-decision fixture tests (Python port, docs/PYTHON-PORT.md)
+      # The guard actionlint cannot provide, for BOTH Action surfaces including action.yml.
+      # Two classes, both found live on this repo by a pre-flip security review:
+      #   1. double-quoted string literals inside `${{ }}` — invalid grammar, rejected at queue
+      #      time, workflow silently never runs.
+      #   2. `${{ }}` interpolated into a `run:` block — the expression engine substitutes BEFORE
+      #      bash parses, so model-authored prose becomes script text (RCE in a job holding
+      #      CLAUDE_CODE_OAUTH_TOKEN). Values must travel via `env:` and be read as "$VAR".
+      - name: Guard both Action surfaces against expression-injection shapes
+        run: python3 tests/check_action_expressions.py
+
+      - name: Run verdict-decision fixture tests
         run: bash tests/test-verdict-decision-python.sh
 
-      - name: Run base-pinned-read fixture tests (symlink-safe resolution)
-        run: bash tests/test-base-pinned-read.sh
-
-      - name: Run base-pinned-read Python-port migration-exam fixture tests (pantheon.basepin)
+      - name: Run base-pinned-read fixture tests (pantheon.basepin)
         run: bash tests/test-base-pinned-read-python.sh
 
       - name: Run combined-comment renderer fixture tests
-        run: bash tests/test-render-comment.sh
-
-      - name: Run combined-comment renderer fixture tests (Python port, docs/PYTHON-PORT.md)
         run: bash tests/test-render-comment-python.sh
 
-      - name: Run JSON-boundary fixture tests (pantheon.jqjson, docs/PYTHON-PORT.md)
+      - name: Run JSON-boundary fixture tests (pantheon.jqjson)
         run: bash tests/test-json-boundary.sh
 
       - name: Run install.sh fixture tests
         run: bash tests/test-install.sh
 
-      - name: Run prompt-assembly fixture tests
-        run: bash tests/test-prompt-assembly.sh
-
-      - name: Run state-persistence fixture tests
-        run: bash tests/test-state-persistence.sh
-
-      - name: Run state-persistence Python-port migration-exam fixture tests (pantheon.state)
-        run: bash tests/test-state-persistence-python.sh
-
-      - name: Run prompt-assembly Python-port migration-exam fixture tests (pantheon.cli)
+      - name: Run prompt-assembly fixture tests (pantheon.cli)
         run: bash tests/test-prompt-assembly-python.sh
 
-      - name: Run git-readonly-wrapper fixture tests
+      - name: Run state-persistence fixture tests (pantheon.state)
+        run: bash tests/test-state-persistence-python.sh
+
+      - name: Run git-readonly-wrapper fixture tests (pantheon.execution)
         run: bash tests/test-git-readonly-wrapper.sh
 
-      - name: Run git-readonly-wrapper fixture tests against the Python port (pantheon.execution)
-        env:
-          PANTHEON_EXECUTION_IMPL: python
-        run: bash tests/test-git-readonly-wrapper.sh
-
-      - name: Run execution-tier fixture tests
-        run: bash tests/test-execution-tier.sh
-
-      - name: Run execution-tier Python-port migration-exam fixture tests (pantheon.execution)
+      - name: Run execution-tier fixture tests (pantheon.execution)
         run: bash tests/test-execution-tier-python.sh
+
+      - name: Run action/lib execution-context-note fixture tests (cwd-shadow-import resistance)
+        run: bash tests/test-action-lib-execution-note.sh
 
       - name: Run bootstrap release/checksum fixture tests
         run: bash tests/test-bootstrap-release.sh
@@ -138,14 +172,11 @@ jobs:
       - name: Run release.yml tag-validation gate fixture tests
         run: bash tests/test-release-tag-gates.sh
 
-      - name: Install the pantheon package + ruff/mypy/pytest (build-time-only tooling, docs/PYTHON-PORT.md)
+      - name: Install the pantheon package + ruff/mypy/pytest (build-time-only tooling)
         run: pip install --quiet -e . ruff mypy pytest
 
       - name: pantheon console script smoke check (--help exits 0)
         run: pantheon --help
-
-      - name: review-gate compat-shim console script smoke check (--help exits 0)
-        run: review-gate --help
 
       - name: ruff check pantheon/ (lint)
         run: ruff check pantheon/ tests/test_*.py
@@ -156,7 +187,7 @@ jobs:
       - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config)
         run: mypy
 
-      - name: pytest (jqjson matrix + pure-function seams, docs/PYTHON-PORT.md)
+      - name: pytest (jqjson matrix + pure-function seams)
         run: pytest -q
 
       - name: Assert CONTRIBUTING.md's canonical test tables + prose counts match tests/* exactly
@@ -189,26 +220,55 @@ jobs:
           # it still cites a stale number (exactly how the bash count drifted to 18 silently
           # across three slices before this check existed); assert the digit, not just the rows.
           sh_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '\.sh$')
-          py_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '\.py$')
+          # test_*.py, not *.py: the sentence this is checked against says "tests/test_*.py", and
+          # tests/ also holds CI guard scripts that pytest never collects (check_action_expressions.py).
+          # Those coincided until the first non-test .py landed here, at which point counting all
+          # .py made the check demand a number the sentence does not describe.
+          py_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '/test_.*\.py$')
           # sort -u: the count sentence is deliberately allowed to appear more than once (the
           # table intro and its own subsection heading both cite it) — dedupe identical repeats,
           # but a genuine mismatch between two citations still surfaces as more than one line,
           # which the single-value check below correctly rejects.
           sh_count_prose="$(grep -oE '\([0-9]+ files; verified against `git ls-tree -r tests/\*\.sh`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
-          py_count_prose="$(grep -oE '\([0-9]+ files, `tests/test_\*\.py`; verified against `git ls-tree -r tests/\*\.py`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
+          py_count_prose="$(grep -oE '\([0-9]+ files, `tests/test_\*\.py`; verified against `git ls-tree -r tests/test_\*\.py`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
           [[ -n "$sh_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's bash-suite prose count sentence — did its wording change? update this check's regex to match"; status=1; }
           [[ -n "$py_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's pytest prose count sentence — did its wording change? update this check's regex to match"; status=1; }
           [[ "$(wc -l <<<"$sh_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct bash-suite count across its mentions: $sh_count_prose"; status=1; }
           [[ "$(wc -l <<<"$py_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct pytest count across its mentions: $py_count_prose"; status=1; }
           [[ "$sh_count_prose" == "$sh_count_tree" ]] || { echo "::error::CONTRIBUTING.md's bash-suite prose count ($sh_count_prose) != actual tests/*.sh count ($sh_count_tree)"; status=1; }
-          [[ "$py_count_prose" == "$py_count_tree" ]] || { echo "::error::CONTRIBUTING.md's pytest prose count ($py_count_prose) != actual tests/*.py count ($py_count_tree)"; status=1; }
+          [[ "$py_count_prose" == "$py_count_tree" ]] || { echo "::error::CONTRIBUTING.md's pytest prose count ($py_count_prose) != actual tests/test_*.py count ($py_count_tree)"; status=1; }
 
           exit "$status"
+
+      # DESIGN.md is a current-state contract, not a changelog (CONTRIBUTING.md's "Fix-round
+      # history goes in git" rule, skills/design-contract/SKILL.md's matching exclusion) — fails
+      # the build if fix-round narrative creeps back in. Deliberately narrow, case-insensitive
+      # markers rather than a broad "history"/"before"/"used to" sweep, which would false-positive
+      # on ordinary present-tense prose (e.g. this file's own "before any tool call" phrasing
+      # elsewhere in DESIGN.md) — these four are the actual shapes a round-by-round retelling
+      # takes, verified against the narrative this check was written to keep out.
+      - name: DESIGN.md contains no fix-round narrative markers
+        run: |
+          set -uo pipefail
+          # `|| true` is load-bearing, not decoration: GitHub Actions runs `run:` blocks under
+          # `bash -e` by default (`shell: bash` resolves to `bash --noprofile --norc -eo
+          # pipefail {0}`), and grep exits 1 when it finds NO match — the everyday "DESIGN.md is
+          # clean" case. Without this, the clean case aborts the step right here, before the
+          # `if` below ever runs, so the check could never go green on any input (planted-marker
+          # AND clean both "fail," just for different reasons) — caught by the coordinator after
+          # a real CI run on this exact step failed with zero markers actually present.
+          hits="$(grep -noE 'Round [0-9]+|first attempt|the fix was|previously we' DESIGN.md || true)"
+          if [[ -n "$hits" ]]; then
+            echo "::error::DESIGN.md contains fix-round narrative marker(s) — a contract describes current-state behavior only; fix-round history belongs in git (commit messages, PR descriptions), never the doc. See CONTRIBUTING.md's design-constraints section."
+            echo "$hits"
+            exit 1
+          fi
+          echo "DESIGN.md: no fix-round narrative markers found"
 
   setup-smoke:
     # Clean-machine, real-Linux run of the setup story (see Dockerfile.smoke's header): required
     # binaries, both fixture suites above, install.sh and bootstrap.sh against fresh scratch
-    # targets, and — only with a working token — one tokened `review-gate --pr <n> --dry-run`
+    # targets, and — only with a working token — one tokened `pantheon gate --pr <n> --dry-run`
     # against a real, pinned public PR. Separate job from lint-and-test so a setup-story
     # regression doesn't get muddled with a lint/fixture failure in the CI summary.
     runs-on: ubuntu-latest
@@ -279,7 +339,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           post_comment: "true" # let the twins' verdict comment land on this repo's own PRs — this
-          # IS the acceptance proof for the combined-comment renderer (cli/lib/render_comment.sh):
+          # IS the acceptance proof for the combined-comment renderer (pantheon.render):
           # a real composite-action run, on a real PR, posting the new human-first format. Was
           # "false" (mechanics-only, no comment) before the renderer existed to prove out.
           execution: trusted # this IS the own-repo/trusted-author case execution=readonly's own

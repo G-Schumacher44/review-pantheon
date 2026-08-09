@@ -230,26 +230,33 @@ def _parse_float(text: str) -> Any:
 
 _JQ_MAX_PARSE_DEPTH = 256
 
+# jq's own parser does NOT spend one depth-budget "unit" per bracket uniformly — issue #26 P1
+# (fresh evidence on top of the finding that first produced _JQ_MAX_PARSE_DEPTH): a document
+# ~129 levels deep of PURE OBJECT nesting (`{"a":{"a":{...}}}`) parsed clean through this
+# module's pre-fix scanner (129 < 256) while real jq REJECTS it — jq's recursive-descent parser
+# recurses once to enter an object's own frame and AGAIN to parse that key's value, so each
+# object level spends 2 units of jq's shared parse-depth budget; an array level spends only 1
+# (jq's array-value recursion is a single frame). Verified live, bisected exactly against a real
+# jq binary: pure `[`-nesting parses cleanly up to depth D and fails at D+1; pure `{"a":`-nesting
+# parses cleanly up to exactly D/2 and fails at D/2 + 1 -- confirmed on two different jq builds
+# (jq-1.8.2, where D=10000) with the identical 2:1 ratio holding both times, which is what
+# licenses this port to treat the ratio as a stable property of jq's OWN parser structure rather
+# than a version-specific coincidence. This repo's own CI runs jq-1.7.1 (Ubuntu 24.04's apt
+# package, Dockerfile.smoke) -- the PRE-existing `_JQ_MAX_PARSE_DEPTH = 256` constant was already
+# verified live against that exact binary for ARRAY-only nesting (a 300-level `[`-nesting
+# document fails, matching a budget of 256 array units); this fix keeps that constant AND that
+# verification UNCHANGED, and adds the missing per-bracket-type WEIGHT on top of it, so an
+# object-only document's own effective cap becomes 256 / 2 = 128 -- exactly matching the ~129
+# reproduction that exposed this gap.
+_JQ_OBJECT_DEPTH_COST = 2
+_JQ_ARRAY_DEPTH_COST = 1
 
-# jq's own parse-time object/array nesting cap — verified live against real jq (jq-1.7.1): a
-# JSON document with 300 levels of `[`-nesting produces `jq: parse error (at <stdin>:1): Exceeds
-# depth limit for parsing`, exit code 5. A CRITICAL finding from an adversarial review's live PoC
-# (reproduced against this module's PRE-fix state): Python's stdlib `json` module has no
-# equivalent cap at all (the C-accelerated scanner recurses natively, well past 256, before ever
-# hitting Python's own `sys.getrecursionlimit()`), so a verdict object with a pathologically deep
-# `display`/`summary` field parsed clean through `jqjson.loads()` while real jq's own bash
-# pipeline (`extract_last_json` -> `jq` extraction) would have already rejected the SAME input at
-# parse time -- a genuine decision-color divergence: the Python CLI could read a verdict as GREEN
-# for input bash's own runtime would have failed closed to UNVERIFIED on. This is a PRE-PARSE
-# text scan (never handing the pathological text to `json.loads` at all), not a post-parse walk
-# of the resulting Python value tree -- structurally closer to what real jq itself does (jq
-# aborts the PARSE, before any value is ever constructed), and it means this module never risks
-# ITS OWN C-stack exhaustion on adversarially deep input either, independent of where Python's
-# json module's own limits happen to sit today.
+
 def _check_depth_limit(text: str) -> None:
-    """Raises :class:`JqParseError` if `text` contains an object/array nested more than
-    :data:`_JQ_MAX_PARSE_DEPTH` levels deep, matching real jq's own parse-time refusal exactly
-    (see this constant's own comment for the live verification). Tracks bracket depth
+    """Raises :class:`JqParseError` if `text` contains object/array nesting deep enough to exceed
+    jq's own shared parse-depth budget (:data:`_JQ_MAX_PARSE_DEPTH`), weighting each `{` as
+    :data:`_JQ_OBJECT_DEPTH_COST` and each `[` as :data:`_JQ_ARRAY_DEPTH_COST` -- see this
+    constant's own comment for the live bisection proving that 2:1 ratio. Tracks depth
     character-by-character, skipping the CONTENTS of JSON string literals (respecting `\\"`
     escapes) so a string value that merely CONTAINS many `{`/`[` characters as literal text never
     counts toward nesting depth -- only real structural nesting does. Deliberately independent of
@@ -270,16 +277,26 @@ def _check_depth_limit(text: str) -> None:
             continue
         if ch == '"':
             in_string = True
-        elif ch in "{[":
-            depth += 1
+        elif ch == "{":
+            depth += _JQ_OBJECT_DEPTH_COST
             if depth > _JQ_MAX_PARSE_DEPTH:
                 raise JqParseError(
-                    f"Exceeds depth limit for parsing (jq's own cap is {_JQ_MAX_PARSE_DEPTH} "
-                    "levels of object/array nesting, verified live against real jq: rc=5, "
-                    "'Exceeds depth limit for parsing')"
+                    f"Exceeds depth limit for parsing (jq's own shared parse-depth budget is "
+                    f"{_JQ_MAX_PARSE_DEPTH} units, verified live against real jq: rc=5, 'Exceeds "
+                    f"depth limit for parsing'; each '{{' costs {_JQ_OBJECT_DEPTH_COST} units)"
                 )
-        elif ch in "}]":
-            depth -= 1
+        elif ch == "[":
+            depth += _JQ_ARRAY_DEPTH_COST
+            if depth > _JQ_MAX_PARSE_DEPTH:
+                raise JqParseError(
+                    f"Exceeds depth limit for parsing (jq's own shared parse-depth budget is "
+                    f"{_JQ_MAX_PARSE_DEPTH} units, verified live against real jq: rc=5, 'Exceeds "
+                    f"depth limit for parsing'; each '[' costs {_JQ_ARRAY_DEPTH_COST} unit)"
+                )
+        elif ch == "}":
+            depth -= _JQ_OBJECT_DEPTH_COST
+        elif ch == "]":
+            depth -= _JQ_ARRAY_DEPTH_COST
 
 
 def _verify_utf8(value: Any) -> None:

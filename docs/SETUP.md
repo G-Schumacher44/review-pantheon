@@ -1,20 +1,15 @@
 # Setup — install, first run, troubleshooting
 
-This is the CLI-first walkthrough: get `pantheon` installed, run it once against a real PR
-without spending a token, then run it for real. For the zero-footprint, Action-only surface (no
+This doc's job is narrow: get `pantheon` installed and prove it works once, through the
+zero-token `--dry-run` demo. For everything past that — every flag, every `gate.conf` key, the
+execution tiers, exit codes — [CLI.md](CLI.md) is the reference you come back to; this doc
+points into it rather than re-explaining flags. For the zero-footprint, Action-only surface (no
 CLI, no files in your repo), see
 [Way C](#way-c--published-action-zero-repo-footprint-action-only) below. Binding contract:
-`DESIGN.md`. Doc index: [docs/README.md](README.md). Full flag/`gate.conf` reference once
-you're past first run: [CLI.md](CLI.md).
+`DESIGN.md`. Doc index: [docs/README.md](README.md).
 
-**`pantheon` is the current CLI (port slice 5, [docs/PYTHON-PORT.md](PYTHON-PORT.md))** —
-`pantheon gate` / `pantheon counsel`, installable via `pipx`/`pip` (stdlib-only, no runtime
-dependency). `review-gate` still works as a **deprecated, one-release compat shim** forwarding
-straight into `pantheon gate` — everything below that names `review-gate` applies identically to
-`pantheon gate`, and Way A/B's install steps now install both (the bash CLI stays vendored only
-for this transition window — see [docs/PYTHON-PORT.md](PYTHON-PORT.md)'s Slice-5 status
-section). Switch to `pantheon gate` now; `review-gate` (both the bash script and the Python
-shim) is removed in the release after this one.
+`pantheon` is the CLI — `pantheon gate` / `pantheon counsel`, installable via `pipx`/`pip`
+(stdlib-only, no runtime dependency).
 
 ## Prerequisites
 
@@ -22,9 +17,8 @@ shim) is removed in the release after this one.
 |---|---|---|
 | `bash` | Everything | 3.2+ (stock macOS) through 5.x (Linux). No bashisms newer than that. **Windows:** the CLI surface needs a POSIX shell — use WSL or Git Bash. The Action surface runs on GitHub's Linux runners and works from any OS with no local shell at all. |
 | `git` | Everything | The CLI locates the target repo via `git rev-parse --show-toplevel` and fetches PR refs directly (`refs/pull/<n>/head`) — no local branch checkout needed. |
-| `jq` | The deprecated bash CLI only | Verdict extraction and validation in `cli/lib/verdict.sh` (bash + `jq`) — not needed for `pantheon gate` (its `pantheon.verdict` module needs only `python3`, below). |
 | `gh`, authenticated | Everything | `pantheon gate` shells out to `gh pr view` / `gh pr comment`. Run `gh auth status` first if unsure. |
-| `python3` (>=3.9) | Everything (CLI and Action) | `pantheon` (the CLI) and `pantheon.verdict` (the Action's verdict decider, port slice 5) are both stdlib-only Python — no runtime dependency to install beyond the interpreter itself. |
+| `python3` (>=3.9) | Everything (CLI and Action) | `pantheon` (the CLI) and `pantheon.verdict` (the Action's verdict decider) are both stdlib-only Python — no runtime dependency to install beyond the interpreter itself. |
 | `curl` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Only needed for the no-local-checkout install path — fetches the repo tarball from GitHub's codeload endpoint. Not needed for a local-checkout install, `install.sh`, or normal CLI/Action use. |
 | `tar` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Extracts the tarball `curl` fetches. Same scope as `curl` above — not needed otherwise. |
 | One provider CLI | Actually calling a model | `claude` (Claude Code CLI) is the default lane and the only one integration-tested. `codex`, `gemini`, `cursor-agent` are best-effort — see DESIGN.md's ["Provider lanes"](../DESIGN.md#provider-lanes) section. `--dry-run` (below) needs none of these installed. |
@@ -51,9 +45,9 @@ Code that's the counsel agents, the four canonical skills (`gate`, `counsel`, `s
 tools get their own best-effort per-tool projections (see DESIGN.md). Idempotent — see
 `install.sh`'s own header comment and the README's [Quick start](../README.md#quick-start).
 
-You still run the CLI surface (`pantheon gate`, or the deprecated `cli/review-gate`/`review-gate`)
-from the review-pantheon checkout itself (`pip install -e .` into a venv), not from the target
-repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
+You still run the CLI surface (`pantheon gate`) from the review-pantheon checkout itself
+(`pip install -e .` into a venv), not from the target repo — Way A's `install.sh` doesn't touch
+the CLI at all, only the Action.
 
 **Post-install checklist:**
 
@@ -67,6 +61,10 @@ repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
    matches a release you trust before relying on this gate.
 4. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
 5. Only after step 4 passes, consider making the check required.
+   On a repository that accepts outside contributions, read
+   [SECURITY.md's "Fork pull requests"](../SECURITY.md#fork-pull-requests) first: fork PRs
+   cannot be gated (GitHub withholds secrets from fork runs), so the check passes on them
+   **because it skipped** — a required green there does not mean the PR was reviewed.
 
 </details>
 
@@ -80,8 +78,8 @@ repo — Way A's `install.sh` doesn't touch the CLI at all, only the Action.
 Same generators as Way A's `--claude`/`--cursor`/`--codex`/`--gemini`, run at **user level**
 (`$HOME`) instead of into a target repo, so the counsel personas are available in every project
 on the machine without re-installing per-repo. No target-repo argument — `--user` errors if one
-is given — and at least one tool flag is required. The gate files (workflow, `decide_verdict.py`,
-`REVIEW_RULES.md`) are **not** installed under `--user`: a PR gate belongs to one repo's CI, so
+is given — and at least one tool flag is required. The gate files (workflow, the vendored
+`pantheon` package, `REVIEW_RULES.md`) are **not** installed under `--user`: a PR gate belongs to one repo's CI, so
 run plain `install.sh /path/to/repo` (Way A) per repo for those.
 
 Verified per tool against each tool's current official docs (see `install.sh`'s own
@@ -113,19 +111,16 @@ parameterized by destination root, not a duplicated code path.
 ```bash
 git clone <this repo> review-pantheon
 ./review-pantheon/bootstrap.sh --prefix ~/.review-pantheon
-export PATH="$HOME/.review-pantheon/venv/bin:$HOME/.review-pantheon/cli:$PATH"
+export PATH="$HOME/.review-pantheon/venv/bin:$PATH"
 ```
 
-Installs the `pantheon` package into a venv under the prefix (port slice 5,
-[docs/PYTHON-PORT.md](PYTHON-PORT.md)) — `pantheon`/`pantheon-git-readonly`/the deprecated
-`review-gate` compat shim all land in `$PREFIX/venv/bin` — AND still vendors the deprecated bash
-`review-gate`, its provider lanes, and the five personas into `$PREFIX/cli` for this transition
-window, same as before. Nothing is written into any target repo either way. Add the printed
-`export PATH=...` line to your shell rc yourself (`bootstrap.sh` won't edit it for you). From
-then on, `pantheon gate --pr <n>` (or the deprecated `review-gate --pr <n>`) works from inside
-any repo with a `gh`-authenticated remote, same as running it from an in-repo checkout. This is
-the CLI surface only — it doesn't install the GitHub Action; pair it with Way A or Way C in a
-given repo if you want both surfaces.
+Installs the `pantheon` package into a venv under the prefix — `pantheon`/`pantheon-git-readonly`
+land in `$PREFIX/venv/bin` — plus the five personas into `$PREFIX/agents`. Nothing is written
+into any target repo either way. Add the printed `export PATH=...` line to your shell rc
+yourself (`bootstrap.sh` won't edit it for you). From then on, `pantheon gate --pr <n>` works
+from inside any repo with a `gh`-authenticated remote, same as running it from an in-repo
+checkout. This is the CLI surface only — it doesn't install the GitHub Action; pair it with Way A
+or Way C in a given repo if you want both surfaces.
 
 Also works via `curl | bash` once this repo is public on GitHub:
 
@@ -163,7 +158,7 @@ Skip `install.sh` and `bootstrap.sh` entirely. Copy [`examples/review-gate.yml`]
 to `.github/workflows/review-gate.yml` in your repo and wire one secret — that file is the
 whole install. `action.yml` at this repo's root is a composite GitHub Action; the `uses:
 G-Schumacher44/review-pantheon@v1` reference reads personas and the `pantheon` package's
-verdict-decision module (`pantheon.verdict`, port slice 5) from its own checkout, so nothing
+verdict-decision module (`pantheon.verdict`) from its own checkout, so nothing
 lands in your repo at all. **The `@v1` tag lands with this repo's first release (see
 [RELEASING.md](../RELEASING.md)) — until then it 404s on a brand-new checkout; pin a commit SHA
 or a local checkout instead**, same caveat as `examples/review-gate.yml`'s own header comment.
@@ -198,6 +193,10 @@ which is then yours to edit — add the cloud-provider inputs to its `with:` blo
 2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
 3. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
 4. Only after step 3 passes, consider making the check required.
+   On a repository that accepts outside contributions, read
+   [SECURITY.md's "Fork pull requests"](../SECURITY.md#fork-pull-requests) first: fork PRs
+   cannot be gated (GitHub withholds secrets from fork runs), so the check passes on them
+   **because it skipped** — a required green there does not mean the PR was reviewed.
 
 Still want the Action surface but prefer the files reviewable in your own repo's history (or don't
 want to depend on this repo being public)? That's Way A, not Way C — `install.sh` vendors
@@ -217,8 +216,7 @@ cd /path/to/any/repo/with/an/open/pr
 ```
 
 (Or, with Way B installed and on `PATH`: `pantheon gate --pr <number> --dry-run` from inside that
-repo. The deprecated `cli/review-gate --pr <number> --dry-run` / `review-gate --pr <number>
---dry-run` still work identically during the compat window.)
+repo.)
 
 `--dry-run` does real work, right up to the point of spending a token or writing anything:
 
@@ -230,7 +228,7 @@ repo. The deprecated `cli/review-gate --pr <number> --dry-run` / `review-gate --
    live run would.
 5. Builds the real prompt file per agent — persona body + the generated context block (diff
    range, base branch, house-rules file, output-contract reminder) — and writes it to a temp dir.
-6. Prints, per agent, the provider call it *would* make: `[dry-run] would run: provider=<lane> model='<model>' prompt_file=<prompt_file>` (the deprecated bash CLI prints the equivalent as `[dry-run] would run: cli/providers/<lane>.sh provider_run "<model>" "<prompt_file>"`).
+6. Prints, per agent, the provider call it *would* make: `[dry-run] would run: provider=<lane> model='<model>' prompt_file=<prompt_file>`.
 7. Prints the exact comment it *would* post to the PR — headline, verdict table (each row reads
    `DRY_RUN`), and the full-findings block — to stdout, never to GitHub.
 
@@ -307,7 +305,7 @@ re-run.
 
 An 🟠 `UNVERIFIED` result means the gate refused to trust what the provider printed. It is not a
 crash; it's the fail-closed rule in `DESIGN.md` rule 2 doing its job. The four causes, in the
-order `cli/lib/verdict.sh`'s `decide_verdict` checks them:
+order `pantheon.verdict` checks them:
 
 1. **No parseable JSON found at all** — the provider's raw output never contained a `{...}`
    block `extract_last_json` could pull out (it takes the LAST `^{`-anchored block through EOF,
@@ -381,15 +379,11 @@ This is expected after any force-push — not a bug, and not something you need 
 <summary>Path resolution — running pantheon gate from a Way B (bootstrap) install</summary>
 
 `pantheon gate` locates `agents/` relative to the installed `pantheon` package's own location
-(a package-layout caveat disclosed in `pantheon/cli.py`'s own module docstring), not relative to
-the target repo it's reviewing. This works whether it's invoked from a `pip install -e .` dev
+(a package-layout caveat disclosed in `pantheon/cli.py`'s own module docstring — installed
+package data first, a dev-checkout sibling directory as the fallback), not relative to the
+target repo it's reviewing. This works whether it's invoked from a `pip install -e .` dev
 checkout, a `bootstrap.sh` prefix venv (`~/.review-pantheon/venv/bin/pantheon`), or a `pipx`
-install. The deprecated bash `review-gate` resolves its own `agents/`/`cli/providers/`
-directories relative to its own real location (symlink-resolved) the same way, whether invoked
-in-repo (`cli/review-gate`), from a `bootstrap.sh` prefix directly
-(`~/.review-pantheon/cli/review-gate`), or through a symlink onto your own `PATH`; a `source: no
-such file or directory` error mentioning `cli/lib/verdict.sh` there means the install is
-incomplete (missing `cli/lib/` or `cli/providers/` next to `review-gate`) rather than a symlink
-problem — re-run `bootstrap.sh`.
+install. A `ModuleNotFoundError`/missing-persona error there means the install itself is
+incomplete — re-run `bootstrap.sh` (or `pip install -e .`) rather than assuming a path bug.
 
 </details>

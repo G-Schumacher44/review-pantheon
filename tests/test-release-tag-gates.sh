@@ -2,8 +2,8 @@
 # tests/test-release-tag-gates.sh — fixture test for .github/workflows/release.yml's two
 # tag-validation gates: the strict-semver check and the origin/main-ancestry check (both
 # Codex findings on this PR). release.yml's steps run `bash` snippets embedded in YAML, which
-# this repo's other tests don't extract and run directly (unlike cli/review-gate's shell
-# functions) — instead this file re-runs the EXACT git/regex commands those steps use, derived
+# this repo's other tests don't extract and run directly — instead this file re-runs the EXACT
+# git/regex commands those steps use, derived
 # from release.yml's own source (grepped, not hand-copied), against real fixture git repos, so a
 # drift between what's tested here and what the workflow actually runs is caught by the
 # extraction assertions below, not silently missed.
@@ -135,7 +135,7 @@ check_ancestry "dev-only commit, never promoted (the exact stray-tag scenario)" 
 check_ancestry "dev-only commit created AFTER the last promotion (still unpromoted)" "$UNPROMOTED_SHA" "false"
 
 # ---------------------------------------------------------------------------
-# Version-match gate (port slice 5, RELEASING.md's "bump version to match the tag before
+# Version-match gate (RELEASING.md's "bump version to match the tag before
 # tagging" ceremony step) — re-runs the EXACT extraction/comparison logic the "Verify tag
 # matches pyproject.toml's version" step uses, against a real scratch pyproject.toml, so this
 # exercises real grep/sed behavior, not a mock. Proven failing pre-fix: before this step existed

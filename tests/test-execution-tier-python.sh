@@ -60,7 +60,7 @@ print($1, end='')
 "
 }
 
-WRAPPER_PATH="/opt/review-pantheon/cli/lib/pantheon-git-readonly.sh"
+WRAPPER_PATH="/opt/review-pantheon/venv/bin/pantheon-git-readonly"
 
 # ---------------------------------------------------------------------------
 # Part A — pantheon.execution.allowed_tools_for / validate_execution / execution_context_note

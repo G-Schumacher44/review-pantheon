@@ -101,10 +101,10 @@ End your output with exactly one JSON object and nothing after it:
   "findings": [
     {
       "severity": "should_fix",
-      "file": "cli/providers/gemini.sh",
+      "file": "pantheon/providers.py",
       "line": 9,
-      "issue": "re-implements the timeout-and-capture logic already factored out for claude.sh instead of reusing it",
-      "scenario": "the shared timeout bug gets fixed in claude.sh and silently stays broken in gemini.sh"
+      "issue": "re-implements the timeout-and-capture logic already factored out for the claude lane instead of reusing it",
+      "scenario": "the shared timeout bug gets fixed in the claude lane and silently stays broken in the gemini lane"
     }
   ],
   "summary": "one-line human-readable verdict justification"

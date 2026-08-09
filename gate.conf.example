@@ -2,7 +2,7 @@
 # Simple key=value, one per line. Blank lines and lines starting with # are ignored.
 # Every key is optional; the runner falls back to the defaults shown here.
 
-# Provider lane — one of the files in cli/providers/ (without the .sh extension).
+# Provider lane — claude, codex, gemini, or cursor.
 provider=claude
 
 # Lane-specific model id. Empty means "let the lane pick its own default".

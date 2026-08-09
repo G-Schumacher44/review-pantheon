@@ -270,7 +270,12 @@ def test_loads_depth_scan_handles_escaped_quotes_inside_strings() -> None:
 def test_depth_limit_matches_real_jq_live() -> None:
     # Live cross-check against the actual jq binary, when available — proves this module's cap
     # isn't just an arbitrary internal constant but genuinely matches real jq's own rc=5 refusal
-    # on the identical input, the exact divergence this fix closes.
+    # on the identical input, the exact divergence this fix closes. Skips (rather than asserting
+    # a hardcoded depth must fail) when the live jq's own budget doesn't match this module's
+    # pinned _JQ_MAX_PARSE_DEPTH — see this module's own docstring and
+    # test_depth_cost_ratio_matches_real_jq_live_bisected below for why a dev box's jq build can
+    # legitimately disagree with this repo's CI-pinned constant on the ABSOLUTE number while still
+    # agreeing on the algorithm.
     import shutil
     import subprocess
 
@@ -280,11 +285,113 @@ def test_depth_limit_matches_real_jq_live() -> None:
 
     deep = _nested_array_json(300)
     result = subprocess.run([jq_bin, "-c", "."], input=deep, capture_output=True, text=True)
-    assert result.returncode != 0
+    if result.returncode == 0:
+        pytest.skip(
+            "this jq build's own array-nesting budget is deeper than 300 levels (a newer jq "
+            "than this repo's CI-pinned jq-1.7 — see test_depth_cost_ratio_matches_real_jq_live_"
+            "bisected for the build-agnostic ratio proof instead)"
+        )
     assert "depth limit" in result.stderr.lower()
 
     with pytest.raises(jqjson.JqParseError, match="depth limit"):
         jqjson.loads(deep)
+
+
+# ---------------------------------------------------------------------------------------------
+# Object/array depth-COST parity (issue #26 P1) — jq's own recursive-descent parser does not
+# spend the same share of its parse-depth budget per bracket TYPE: entering an object recurses
+# once for the object's own frame and again to parse that key's value, while an array level costs
+# a single frame — so a ~129-level-deep PURE OBJECT document (`{"a":{"a":{...}}}`) passed this
+# module's pre-fix flat 1-unit-per-bracket scanner (129 < 256) while real jq already rejects it.
+# _JQ_OBJECT_DEPTH_COST/_JQ_ARRAY_DEPTH_COST fix this; these tests are the direct, in-process
+# proof of the ratio, plus a live cross-check against the actual jq binary when one is present —
+# bisected rather than hardcoded to one jq version's own absolute cap, since that cap (256 vs.
+# jq-1.7's shipped value, confirmed against a real jq-1.8.2 build to differ) is not itself the
+# invariant under test; the OBJECT:ARRAY COST RATIO is.
+# ---------------------------------------------------------------------------------------------
+
+
+def _nested_object_json(depth: int) -> str:
+    return '{"a":' * depth + "1" + "}" * depth
+
+
+def test_loads_object_only_nesting_cap_is_half_the_array_only_cap() -> None:
+    # _JQ_MAX_PARSE_DEPTH (256) is spent at _JQ_ARRAY_DEPTH_COST (1) per array level and
+    # _JQ_OBJECT_DEPTH_COST (2) per object level — so the deepest OBJECT-only document this
+    # module still accepts is exactly half the deepest ARRAY-only document it accepts.
+    from pantheon.jqjson import _JQ_MAX_PARSE_DEPTH, _JQ_OBJECT_DEPTH_COST
+
+    object_cap = _JQ_MAX_PARSE_DEPTH // _JQ_OBJECT_DEPTH_COST
+    jqjson.loads(_nested_object_json(object_cap))  # must not raise
+    with pytest.raises(jqjson.JqParseError, match="depth limit"):
+        jqjson.loads(_nested_object_json(object_cap + 1))
+
+
+def test_loads_rejects_a_129_level_object_nesting_that_the_pre_fix_flat_scanner_accepted() -> None:
+    # The exact reproduction shape from issue #26's own report: a ~129-object-deep document. A
+    # flat 1-unit-per-bracket scanner (129 < 256) would accept this; the weighted scanner (129 *
+    # _JQ_OBJECT_DEPTH_COST(2) = 258 > 256) correctly refuses it, matching real jq.
+    with pytest.raises(jqjson.JqParseError, match="depth limit"):
+        jqjson.loads(_nested_object_json(129))
+
+
+def test_depth_cost_ratio_matches_real_jq_live_bisected() -> None:
+    # Live, bisected cross-check against the actual jq binary — deliberately does NOT assume any
+    # one absolute cap (jq-1.7 vs. a newer jq build can differ there; confirmed live: jq-1.7 in
+    # this repo's own Dockerfile.smoke Ubuntu 24.04 image caps pure array nesting at exactly 256
+    # and pure object nesting at exactly 128 — a 2:1 ratio; a local jq-1.8.2 build caps them at
+    # 10000/5000 respectively — same 2:1 ratio, different absolute budget). What this module's
+    # own cost weighting must match is the RATIO, not any one jq version's own absolute number.
+    import shutil
+    import subprocess
+
+    jq_bin = shutil.which("jq")
+    if jq_bin is None:
+        pytest.skip("jq not installed in this environment — cannot cross-check live")
+
+    def _jq_accepts(doc: str) -> bool:
+        result = subprocess.run([jq_bin, "-c", "."], input=doc, capture_output=True, text=True)
+        return result.returncode == 0
+
+    def _bisect_last_ok(builder, lo_ok: int, hi_fail: int) -> int:
+        while hi_fail - lo_ok > 1:
+            mid = (lo_ok + hi_fail) // 2
+            if _jq_accepts(builder(mid)):
+                lo_ok = mid
+            else:
+                hi_fail = mid
+        return lo_ok
+
+    # Upper bisection bound large enough for a generous real-world jq build (verified live up to
+    # 20000 against jq-1.8.2 during this fix's own investigation) without being so large the
+    # bisection itself becomes slow.
+    array_cap = _bisect_last_ok(_nested_array_json, 1, 20000)
+    object_cap = _bisect_last_ok(_nested_object_json, 1, 20000)
+
+    assert array_cap >= 2, f"suspiciously shallow real-jq array cap ({array_cap}) — is jq actually installed correctly?"
+    # The 2:1 ratio itself is what this module's _JQ_OBJECT_DEPTH_COST/_JQ_ARRAY_DEPTH_COST encode
+    # — assert it holds against whatever jq build is actually present, not a hardcoded number.
+    # (Confirmed live, this fix's own investigation: jq-1.7 in this repo's Dockerfile.smoke image
+    # -> 256/128; a local jq-1.8.2 build -> 10000/5000 — different absolute budgets, same ratio.)
+    assert object_cap == array_cap // 2, (
+        f"real jq's object-only cap ({object_cap}) is not half its array-only cap ({array_cap}) "
+        "on this jq build — the 2:1 cost ratio this module's weighting assumes may not hold here"
+    )
+
+    # This module's OWN absolute cap (_JQ_MAX_PARSE_DEPTH = 256) is pinned to this repo's actual
+    # CI jq (jq-1.7, Dockerfile.smoke's Ubuntu 24.04 image — verified live, matches array_cap ==
+    # 256 exactly), not to whatever jq build happens to be on the machine running this test — a
+    # dev box's newer jq (this fix's own local jq-1.8.2, budget 10000) genuinely disagrees on the
+    # ABSOLUTE number, by design (see this module's own docstring on _JQ_MAX_PARSE_DEPTH). Only
+    # cross-check the boundary directly when the live jq's own budget happens to match this
+    # module's pinned constant.
+    if array_cap == jqjson._JQ_MAX_PARSE_DEPTH:
+        jqjson.loads(_nested_array_json(array_cap))
+        with pytest.raises(jqjson.JqParseError, match="depth limit"):
+            jqjson.loads(_nested_array_json(array_cap + 1))
+        jqjson.loads(_nested_object_json(object_cap))
+        with pytest.raises(jqjson.JqParseError, match="depth limit"):
+            jqjson.loads(_nested_object_json(object_cap + 1))
 
 
 # ---------------------------------------------------------------------------------------------

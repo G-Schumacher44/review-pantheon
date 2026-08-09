@@ -1,18 +1,13 @@
-# pyproject.toml — the "pantheon" package, review-pantheon's Python CLI port (v2 track). See
-# docs/PYTHON-PORT.md for the binding spec this file implements. Slice 4 lands `pantheon.cli`
-# (the [project.scripts] entry point below, `pantheon = "pantheon.cli:main"`, is a real,
-# importable module as of this slice) plus the `review-gate` compat shim — `pip install -e .`
-# against this state of the tree succeeds and both console scripts run. Still marked
-# `Development Status :: 2 - Pre-Alpha` below: bash (`cli/review-gate`) remains the CANONICAL
-# implementation until the port's Slice 5 switchover retires it (docs/PYTHON-PORT.md section 7).
+# pyproject.toml — the "pantheon" package, review-pantheon's Python CLI. `pantheon.cli` (the
+# [project.scripts] entry point below, `pantheon = "pantheon.cli:main"`) is THE CLI — there is no
+# other runtime. `pip install -e .` against this tree installs one console script and runs it.
 #
-# stdlib-only at runtime is a hard constraint (docs/PYTHON-PORT.md section 1) —
-# [project.dependencies]
-# must stay empty for the life of this package. The build backend below (setuptools) is a
-# build-time-only dependency, never installed for an end user of the published package, and does
-# not compromise that constraint. Same posture for ruff/mypy/pytest (this file's own
-# [tool.ruff]/[tool.mypy]/[tool.pytest.ini_options] sections, port slice 4) — CI/dev-only
-# tooling, never a runtime dependency.
+# stdlib-only at runtime is a hard constraint — [project.dependencies] must stay empty for the
+# life of this package. The build backend below (setuptools) is a build-time-only dependency,
+# never installed for an end user of the published package, and does not compromise that
+# constraint. Same posture for ruff/mypy/pytest (this file's own
+# [tool.ruff]/[tool.mypy]/[tool.pytest.ini_options] sections) — CI/dev-only tooling, never a
+# runtime dependency.
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -21,14 +16,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "review-pantheon"  # PyPI dist name ("pantheon" is taken upstream); import package + console command stay `pantheon`
 version = "0.0.0.dev0"
-description = "review-pantheon's Python CLI (v2 port, pre-release skeleton) — see docs/PYTHON-PORT.md"
+description = "review-pantheon's Python CLI"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
 authors = [{ name = "Garrett Schumacher" }]
 dependencies = []
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
@@ -44,15 +39,11 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/G-Schumacher44/review-pantheon"
-Documentation = "https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/PYTHON-PORT.md"
+Documentation = "https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/CLI.md"
 Issues = "https://github.com/G-Schumacher44/review-pantheon/issues"
 
 [project.scripts]
 pantheon = "pantheon.cli:main"
-# Slice-2-through-4 compat shim (docs/PYTHON-PORT.md section 2) — forwards every argument to
-# `pantheon gate`, prints a one-line deprecation note, exits with the same code. Removed at
-# Slice 5 alongside the rest of the bash CLI surface.
-review-gate = "pantheon.reviewgate_shim:main"
 # The readonly execution tier's own Bash-tool entry point (`pantheon.cli`'s `_WRAPPER_INVOCATION`/
 # `pantheon.providers`' `_FALLBACK_WRAPPER_CMD` resolve THIS installed script's own absolute path,
 # not a bare `python -m pantheon.execution wrapper` invocation — a Codex review finding on this
@@ -66,7 +57,7 @@ review-gate = "pantheon.reviewgate_shim:main"
 # user-site-packages, breaking a `pip install --user` deployment).
 pantheon-git-readonly = "pantheon.execution:main"
 
-# Explicit (not `packages.find`) — port slice 5 needed a second, non-`pantheon*`-named package
+# Explicit (not `packages.find`) — this package needs a second, non-`pantheon*`-named package
 # folded in (see the package-dir remap below), and a hand-listed two-entry list is simpler and
 # less surprising than teaching the dynamic finder a second include pattern for a source
 # directory that isn't even physically inside `pantheon/` on disk.
@@ -78,8 +69,8 @@ packages = ["pantheon", "pantheon.agents"]
 # fix (pyproject.toml packaged only `pantheon*`, but `pantheon.cli._agents_dir()` looked for
 # `agents/` as a SIBLING of pantheon/'s own installed location — true for a dev checkout, never
 # for a real site-packages install). `agents/` stays the single canonical source at the repo
-# root (DESIGN.md rule 4 — the bash CLI, install.sh, bootstrap.sh, and action.yml/
-# action/review.yml all still read it there directly, unaffected by this mapping); this entry
+# root (DESIGN.md rule 4 — install.sh, bootstrap.sh, and action.yml/action/review.yml all still
+# read it there directly, unaffected by this mapping); this entry
 # additionally packages it AS `pantheon/agents/*.md` in the wheel, via a package-dir remap
 # (`"pantheon.agents" = "agents"`) rather than physically relocating the source directory.
 # `agents/__init__.py` (an empty marker, invisible to every non-Python consumer's `*.md` globs)
@@ -93,10 +84,10 @@ packages = ["pantheon", "pantheon.agents"]
 [tool.setuptools.package-data]
 "pantheon.agents" = ["*.md"]
 
-# --- Python quality gates (port slice 4, docs/PYTHON-PORT.md) -----------------------------
+# --- Python quality gates -----------------------------------------------------------------
 # Build-time-only tooling (ruff/mypy/pytest) — installed by CI, never a [project.dependencies]
-# entry (the stdlib-only runtime constraint in section 1 is about the RUNTIME package, not the
-# dev/CI toolchain that lints and tests it).
+# entry (the stdlib-only runtime constraint above is about the RUNTIME package, not the dev/CI
+# toolchain that lints and tests it).
 
 [tool.ruff]
 target-version = "py39"
@@ -131,8 +122,16 @@ disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
+# Makes the repo root importable so a bare `pytest -q` — the command CONTRIBUTING.md documents —
+# works on a FRESH CLONE with no `pip install -e .` first. `python -m pytest` happens to work
+# without this (it injects cwd into sys.path); bare `pytest` does not, and CI never noticed
+# because CI pip-installs the package two steps earlier. A first-time contributor following the
+# docs top to bottom got 8 collection ImportErrors on unmodified `dev`. (pytest >= 7.0, already
+# the declared minversion.)
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 # Deliberately narrow to tests/test_*.py (the pytest unit layer — jqjson matrix + pure-function
-# seams only, per docs/PYTHON-PORT.md's migration-exam framing) — the tests/test-*.sh black-box
-# exam suites are a SEPARATE harness (plain bash, no pytest collection), never collected here.
+# seams only, see CONTRIBUTING.md's "Pytest unit layer" section for the scope policy) — the
+# tests/test-*.sh black-box exam suites are a SEPARATE harness (plain bash, no pytest
+# collection), never collected here.

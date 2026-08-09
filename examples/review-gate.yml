@@ -27,6 +27,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0 # full history: the action needs base...head to compute the diff
 
+      # FORK PRs: this job still runs, but the action detects that GitHub withheld the secret
+      # from a fork run and skips every step, emitting a NOT GATED notice and step summary
+      # instead of failing. The check goes green BECAUSE IT SKIPPED — it does not mean the PR
+      # was reviewed. Review fork PRs yourself, and do not make this a required check on a repo
+      # that accepts outside contributions until you have read SECURITY.md's "Fork pull requests".
       - uses: G-Schumacher44/review-pantheon@v1
         with:
           # Set exactly one of these two — it fails loud otherwise. No Bedrock/Vertex/Foundry/
