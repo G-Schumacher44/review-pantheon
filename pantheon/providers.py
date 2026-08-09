@@ -2,7 +2,7 @@
 
 Replaces the retired bash CLI's per-lane provider scripts (``claude.sh``, ``codex.sh``,
 ``gemini.sh``, ``cursor.sh`` — removed in #29) — one function per lane, dispatched by
-:func:`provider_run`, matching the spec's contract: ``provider_run(model, prompt_file) -> str``,
+:func:`provider_run`, matching the dispatcher contract: ``provider_run(provider, model, prompt_file, ...) -> str``,
 "prints/returns the agent's raw output, raises/returns nonzero on failure." This module raises
 :class:`ProviderError` for the "nonzero" half (Python's own idiom for that contract) — every
 caller (``pantheon.cli``'s ``run_agent``) catches it exactly the way the retired bash CLI's
