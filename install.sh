@@ -176,10 +176,11 @@ generate_way_a_workflow() {
 # Thin caller — no gate logic lives in this file or anywhere else in this repo. It calls
 # review-pantheon's own published composite action, pinned to a full commit SHA rather than a
 # moving tag (matching how action.yml itself pins anthropics/claude-code-action — see that
-# file's header comment for the rationale). Pinned to ${WAY_A_PIN_RELEASE}'s release commit,
-# verified via \`gh api repos/G-Schumacher44/review-pantheon/git/ref/tags/v1\` and dereferencing
-# the tag object. To re-pin: resolve the new tag's commit the same way and re-run install.sh (or
-# edit the SHA below directly).
+# file's header comment for the rationale). Pinned to ${WAY_A_PIN_RELEASE}'s release commit —
+# verify it against that RELEASE-SPECIFIC tag, not the moving \`v1\` major tag:
+#   gh api repos/G-Schumacher44/review-pantheon/git/ref/tags/${WAY_A_PIN_RELEASE}
+# (dereference the tag object's own object.sha). To re-pin to a newer release: resolve that
+# release's tag the same way and re-run install.sh (or edit the SHA below directly).
 #
 # This makes Way A depend on review-pantheon existing as a public GitHub repo at gate-run time —
 # a \`uses:\` reference resolves at RUN time, not install time. If that's a blocker (an air-gapped
@@ -605,7 +606,8 @@ Post-install checklist:
      Actions -> Variables) — the workflow no-ops until this is set.
   3. .github/workflows/review.yml calls G-Schumacher44/review-pantheon@$WAY_A_PIN_SHA
      ($WAY_A_PIN_RELEASE) — confirm that pin still points at a release you trust
-     (gh api repos/G-Schumacher44/review-pantheon/git/ref/tags/v1, or check
+     (gh api repos/G-Schumacher44/review-pantheon/git/ref/tags/$WAY_A_PIN_RELEASE — the
+     release's own tag, not the moving v1 — or check
      github.com/G-Schumacher44/review-pantheon/releases) before relying on this gate. The
      anthropics/claude-code-action pin that release itself uses lives inside its own
      action.yml, not in anything this script generated — re-pinning review-pantheon picks up
