@@ -111,8 +111,8 @@
 
 name: "review-pantheon gate"
 description: >-
-  Fail-closed AI review gate (Artemis/Apollo) and counsel panel (Socrates/Diogenes/Plato) for
-  spec-driven development. Read-only, blocker-invariant, zero files installed in your repo.
+  Fail-closed AI review gate — Artemis/Apollo twins on every PR. Read-only, blocker-invariant,
+  zero files in your repo.
 branding:
   icon: shield
   color: blue
