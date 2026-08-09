@@ -25,7 +25,7 @@ access. Doc index: [docs/README.md](docs/README.md). Binding contract: [DESIGN.m
       git tag -a vX.Y.Z origin/main -m "vX.Y.Z"
       git push origin vX.Y.Z
       ```
-      The push fires `.github/workflows/release.yml`, which runs five steps in order:
+      The push fires `.github/workflows/release.yml`, which runs six steps in order:
       1. **Reject a non-strict tag.** The workflow's own `v*.*.*` trigger is a glob and would
          otherwise also fire on `v1.2.3-rc1` or similar, but `bootstrap.sh --version` only ever
          accepts strict `vX.Y.Z` (digits only, no `-rc1`/build-suffix) — a release built from
@@ -44,10 +44,27 @@ access. Doc index: [docs/README.md](docs/README.md). Binding contract: [DESIGN.m
          `action/review.yml` — the one `action/` file `install.sh`'s default mode requires —
          `REVIEW_RULES.example.md`, `gate.conf.example`, `LICENSE`, `README.md`), generates
          `SHA256SUMS`, and publishes both as a GitHub Release with auto-generated notes.
-- [ ] **Verify the release workflow went green and both files attached** before announcing
-      anything: `gh run list --workflow=release.yml --limit 1` and
+      6. **Publish to PyPI.** Only if step 5 succeeds: builds the sdist + wheel
+         (`python -m build`) and publishes them via PyPI's trusted publisher — OIDC only, no API
+         token or secret involved. The trusted publisher is configured on PyPI's side for owner
+         `G-Schumacher44`, repo `review-pantheon`, workflow `release.yml`, environment `pypi`;
+         this job runs under a GitHub Environment named `pypi`, which is also where any
+         deployment protection rules (required reviewers, wait timers) can be added later — see
+         Settings → Environments on the repo.
+- [ ] **Verify the release workflow went green and every asset landed** before announcing
+      anything: `gh run list --workflow=release.yml --limit 1`,
       `gh release view vX.Y.Z` (confirm `review-pantheon-vX.Y.Z.tar.gz` AND `SHA256SUMS` are
-      both listed as assets, not just one).
+      both listed as assets, not just one), and `pip index versions review-pantheon` (or the
+      package's PyPI project page) to confirm `X.Y.Z` published.
+- [ ] **Tick the GitHub Marketplace box — every release, not just the first.** The workflow's
+      `gh release create` step above publishes the Release non-interactively, so this is a
+      follow-up edit: open the Release in the GitHub UI (Releases → the tag → Edit release) and
+      check "Publish this Action to the GitHub Marketplace" before saving. Marketplace does NOT
+      automatically adopt a repo's newer releases or a moved `v1` tag — a release that skips this
+      checkbox leaves the Marketplace listing pointing at the previous published release even
+      though PyPI, the GitHub Release, and `v1` have all advanced. `action.yml`'s branding block
+      (`branding:`) already satisfies Marketplace's listing requirements, so this is a checkbox,
+      not a follow-up implementation task.
 
 ## Moving the `v1` major tag
 

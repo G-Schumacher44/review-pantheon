@@ -13,10 +13,11 @@ from __future__ import annotations
 
 # Single source of truth for the version string is pyproject.toml's [project].version — read it
 # back via importlib.metadata instead of hand-copying the same literal into a second file, which
-# is exactly the kind of two-places-drift DESIGN.md warns against elsewhere in this repo. Falls
-# back to the pyproject.toml skeleton's own pre-release literal when the package isn't installed
-# (e.g. running straight out of a working tree/worktree without `pip install -e .` — that's the
-# normal state of this repo mid-port, not an error condition).
+# is exactly the kind of two-places-drift DESIGN.md warns against elsewhere in this repo. When
+# the package isn't installed (e.g. running straight out of a working tree/worktree without
+# `pip install -e .` — a normal state, not an error condition), falls back to the current
+# release literal with a `+local` suffix, so an uninstalled checkout's version never
+# masquerades as a real pip-installed release in bug reports or --version output.
 try:
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as _version
@@ -29,6 +30,6 @@ except ImportError:  # pragma: no cover — importlib.metadata is stdlib on Pyth
 try:
     __version__ = _version("review-pantheon")
 except PackageNotFoundError:
-    __version__ = "0.0.0.dev0"
+    __version__ = "0.1.0+local"
 
 __all__ = ["__version__"]
