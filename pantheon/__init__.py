@@ -1,21 +1,22 @@
 """pantheon — review-pantheon's Python CLI (v2 port).
 
-See docs/PYTHON-PORT.md for the binding spec this package implements. Slice 2 ships the first
-two real modules, ``pantheon.verdict`` and ``pantheon.render`` — see docs/PYTHON-PORT.md section
-6 ("Module layout") for what each module owns and which bash file(s) it replaces.
+This package is the Python port of review-pantheon's original bash CLI (``review-gate`` and
+friends, removed in #29). Slice 2 shipped the first two real modules, ``pantheon.verdict`` and
+``pantheon.render`` — see each module's own docstring for what it owns and which retired bash
+file it replaces.
 
-stdlib-only at runtime, Python >=3.9 — docs/PYTHON-PORT.md section 1 is the hard constraint this
-whole package (every module under it) must keep, not a default to relax later.
+stdlib-only at runtime, Python >=3.9 — a hard constraint this whole package (every module under
+it) must keep, not a default to relax later.
 """
 
 from __future__ import annotations
 
 # Single source of truth for the version string is pyproject.toml's [project].version — read it
 # back via importlib.metadata instead of hand-copying the same literal into a second file, which
-# is exactly the kind of two-places-drift docs/PYTHON-PORT.md and DESIGN.md both warn against
-# elsewhere in this repo. Falls back to the pyproject.toml skeleton's own pre-release literal
-# when the package isn't installed (e.g. running straight out of a working tree/worktree without
-# `pip install -e .` — that's the normal state of this repo mid-port, not an error condition).
+# is exactly the kind of two-places-drift DESIGN.md warns against elsewhere in this repo. Falls
+# back to the pyproject.toml skeleton's own pre-release literal when the package isn't installed
+# (e.g. running straight out of a working tree/worktree without `pip install -e .` — that's the
+# normal state of this repo mid-port, not an error condition).
 try:
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as _version

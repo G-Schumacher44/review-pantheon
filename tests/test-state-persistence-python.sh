@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# tests/test-state-persistence-python.sh — the black-box Python equivalent of
-# tests/test-state-persistence.sh, per docs/PYTHON-PORT.md section 4's disposition for that
-# suite: "Needs a black-box equivalent against the state module. Slice 4 exit bar."
+# tests/test-state-persistence-python.sh — the black-box Python equivalent of the retired
+# tests/test-state-persistence.sh. That suite's disposition:
+# "Needs a black-box equivalent against the state module. Slice 4 exit bar."
 #
-# The original suite is bash-internal (it extracts update_review_gate_state() verbatim from
-# cli/review-gate via the $FUNCS_FILE pattern) — sourcing a .py file the way that suite sources
-# a .sh file is not the right shape for its Python equivalent (docs/PYTHON-PORT.md section 4's
-# own framing). This file keeps the same fixture set (same scenarios, same expectations) and
+# The original suite was bash-internal (it extracted update_review_gate_state() verbatim from
+# the retired bash CLI's review-gate script via the $FUNCS_FILE pattern) — sourcing a .py file
+# the way that suite sourced a .sh file was not the right shape for its Python equivalent. This
+# file keeps the same fixture set (same scenarios, same expectations) and
 # drives pantheon.state as a real subprocess instead, via
 # `python -m pantheon.state update <overall> <pr> <head-sha> <state-file> <workdir>` — the same
 # black-box seam pantheon/state.py's own CLI shim exists to provide.
 #
-# tests/test-state-persistence.sh itself is untouched by this port (still extracts and exercises
-# the bash function) and stays green — this file is an ADDITION, not a replacement.
+# tests/test-state-persistence.sh itself was deleted along with the rest of the bash CLI in #29;
+# this file, originally an ADDITION alongside it, is now the sole suite covering this behavior.
 #
 # No test framework — plain bash, `bash tests/test-state-persistence-python.sh` is the whole
 # invocation.
@@ -135,7 +135,8 @@ fi
 # ---------------------------------------------------------------------------
 # Python-port-specific coverage: load_state()/reviewed_sha_for()/is_ancestor() — the
 # follow-up-mode read side, which the bash suite's extracted-function shape doesn't reach (bash's
-# equivalents are inline `jq` reads in cli/review-gate, not a separately named function).
+# equivalents were inline `jq` reads in the retired bash CLI's review-gate script, not a
+# separately named function).
 # ---------------------------------------------------------------------------
 section "load_state() / reviewed_sha_for() / is_ancestor() — the follow-up-mode read side"
 
@@ -153,7 +154,7 @@ BOOTSTRAP_STATE="$WORKDIR/bootstrap.json"
 rm -f "$BOOTSTRAP_STATE"
 py_bootstrap_content="$(pycall "state.load_state('$BOOTSTRAP_STATE')")"
 if [[ -f "$BOOTSTRAP_STATE" ]] && [[ "$(cat "$BOOTSTRAP_STATE")" == "{}" ]]; then
-  pass "load_state() bootstraps a missing state file to '{}' (unconditionally, same as cli/review-gate's own [[ -f \$STATE_FILE ]] || echo '{}' > \$STATE_FILE)"
+  pass "load_state() bootstraps a missing state file to '{}' (unconditionally, same as the retired bash CLI's review-gate script's own [[ -f \$STATE_FILE ]] || echo '{}' > \$STATE_FILE)"
 else
   fail "load_state() did not bootstrap a missing state file correctly (content: $(cat "$BOOTSTRAP_STATE" 2>/dev/null))"
 fi
@@ -196,8 +197,9 @@ else
 fi
 
 # is_ancestor(): real git fixture repo — an old commit is an ancestor of a later one; an
-# unrelated/orphan commit is not — mirrors cli/review-gate's own force-push-detection ancestry
-# check (git merge-base --is-ancestor), the actual invariant an incremental follow-up review
+# unrelated/orphan commit is not — mirrors the retired bash CLI's review-gate script's own
+# force-push-detection ancestry check (git merge-base --is-ancestor), the actual invariant an
+# incremental follow-up review
 # needs (an EXISTENCE check alone isn't enough post-force-push).
 ANCESTRY_REPO="$(mktemp -d)"
 git -C "$ANCESTRY_REPO" init -q
@@ -274,7 +276,7 @@ fi
 # over $state_file — the file STAYS EMPTY, recording NOTHING, even though the operation itself
 # "succeeds" (exit 0). An earlier version of this Python port's fix got the write side wrong
 # (populated a fresh entry instead of replicating the no-record quirk) — corrected here to match
-# bash exactly, per docs/PYTHON-PORT.md's "byte-compatible... not a redesign" charter.
+# bash exactly, per this port's "byte-compatible... not a redesign" charter.
 # ---------------------------------------------------------------------------
 section "Empty state file: read self-heals, write matches bash's real no-record quirk"
 

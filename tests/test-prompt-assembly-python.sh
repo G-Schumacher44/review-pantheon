@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # tests/test-prompt-assembly-python.sh — the black-box Python equivalent of
-# tests/test-prompt-assembly.sh's CLI-lane portion (Parts B/B2), per docs/PYTHON-PORT.md
-# section 4's disposition: "Needs a black-box equivalent against pantheon.cli's prompt-assembly
+# tests/test-prompt-assembly.sh's CLI-lane portion (Parts B/B2), per that suite's port
+# disposition: "Needs a black-box equivalent against pantheon.cli's prompt-assembly
 # path (which leans on the execution and basepin modules)... Slice 3/4 exit bar (basepin/
 # execution land in Slice 3; the full assembly path is only whole once cli.py lands in Slice 4)."
 #
-# Unlike the bash suite's Part B (which extracts and sources build_prompt() verbatim from
-# cli/review-gate), pantheon.cli's prompt assembly is exercised as a real subprocess, black-box,
+# Unlike the bash suite's Part B (which extracts and sources build_prompt() verbatim from the
+# retired bash CLI's review-gate script, removed in #29), pantheon.cli's prompt assembly is
+# exercised as a real subprocess, black-box,
 # via `pantheon gate --pr <n> --dry-run` against real git fixture repos with a real (but
 # unreachable) origin remote — --dry-run builds every agent's prompt and prints the rendered
 # comment without ever calling `gh`/a provider, so this needs `gh pr view` to succeed (a real,

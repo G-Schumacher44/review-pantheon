@@ -1,5 +1,5 @@
-"""tests/test_verdict.py — pytest unit layer for pantheon.verdict.emit_github_output (port
-slice 5, docs/PYTHON-PORT.md section 3's decide_verdict.py absorption).
+"""tests/test_verdict.py — pytest unit layer for pantheon.verdict.emit_github_output (this
+port's slice-5 decide_verdict.py absorption).
 
 decide()/extract_last_json()/the full decision pipeline are already covered end to end by the
 black-box bash suite (tests/test-verdict-decision-python.sh, driven via

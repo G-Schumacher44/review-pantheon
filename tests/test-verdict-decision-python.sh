@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
-# tests/test-verdict-decision-python.sh — the black-box Python equivalent of
-# tests/test-verdict-decision.sh, per docs/PYTHON-PORT.md section 4's disposition for that
-# suite:
+# tests/test-verdict-decision-python.sh — the black-box Python equivalent of the retired
+# tests/test-verdict-decision.sh. That suite's disposition:
 #
 #   "Needs a black-box equivalent against pantheon's verdict module. Its whole premise (diff two
 #    runtimes) collapses once there's one Python implementation — repurpose as a straight
-#    fixture test at Slice 2, then simplify away the cross-runtime-diff assertion at Slice 5
-#    once the bash decider is retired."
+#    fixture test, then simplify away the cross-runtime-diff assertion once the bash decider is
+#    retired."
 #
-# The original suite is bash-internal (it sources cli/lib/verdict.sh directly and execs
-# action/decide_verdict.py as a subprocess to cross-check both existing runtimes against the
-# same fixtures) — sourcing a .py file the way that suite sources a .sh file is not the right
-# shape for its Python equivalent (docs/PYTHON-PORT.md section 4's own framing). This file keeps
+# The original suite was bash-internal (it sourced the retired bash CLI's verdict.sh directly and
+# execed the retired action/decide_verdict.py as a subprocess to cross-check both existing
+# runtimes against the same fixtures) — sourcing a .py file the way that suite sourced a .sh file
+# was not the right shape for its Python equivalent. This file keeps
 # that suite's exact fixture set (same names, same inputs, same expected color/invariant_fired)
 # and drives pantheon.verdict as a subprocess instead, the same way the original suite already
-# drives action/decide_verdict.py: `python3 -m pantheon.verdict <expected-agent> <raw-file>`.
+# drove action/decide_verdict.py: `python3 -m pantheon.verdict <expected-agent> <raw-file>`.
 #
-# tests/test-verdict-decision.sh itself is untouched by this port (still sources
-# cli/lib/verdict.sh, still execs action/decide_verdict.py) and stays green — this file is an
-# ADDITION, not a replacement, until Slice 5 retires the bash decider.
+# tests/test-verdict-decision.sh itself was deleted along with the rest of the bash CLI (and
+# action/decide_verdict.py) in #29; this file, originally an ADDITION alongside it, is now the
+# sole suite covering this behavior.
 #
 # No test framework — plain bash, `bash tests/test-verdict-decision-python.sh` is the whole
 # invocation.
@@ -238,15 +237,15 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# JSON-boundary regression coverage (docs/PYTHON-PORT.md's "JSON boundary" section,
-# pantheon/jqjson.py) — three more real gate findings, each independently verified live
+# JSON-boundary regression coverage (pantheon/jqjson.py) — three more real gate findings,
+# each independently verified live
 # (against real bash / real jq / real Python) as failing pre-fix before pantheon.jqjson landed.
 # ---------------------------------------------------------------------------
 
 check "lone-surrogate-in-display-field-is-unverified-not-green" "artemis" \
   '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"\ud800"}' \
   "unverified" "false"
-# Verified live against the real bash decider (cli/lib/verdict.sh, sourced directly): its own
+# Verified live against the real bash decider (the retired verdict.sh, sourced directly): its own
 # extract_last_json/_pantheon_single_json returns an EMPTY candidate for this exact input — jq's
 # parser rejects a lone surrogate outright — so bash's decide_verdict lands on the identical
 # "no parseable JSON object found" -> unverified outcome the check() call above asserts for
@@ -302,13 +301,13 @@ else
 fi
 
 # `.agent`/`.verdict` fields ending in a trailing newline must still decide GREEN, matching real
-# bash: cli/lib/verdict.sh's `agent_field="$(jq -r '.agent' <<<"$verdict_json")"` /
+# bash: the retired verdict.sh's `agent_field="$(jq -r '.agent' <<<"$verdict_json")"` /
 # `verdict="$(jq -r '.verdict' <<<"$verdict_json")"` are $(...) captures, already stripped of
 # their trailing newlines by the time bash's own comparisons run.
 check "trailing-newline-in-agent-and-verdict-fields-still-decides-green" "artemis" \
   '{"agent":"artemis\n","verdict":"SHIP\n","has_blocker":false,"findings":[],"summary":"s"}' \
   "green" "false"
-# Verified live against the real bash decider (cli/lib/verdict.sh, sourced directly) for this
+# Verified live against the real bash decider (the retired verdict.sh, sourced directly) for this
 # exact input: bash decides green (matching this check's expectation). Pre-fix, pantheon.verdict
 # compared the raw, un-subst'd "artemis\n"/"SHIP\n" strings directly and decided unverified.
 
@@ -320,7 +319,7 @@ check "trailing-newline-in-agent-and-verdict-fields-still-decides-green" "artemi
 
 # top_finding_of: a MISSING field on an otherwise-present finding object must render as jq's own
 # "null" text, not collapse the whole finding to "no findings" — verified live against real bash
-# (cli/lib/verdict.sh's jq string-interpolation renders a missing key as "null"). Pre-fix, direct
+# (the retired verdict.sh's jq string-interpolation renders a missing key as "null"). Pre-fix, direct
 # dict-subscript access (f['severity']) raised KeyError on the missing 'file'/'line' keys here,
 # caught by a blanket except that discarded the present severity/issue data too.
 raw_file="$(mktemp)"
@@ -335,7 +334,7 @@ else
   echo "FAIL missing-top-finding-fields-render-as-jq-nulls: got '$py_top', expected 'blocker: x (null:null)'"
   FAIL=$((FAIL + 1))
 fi
-# Cross-checked live against the real bash decider (cli/lib/verdict.sh, sourced directly) for
+# Cross-checked live against the real bash decider (the retired verdict.sh, sourced directly) for
 # this exact findings shape: bash also decides top_finding='blocker: x (null:null)'.
 
 # jqjson decimal-formatting parity: a decimal literal whose float() VALUE round-trips exactly

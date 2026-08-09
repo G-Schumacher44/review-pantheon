@@ -216,9 +216,10 @@ fi
 
 section "--version flag: well-formed but unfetchable — fails loud, nothing installed (stubbed curl, no real network)"
 
-# Isolated scratch copy of ONLY bootstrap.sh (no sibling cli/ or agents/ dirs) so
-# detect_local_src() fails and the remote-fetch path is forced, exactly like the real curl|bash
-# no-checkout case.
+# Isolated scratch copy of ONLY bootstrap.sh (no sibling pantheon/, agents/, or pyproject.toml)
+# so detect_local_src() fails and the remote-fetch path is forced, exactly like the real
+# curl|bash no-checkout case. (detect_local_src() checked for cli/ instead of pantheon/ before
+# the bash CLI's removal in #29; that directory doesn't exist at all anymore.)
 STANDALONE_DIR="$WORKDIR/standalone"
 mkdir -p "$STANDALONE_DIR"
 cp "$BOOTSTRAP" "$STANDALONE_DIR/bootstrap.sh"

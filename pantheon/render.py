@@ -1,10 +1,10 @@
-"""pantheon.render — the combined-PR-comment renderer (docs/PYTHON-PORT.md section 6).
+"""pantheon.render — the combined-PR-comment renderer.
 
-Ports ``cli/lib/render_comment.sh`` — the ONE bash implementation shared by ``cli/review-gate``
-and ``action/lib/combine_verdicts.sh`` (see DESIGN.md's "Combined PR comment" section) — to
-Python. Byte-identical OUTPUT to the bash renderer for identical inputs is the bar
-docs/PYTHON-PORT.md's Slice-2 charter sets for this module; ``action/review.yml``'s own
-hand-synced inline copy is a separate, pre-existing surface this port does not touch.
+Ports the retired bash CLI's ``render_comment.sh`` (removed in #29) — the ONE bash implementation
+shared by ``review-gate`` and ``action/lib/combine_verdicts.sh`` (see DESIGN.md's "Combined PR
+comment" section) — to Python. Byte-identical OUTPUT to the bash renderer for identical inputs
+was the bar the Slice-2 charter set for this module; ``action/review.yml``'s own hand-synced
+inline copy is a separate, pre-existing surface this port does not touch.
 
 Two public entry points, mirroring the bash file's contract exactly:
 
@@ -27,17 +27,17 @@ comment. The one deliberate exception is the machine tail (the nested "Raw verdi
 near the end of :func:`render_comment`) — it prints the untouched JSON on purpose, because that's
 the whole point of keeping a machine-readable copy.
 
-Every JSON parse and every JSON serialize in this module goes through ``pantheon.jqjson``
-(docs/PYTHON-PORT.md's "JSON boundary" section), not Python's own json module's parse/serialize
-entry points directly — see that module's own docstring for why: this port found three straight
+Every JSON parse and every JSON serialize in this module goes through ``pantheon.jqjson``, not
+Python's own json module's parse/serialize entry points directly — see that module's own
+docstring for why: this port found three straight
 rounds of the same class of divergence (a non-standard JSON-extension token, a lone surrogate, a
 pathologically long integer, an overflowing numeric literal) by patching one Python-specific
 failure mode at a time, which never converges. ``pantheon.verdict`` routes through the same
 boundary, so the two modules share exactly one place this judgment call lives.
 
-Fixture suite: tests/test-render-comment.sh (bash-internal in its original form — sources
-cli/lib/render_comment.sh directly). Its black-box Python equivalent, per docs/PYTHON-PORT.md
-section 4, is tests/test-render-comment-python.sh, which drives this module the same way the
+Fixture suite: tests/test-render-comment.sh (bash-internal in its original form — sourced the
+retired bash CLI's ``render_comment.sh`` directly, removed in #29). Its black-box Python
+equivalent is tests/test-render-comment-python.sh, which drives this module the same way the
 original suite drives the sourced bash functions: via ``python3 -m pantheon.render``.
 """
 
@@ -66,8 +66,8 @@ class AgentRenderData:
     (``{}`` if the source text failed to parse, or parsed to something other than a JSON
     object — matching the fail-closed-to-``{}`` guards those helpers already apply).
     ``findings_raw`` is the exact source text, kept separately, purely for the machine tail's
-    fallback-to-raw-text behavior (see :func:`_machine_tail_text`) — mirroring
-    ``cli/lib/render_comment.sh``'s own ``jq '.' <<<"$findings_json" 2>/dev/null ||
+    fallback-to-raw-text behavior (see :func:`_machine_tail_text`) — mirroring the retired bash
+    CLI's ``render_comment.sh`` (removed in #29) own ``jq '.' <<<"$findings_json" 2>/dev/null ||
     printf '%s\\n' "$findings_json"`` pattern, which shows the PARSED-and-pretty-printed value on
     success (of any JSON type, not just objects) but falls back to the untouched raw text on a
     parse failure — including bash's own ``\\{}``-shaped default-value quirk for a completely
@@ -264,7 +264,8 @@ def redact_paths(text: str, repo_root: str | None) -> str:
 def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
     """Markdown/HTML-hostile-content-safe + single-line, for ANY model-controlled string this
     renderer interpolates — table cells, prose, AND values placed inside a backtick code span.
-    Mirrors ``cli/lib/render_comment.sh``'s ``_pantheon_sanitize_inline`` exactly, same order of
+    Mirrors the retired bash CLI's ``render_comment.sh`` ``_pantheon_sanitize_inline`` exactly
+    (removed in #29), same order of
     operations (order matters — see that function's header comment for why each step is where it
     is), plus one Python-port-only step (see :func:`redact_paths`'s own docstring for why this
     port specifically needs it: the persona now sees the repo's absolute path, which bash's own
@@ -291,8 +292,8 @@ def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
         for), not a version already mangled by a LATER, unrelated escaping step below.
       - NUL (U+0000) dropped outright. Not a markdown/HTML concern like the rest of this
         function — it's a bash-parity one: bash's ``$(...)`` command substitution cannot hold a
-        NUL byte and silently drops it (a documented bash limitation, not something
-        ``cli/lib/render_comment.sh``'s own code does explicitly), so a NUL smuggled into a
+        NUL byte and silently drops it (a documented bash limitation, not something the retired
+        bash CLI's ``render_comment.sh`` (removed in #29) own code does explicitly), so a NUL smuggled into a
         display field via a JSON ``\\u0000`` escape survives Python's render but is silently gone
         from bash's — a real, verified byte-output divergence. Verified this is the ONLY C0
         control character bash's pipeline drops: a fixture with ``\\u0001``/``\\u0007``/``\\u001b``
@@ -334,8 +335,9 @@ def sanitize_inline(s: Any, repo_root: str | None = None) -> str:
 
 
 def truncate(text: str, max_len: int = 90) -> str:
-    """Character-safe (codepoint-safe) truncation — mirrors ``cli/lib/render_comment.sh``'s
-    ``_pantheon_truncate``, which reroutes through jq specifically because bash's own
+    """Character-safe (codepoint-safe) truncation — mirrors the retired bash CLI's
+    ``render_comment.sh`` (removed in #29) ``_pantheon_truncate``, which reroutes through jq
+    specifically because bash's own
     ``${#text}``/``${text:a:b}`` are only character-safe under a UTF-8-aware locale. Python's
     ``str`` is always a sequence of Unicode codepoints regardless of the process locale, so a
     plain slice is already the codepoint-safe operation jq's string functions give bash — no
@@ -372,8 +374,9 @@ def severity_badge(severity: Any, repo_root: str | None = None) -> str:
 
 
 def _safe_findings(verdict_obj: Any) -> list[dict]:
-    """Mirrors ``_pantheon_safe_findings_filter``: ``.findings`` is only checked for PRESENCE
-    upstream (pantheon.verdict / cli/lib/verdict.sh / action/decide_verdict.py), never for being
+    """Mirrors ``_pantheon_safe_findings_filter`` (the retired bash CLI's ``verdict.sh``, removed
+    in #29): ``.findings`` is only checked for PRESENCE upstream (pantheon.verdict /
+    action/decide_verdict.py), never for being
     an array of objects — a malformed verdict (``"findings": "none"``, or a stray non-object
     element mixed into an otherwise-valid array) must degrade to "no findings"/fewer findings
     here, never crash every downstream ``.severity``/``.file``/``.issue`` access."""
@@ -491,8 +494,8 @@ def _or_default(value: Any, default: str) -> Any:
 
 
 def _machine_tail_text(raw_text: str, repo_root: str | None = None) -> str:
-    """The machine tail's per-agent code-fence content — mirrors
-    ``cli/lib/render_comment.sh``'s ``jq '.' <<<"$findings_json" 2>/dev/null ||
+    """The machine tail's per-agent code-fence content — mirrors the retired bash CLI's
+    ``render_comment.sh`` (removed in #29) ``jq '.' <<<"$findings_json" 2>/dev/null ||
     printf '%s\\n' "$findings_json"`` exactly: pretty-print the PARSED value (2-space indent, raw
     UTF-8, jq-compatible constant/overflow-number handling via ``pantheon.jqjson``) if
     ``raw_text`` parses — of WHATEVER JSON type it parses to, not narrowed to an object, since
@@ -778,11 +781,11 @@ def overall_color_from_env(agents: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# CLI shim — docs/PYTHON-PORT.md section 4's "thin CLI shim ... mirroring how the suites drive
-# the bash" mechanism for this module. Not the final `pantheon` CLI surface (that's
-# `pantheon.cli`, Slice 4); this exists so the migration-exam harness can drive this module as a
-# subprocess the same way tests/test-render-comment.sh's original bash-internal suite sources
-# cli/lib/render_comment.sh and calls its two public functions directly.
+# CLI shim — a "thin CLI shim ... mirroring how the suites drive the bash" mechanism for this
+# module. Not the final `pantheon` CLI surface (that's `pantheon.cli`, Slice 4); this exists so
+# the migration-exam harness can drive this module as a subprocess the same way
+# tests/test-render-comment.sh's original bash-internal suite sourced the retired bash CLI's
+# `render_comment.sh` (removed in #29) and called its two public functions directly.
 #
 #   python3 -m pantheon.render comment <head_sha> <agent...>   # prints the full comment
 #   python3 -m pantheon.render overall <agent...>               # prints the overall color

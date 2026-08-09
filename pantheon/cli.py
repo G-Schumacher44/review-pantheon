@@ -1,33 +1,34 @@
-"""pantheon/cli.py — argparse entry point (docs/PYTHON-PORT.md section 6).
+"""pantheon/cli.py — argparse entry point.
 
 `pantheon gate --pr N [...]` / `pantheon counsel [...]`: gate.conf parsing, PR-metadata
 fetch+validation, docs-only detection, follow-up/state, prompt assembly (persona + run-context
 block, base-pinned reads), the run_agent loop, provider dispatch, comment posting. Wires
 ``pantheon.execution``/``pantheon.basepin``/``pantheon.providers``/``pantheon.verdict``/
 ``pantheon.render``/``pantheon.state`` together — this module ORCHESTRATES; it never
-reimplements what those modules already own. Replaces ``cli/review-gate`` (the orchestration
-parts not covered by a more specific module).
+reimplements what those modules already own. Replaces the retired bash CLI's `review-gate`
+entry point (removed in #29; the orchestration parts not covered by a more specific module).
 
-Byte-compatible CLI surface with docs/CLI.md throughout (docs/PYTHON-PORT.md section 2) — flag
-names, defaults, precedence order, exit codes, and the state/follow-up model are all UNCHANGED
-from the bash v1 CLI; this is a language port of the same contract, not a redesign of it. Where
-this file and docs/CLI.md disagree, that is a bug in this port, not a doc to update to match.
+Byte-compatible CLI surface with docs/CLI.md throughout — flag names, defaults, precedence
+order, exit codes, and the state/follow-up model are all UNCHANGED from the bash v1 CLI; this is
+a language port of the same contract, not a redesign of it. Where this file and docs/CLI.md
+disagree, that is a bug in this port, not a doc to update to match.
 
-**Package-layout resolution (Slice 5 packaging, docs/PYTHON-PORT.md section 7):**
+**Package-layout resolution (Slice 5 packaging):**
 ``agents/*.md`` (the five personas) live at this repo's root, the single canonical source
-(DESIGN.md rule 4) the bash CLI/install.sh/bootstrap.sh/action.yml all still read directly — NOT
-physically inside the ``pantheon/`` package directory. A real, non-editable `pip`/`pipx` install
-of this package did NOT carry them along at all before this fix (a Codex review finding on this
-port's own PR): resolving ``agents/`` purely as a sibling of this module's own installed
-location on disk is only true for a dev checkout, never for a real site-packages install, where
-this file's own ``__file__`` lives inside ``site-packages/pantheon/``, nowhere near the original
+(DESIGN.md rule 4) install.sh/bootstrap.sh/action.yml (this repo's remaining bash tooling) still
+read directly — NOT physically inside the ``pantheon/`` package directory. A real,
+non-editable `pip`/`pipx` install of this package did NOT carry them along at all before this
+fix (a Codex review finding on this port's own PR): resolving ``agents/`` purely as a sibling
+of this module's own installed location on disk is only true for a dev checkout, never for a
+real site-packages install, where this file's own ``__file__`` lives inside
+``site-packages/pantheon/``, nowhere near the original
 source tree. Fixed via ``pyproject.toml``'s package-dir remap (``"pantheon.agents" = "agents"``)
 packaging ``agents/*.md`` AS ``pantheon/agents/*.md`` in the wheel, resolved here via
 ``importlib.resources`` (see :func:`_agents_dir`), with the dev-checkout sibling-directory
 lookup kept as a fallback for a raw checkout run via ``PYTHONPATH`` (no install at all).
 
-Every JSON parse/serialize in this module goes through ``pantheon.jqjson`` (docs/PYTHON-PORT.md's
-"JSON boundary" section), never Python's own ``json`` module directly.
+Every JSON parse/serialize in this module goes through ``pantheon.jqjson`` — this module's own
+"JSON boundary" — never Python's own ``json`` module directly.
 
 Fixture suites: tests/test-prompt-assembly.sh (a black-box equivalent,
 tests/test-prompt-assembly-python.sh, exercises this module's prompt-assembly path via
@@ -108,9 +109,9 @@ def _wrapper_invocation(repo_root: str) -> str:
     instead of ``python -m``. Falls back to the OLDER, unprotected
     ``python -m pantheon.execution wrapper`` form only when the console script genuinely isn't
     installed anywhere ``resolve_console_script`` checks (a plain dev checkout run via
-    ``PYTHONPATH`` — docs/PYTHON-PORT.md's own disclosed package-layout caveat for this slice,
-    see this module's own module docstring) — a loud stderr warning every time that fallback
-    fires, so this narrower posture is never silent.
+    ``PYTHONPATH`` — this module's own docstring discloses the package-layout caveat that
+    produces this case) — a loud stderr warning every time that fallback fires, so this
+    narrower posture is never silent.
 
     **``--repo-root <repo_root>`` is baked into the returned string itself, as a FIXED literal
     segment of the ONE allowed Bash-tool prefix — a CRITICAL fix (adversarial review).** Provider
@@ -254,9 +255,9 @@ def _agents_dir() -> Path:
 # has been widened to include a repository-controlled directory (e.g. `$PWD/bin`, a pattern a
 # PR-committed shell rc file or a locally-sourced `.envrc` could plausibly arrange before this
 # CLI ever runs), that lookup can resolve to an attacker-supplied `git`/`gh` executable and run
-# arbitrary code before review even begins — also a direct violation of docs/PYTHON-PORT.md
-# section 5's "Constructed clean env, never inherited... every git/gh/provider-CLI invocation
-# goes through subprocess.run(argv, env=<explicit dict>, shell=False)" rule, which is written as
+# arbitrary code before review even begins — also a direct violation of this port's own
+# "constructed clean env, never inherited... every git/gh/provider-CLI invocation goes through
+# subprocess.run(argv, env=<explicit dict>, shell=False)" rule, which is written as
 # unconditional (not scoped to the persona-facing wrapper alone). Fixed the same way
 # pantheon.execution's own git-executable resolution already works: `git`/`gh` are resolved ONLY
 # from a fixed set of trusted system directories (never the ambient, checkout-widenable PATH —
@@ -433,8 +434,8 @@ def _require_bin(name: str) -> None:
 
 
 # ---------------------------------------------------------------------------------------------
-# gate.conf — safe key=value parse, mirrors cli/review-gate's own hand-rolled parser (no
-# `source`, no shell evaluation of the file's content).
+# gate.conf — safe key=value parse, mirrors the retired bash CLI's `review-gate` (removed in
+# #29) hand-rolled parser (no `source`, no shell evaluation of the file's content).
 # ---------------------------------------------------------------------------------------------
 
 
@@ -517,8 +518,8 @@ def _load_base_pinned_gate_conf(repo_root: str, base_sha: str) -> BasePinnedGate
 
     **Routed through `pantheon.basepin.base_pinned_read` (symlink-safe) — a P2 finding from a
     live Codex review on this PR, a deliberate hardening BEYOND bash's own historical gap, not a
-    parity port of it.** bash's own `cli/review-gate` reads `execution=` via a bare
-    `git -C "$REPO_ROOT" show "${BASE_SHA}:gate.conf" 2>/dev/null` (matching what an earlier
+    parity port of it.** the retired bash CLI's `review-gate` (removed in #29) read `execution=`
+    via a bare `git -C "$REPO_ROOT" show "${BASE_SHA}:gate.conf" 2>/dev/null` (matching what an earlier
     version of this function also did, for all five keys) — a bare `git show` on a TRACKED
     SYMLINK (git stores one as a mode-120000 blob whose "content" IS the link-target string, e.g.
     `config/gate.conf`) returns that pathname text, not the target file's real content;
@@ -594,10 +595,11 @@ def _load_base_pinned_gate_conf(repo_root: str, base_sha: str) -> BasePinnedGate
 
 
 def _strip_frontmatter(path: Path) -> str:
-    """Mirrors cli/review-gate's `strip_frontmatter()` awk one-liner exactly: a line that is
-    EXACTLY `---` (optional trailing whitespace) is never printed and increments a fence
-    counter; once the counter reaches 2, every subsequent non-fence line is printed. A line
-    matching the fence pattern is NEVER printed, even after the counter has already reached 2 —
+    """Mirrors the retired bash CLI's `strip_frontmatter()` awk one-liner (removed in #29)
+    exactly: a line that is EXACTLY `---` (optional trailing whitespace) is never printed and
+    increments a fence counter; once the counter reaches 2, every subsequent non-fence line is
+    printed. A line matching the fence pattern is NEVER printed, even after the counter has
+    already reached 2 —
     awk's pattern-match-then-`next` short-circuits before the `fence >= 2 { print }` rule ever
     runs for that line."""
     fence = 0
@@ -614,9 +616,9 @@ def _strip_frontmatter(path: Path) -> str:
 
 
 def _fence_id() -> str:
-    """The Python equivalent of cli/review-gate's `pantheon_fence_id()` — an unpredictable
-    per-render marker id used to bound pinned rules/spec content in the prompt (never a
-    markdown code fence), so content authored in advance (a fork PR's own REVIEW_RULES.md,
+    """The Python equivalent of the retired bash CLI's `pantheon_fence_id()` (removed in #29) —
+    an unpredictable per-render marker id used to bound pinned rules/spec content in the prompt
+    (never a markdown code fence), so content authored in advance (a fork PR's own REVIEW_RULES.md,
     base-pinned or not) cannot know the marker in advance to spoof a fake close. Uses
     `secrets`-module cryptographic randomness (this port's own established convention for this
     exact class of unguessable-token generation — see pantheon.jqjson's placeholder-token
@@ -642,7 +644,8 @@ def _fence_id_for(content: str) -> str:
 @dataclass
 class GateContext:
     """Everything `_build_prompt` needs to assemble one agent's prompt — the Python equivalent
-    of the block of globals cli/review-gate's `build_prompt()` closes over."""
+    of the block of globals the retired bash CLI's `review-gate` `build_prompt()` (removed in
+    #29) closed over."""
 
     repo_root: str
     pr_number: str
@@ -681,10 +684,11 @@ def _build_prompt(ctx: GateContext, agent: str, workdir: str, neutral_cwd: str) 
     """Assembles one agent's full prompt: persona (frontmatter stripped) + a "Run context"
     block naming the repo/PR/diff-range/base-branch/execution tier, the house-rules file
     (base-pinned, fenced with a per-render anti-collision marker), the spec file (apollo only,
-    same treatment), a follow-up note when applicable, and the output contract. Mirrors
-    cli/review-gate's `build_prompt()` line for line — see that function's own header comment
-    for the full security rationale (base-SHA-pinned reads, the fence-collision defense).
-    Returns the path to the written prompt file."""
+    same treatment), a follow-up note when applicable, and the output contract. Mirrors the
+    retired bash CLI's `build_prompt()` (removed in #29) line for line — the security rationale
+    (base-SHA-pinned reads, the fence-collision defense) is documented in this module's own
+    `_fence_id()` and `pantheon.basepin` module docstrings above. Returns the path to the
+    written prompt file."""
     persona_file = _agents_dir() / f"{agent}.md"
     if not persona_file.is_file():
         _die(f"no persona file for agent '{agent}' ({persona_file})")
@@ -917,8 +921,8 @@ def _run_agent(
         # dir, is the launched provider's own cwd — see this function's own comment above for the
         # readonly/trusted split this resolves to, and pantheon.providers' own module docstring
         # for the full neutral-cwd finding and fix this still applies under `readonly`. An earlier
-        # version of this call passed cwd=ctx.repo_root unconditionally (mirroring
-        # cli/review-gate's own `cd "$REPO_ROOT"` posture), which let a provider's own
+        # version of this call passed cwd=ctx.repo_root unconditionally (mirroring the retired
+        # bash CLI's own `cd "$REPO_ROOT"` posture, removed in #29), which let a provider's own
         # startup-time config/MCP/hooks auto-discovery reach the PR's own checkout entirely
         # outside --allowedTools's reach under readonly — closed by neutral_cwd there; trusted
         # mode restores repo_root as the cwd instead, for the reasons above. ctx.repo_root is
@@ -1117,11 +1121,11 @@ def _resolve_branch_context(repo_root: str, base_branch: str) -> tuple[str, str,
 
 
 def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
-    """The full `gate`/`counsel` run — mirrors `cli/review-gate`'s body top to bottom.
-    `forced_agents`, when given (the `counsel` subcommand), is the resolved `--agents` value
-    `pantheon counsel` is sugar for: it wins over gate.conf exactly like an explicit `--agents`
-    flag would, per docs/PYTHON-PORT.md section 2's "friendlier spelling of an --agents list,
-    not a new enforcement mode" contract."""
+    """The full `gate`/`counsel` run — mirrors the retired bash CLI's `review-gate` (removed in
+    #29) body top to bottom. `forced_agents`, when given (the `counsel` subcommand), is the
+    resolved `--agents` value `pantheon counsel` is sugar for: it wins over gate.conf exactly
+    like an explicit `--agents` flag would — a friendlier spelling of an --agents list, not a
+    new enforcement mode."""
     # Tiered execution — an explicit --execution flag is operator-typed, resolved immediately,
     # fail-fast, before ANYTHING else this function does (a Codex review finding on this port's
     # own PR: an earlier version validated this AFTER the git/gh presence checks below, so an
@@ -1287,9 +1291,9 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
     # same "no prior state" result — this run would then run every agent and post a full-review
     # comment against a state file that update_state()'s own (correct) protection then refuses
     # to ever update, so EVERY subsequent invocation repeats the exact same thing, forever.
-    # Mirrors bash's own posture instead: cli/review-gate's SEEN_SHA="$(jq -r ...
-    # "$STATE_FILE")" runs under `set -euo pipefail`, aborting the whole script on a malformed
-    # read, before any agent runs or any comment posts.
+    # Mirrors bash's own posture instead: the retired bash CLI's (removed in #29)
+    # SEEN_SHA="$(jq -r ... "$STATE_FILE")" ran under `set -euo pipefail`, aborting the whole
+    # script on a malformed read, before any agent ran or any comment posted.
     # Branch mode neither reads nor writes state, so a malformed .review-gate-state.json — a
     # PR-lane artifact — must not block an offline pre-PR review, which is the mode's whole point.
     if branch_mode:
@@ -1443,10 +1447,10 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
 
         # CRITICAL fix (adversarial review): this call's own return value must be checked, not
         # discarded — a failed state write for a green/yellow overall must fail the WHOLE gate run
-        # closed (nonzero exit), matching bash's real behavior: cli/review-gate calls
-        # update_review_gate_state as a bare top-level statement, and that function's own
-        # `mv "$tmp_state" "$state_file"` line is NOT inside an if-condition, so under the whole
-        # script's `set -euo pipefail`, a failing `mv` (e.g. a read-only state directory) aborts
+        # closed (nonzero exit), matching bash's real behavior: the retired bash CLI (removed in
+        # #29) called update_review_gate_state as a bare top-level statement, and that function's
+        # own `mv "$tmp_state" "$state_file"` line was NOT inside an if-condition, so under the
+        # whole script's `set -euo pipefail`, a failing `mv` (e.g. a read-only state directory) aborted
         # the ENTIRE script nonzero right there — never a silent "comment posted, exit 0 anyway"
         # the way this call site's pre-fix version did (it discarded update_state()'s outcome
         # entirely and computed the exit code purely from `overall`, landing on 0 for a green
@@ -1505,9 +1509,9 @@ def _add_gate_flags(parser: argparse.ArgumentParser, *, with_agents: bool) -> No
         )
     # Deliberately NOT argparse `choices=` here — an invalid value must fail with THIS module's
     # own "unknown execution tier '<value>' (must be 'readonly' or 'trusted')" message (matching
-    # cli/review-gate's die() text byte-for-byte, which tests/test-execution-tier.sh's Part C
-    # asserts on via a substring grep), not argparse's own differently-worded
-    # "invalid choice" error. Validated manually in run_gate() via
+    # the retired bash CLI's die() text byte-for-byte, removed in #29, which
+    # tests/test-execution-tier.sh's Part C asserts on via a substring grep), not argparse's own
+    # differently-worded "invalid choice" error. Validated manually in run_gate() via
     # pantheon.execution.validate_execution() instead.
     parser.add_argument(
         "--execution",
