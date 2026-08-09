@@ -15,7 +15,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "review-pantheon"  # PyPI dist name ("pantheon" is taken upstream); import package + console command stay `pantheon`
-version = "0.1.0"
+version = "0.2.0"
 description = "review-pantheon's Python CLI"
 readme = "README.md"
 license = { text = "MIT" }
@@ -69,8 +69,8 @@ packages = ["pantheon", "pantheon.agents"]
 # fix (pyproject.toml packaged only `pantheon*`, but `pantheon.cli._agents_dir()` looked for
 # `agents/` as a SIBLING of pantheon/'s own installed location — true for a dev checkout, never
 # for a real site-packages install). `agents/` stays the single canonical source at the repo
-# root (DESIGN.md rule 4 — install.sh, bootstrap.sh, and action.yml/action/review.yml all still
-# read it there directly, unaffected by this mapping); this entry
+# root (DESIGN.md rule 4 — install.sh, bootstrap.sh, and action.yml all still read it there
+# directly, unaffected by this mapping); this entry
 # additionally packages it AS `pantheon/agents/*.md` in the wheel, via a package-dir remap
 # (`"pantheon.agents" = "agents"`) rather than physically relocating the source directory.
 # `agents/__init__.py` (an empty marker, invisible to every non-Python consumer's `*.md` globs)

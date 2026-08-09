@@ -37,12 +37,19 @@ Zero footprint — drop this into a workflow file (plus a PR trigger and `pull-r
   with: { claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} }
 ```
 
-*(The `@v1` tag lands with this repo's first release — see [RELEASING.md](RELEASING.md). Until
-then, pin a commit SHA or point `uses:` at a local checkout instead; a bare `@v1` 404s on a
-brand-new checkout, not a typo.)*
+*(`@v1` tracks the latest release — it moves when a new one is cut (see
+[RELEASING.md](RELEASING.md)). Prefer updates on your own schedule? Pin a full commit SHA
+instead — that's exactly what `install.sh`'s generated workflow does.)*
 
-Nothing else lands in your repo. Want to try it first with zero tokens spent? From a local
-checkout, in a venv (`pip install -e .`):
+Nothing else lands in your repo. The CLI installs from PyPI or Homebrew:
+
+```bash
+pipx install review-pantheon            # or: pip install review-pantheon
+brew install g-schumacher44/tap/review-pantheon
+```
+
+Want to try it first with zero tokens spent? From any install (or a local
+checkout in a venv, `pip install -e .`):
 
 ```bash
 pantheon gate --pr <number> --dry-run
@@ -85,8 +92,8 @@ Full persona definitions, verdict vocabulary, and the gate-flow diagram: [DESIGN
 ## How the gate stays honest
 
 - Reviewing untrusted PR content runs read-only by default (`execution=readonly`).
-- That tool-scoping covers three surfaces — the CLI, the published action, and the vendored
-  workflow — all of which invoke Claude; non-Claude provider lanes aren't covered.
+- That tool-scoping covers both surfaces — the CLI and the published action — which invoke
+  Claude; non-Claude provider lanes aren't covered.
 - Nothing here eliminates a fully-compromised agent handing back a deceptive-but-schema-valid
   verdict — cross-review by a second agent is the real backstop, not a guarantee.
 

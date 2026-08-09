@@ -157,7 +157,7 @@ jobs:
           pip install --quiet pyyaml
           python3 -c "
           import yaml
-          for f in ('action.yml', 'action/review.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
+          for f in ('action.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
               with open(f) as fh:
                   yaml.safe_load(fh)
               print(f + ': OK')
@@ -268,11 +268,13 @@ jobs:
           # config/rules/license/readme a fresh install needs. Keep it in sync by hand if that
           # surface changes.
           #
-          # action/review.yml (NOT action/lib/, which is action.yml's composite-action runtime,
-          # not something install.sh reads) is included because install.sh's default (no --user)
-          # mode requires it at $SCRIPT_DIR/action/review.yml and dies loud if it's missing (a
-          # Codex P1 finding on this repo's history: without it, install.sh from an extracted
-          # release tarball always failed).
+          # No action/ entry: install.sh's Way A GENERATES its thin-caller workflow at install
+          # time (a `uses: G-Schumacher44/review-pantheon@<pinned-SHA>` reference) instead of
+          # vendoring a copy of it, so there is no action/review.yml file for install.sh to read
+          # from this tarball any more (issue #36 — that reimplementation was deleted, not
+          # relocated). action/lib/*.sh stays OUT of this manifest for the reason it always was:
+          # it's action.yml's own composite-action runtime, read from that action's own checkout
+          # at github.action_path, never something install.sh reads from an extracted tarball.
           #
           # skills/ is included for the identical reason: install.sh unconditionally requires
           # $SCRIPT_DIR/skills to exist (the four canonical Claude Code skills — gate, counsel,
@@ -292,8 +294,6 @@ jobs:
           cp pyproject.toml "$STAGE/pyproject.toml"
           cp bootstrap.sh "$STAGE/bootstrap.sh"
           cp install.sh "$STAGE/install.sh"
-          mkdir -p "$STAGE/action"
-          cp action/review.yml "$STAGE/action/review.yml"
           cp REVIEW_RULES.example.md "$STAGE/REVIEW_RULES.example.md"
           cp gate.conf.example "$STAGE/gate.conf.example"
           cp LICENSE "$STAGE/LICENSE"

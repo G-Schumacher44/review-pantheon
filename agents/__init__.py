@@ -1,6 +1,6 @@
 """agents — the five canonical persona files (artemis/apollo/diogenes/plato/socrates .md),
 DESIGN.md rule 4's single hand-maintained source, read directly by install.sh, bootstrap.sh, and
-action.yml/action/review.yml (as plain Markdown, this __init__.py is invisible to all of them).
+action.yml (as plain Markdown, this __init__.py is invisible to all of them).
 
 This file exists ONLY so setuptools can package this directory as ``pantheon.agents`` in the
 wheel (see pyproject.toml's ``[tool.setuptools.package-dir]``: ``"pantheon.agents" = "agents"``)

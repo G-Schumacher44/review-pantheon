@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # tests/test-action-refs.sh — asserts every file action.yml (the published composite action)
-# references under `${{ github.action_path }}/...` actually exists in this repo, that the
-# `anthropics/claude-code-action` pin is consistent between action.yml and the vendored
-# action/review.yml, and that the `spec_file` input (spec-aware Apollo) is declared and wired
-# ONLY into apollo's build-prompt step, not the other four agents'. All of that is things that
-# would otherwise only surface at real-workflow-run time — action.yml can't be
-# integration-tested until this repo is public (see DESIGN.md's "Published action" section), so
-# this is the mechanical half of that verification that CAN run in CI today.
+# references under `${{ github.action_path }}/...` actually exists in this repo, and that the
+# `spec_file` input (spec-aware Apollo) is declared and wired ONLY into apollo's build-prompt
+# step, not the other four agents'. All of that is things that would otherwise only surface at
+# real-workflow-run time — action.yml can't be integration-tested until this repo is public (see
+# DESIGN.md's "Published action" section) — this is the mechanical half of that verification that
+# CAN run in CI today.
+#
+# Retargeted by issue #36: this file used to ALSO cross-check action.yml against the vendored
+# action/review.yml (a claude-code-action SHA-pin sync check, a --bare/scrub-step regression pair
+# on both surfaces). That duplicate implementation was deleted — install.sh's Way A now generates
+# a thin caller of action.yml instead of vendoring a second copy — so the cross-surface-sync
+# checks had nothing left to compare and were removed rather than left comparing action.yml
+# against itself. What replaced them: a check that install.sh's generated thin caller pins the
+# SAME anthropics/claude-code-action-style discipline to review-pantheon itself — a full 40-char
+# commit SHA, never a moving tag.
 #
 # No test framework — plain bash, `bash tests/test-action-refs.sh` is the whole invocation
 # (also wired into .github/workflows/ci.yml).
@@ -14,7 +22,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ACTION_YML="$ROOT/action.yml"
-REVIEW_YML="$ROOT/action/review.yml"
+INSTALL_SH="$ROOT/install.sh"
 
 PASS=0
 FAIL=0
@@ -82,12 +90,10 @@ while IFS= read -r rel; do
   fi
 done <<< "$refs"
 
-# The anthropics/claude-code-action pin must be the same full commit SHA in both action.yml
-# (the published action) and action/review.yml (the vendored one) — DESIGN.md's "Published
-# action" section and action/review.yml's header comment both describe this as the same,
-# verified pin; a drift here means one of the two files was updated without the other.
+# The anthropics/claude-code-action pin must be a full 40-char commit SHA, never a moving tag
+# (v1, v1.0, latest, etc.) — that's the whole point of pinning; a tag reference here would
+# quietly start running whatever that tag points to next, no error, no warning.
 action_sha="$(grep -oE 'anthropics/claude-code-action@[0-9a-f]{40}' "$ACTION_YML" | head -1 | sed -E 's#.*@##')"
-review_sha="$(grep -oE 'anthropics/claude-code-action@[0-9a-f]{40}' "$REVIEW_YML" | head -1 | sed -E 's#.*@##')"
 
 if [[ -z "$action_sha" ]]; then
   fail "action.yml pins anthropics/claude-code-action to a full 40-char commit SHA"
@@ -95,27 +101,32 @@ else
   pass "action.yml pins anthropics/claude-code-action to a full commit SHA ($action_sha)"
 fi
 
-if [[ -z "$review_sha" ]]; then
-  fail "action/review.yml pins anthropics/claude-code-action to a full 40-char commit SHA"
+if grep -oE 'anthropics/claude-code-action@[A-Za-z0-9._-]+' "$ACTION_YML" | grep -vqE '@[0-9a-f]{40}(\s|#|$)'; then
+  fail "anthropics/claude-code-action@ reference found in action.yml that is NOT a full 40-char commit SHA"
 else
-  pass "action/review.yml pins anthropics/claude-code-action to a full commit SHA ($review_sha)"
+  pass "every anthropics/claude-code-action@ reference in action.yml is a full commit SHA"
 fi
 
-if [[ -n "$action_sha" && -n "$review_sha" ]]; then
-  if [[ "$action_sha" == "$review_sha" ]]; then
-    pass "action.yml and action/review.yml pin the same claude-code-action SHA"
-  else
-    fail "action.yml ($action_sha) and action/review.yml ($review_sha) pin DIFFERENT claude-code-action SHAs"
-  fi
+# install.sh's Way A generates a thin caller that pins THIS repo (G-Schumacher44/review-pantheon)
+# to a full commit SHA, matching the exact discipline action.yml itself applies to
+# anthropics/claude-code-action above — the whole point of issue #36's collapse was to inherit
+# one consistent provenance story, not trade a moving tag for a different moving tag.
+way_a_pin="$(grep -oE '^WAY_A_PIN_SHA="[0-9a-f]+"' "$INSTALL_SH" | grep -oE '[0-9a-f]+"$' | tr -d '"')"
+
+if [[ -z "$way_a_pin" ]]; then
+  fail "install.sh declares a WAY_A_PIN_SHA constant"
+elif [[ "${#way_a_pin}" -eq 40 ]]; then
+  pass "install.sh's WAY_A_PIN_SHA is a full 40-char commit SHA ($way_a_pin)"
+else
+  fail "install.sh's WAY_A_PIN_SHA is not a full 40-char commit SHA (got: $way_a_pin, ${#way_a_pin} chars)"
 fi
 
-# Every anthropics/claude-code-action reference must use a full commit SHA, never a moving tag
-# (v1, v1.0, latest, etc.) — that's the whole point of pinning; a tag reference here would
-# quietly start running whatever that tag points to next, no error, no warning.
-if grep -oE 'anthropics/claude-code-action@[A-Za-z0-9._-]+' "$ACTION_YML" "$REVIEW_YML" | grep -vqE '@[0-9a-f]{40}(\s|#|$)'; then
-  fail "anthropics/claude-code-action@ reference found that is NOT a full 40-char commit SHA"
+# The generated workflow itself must reference review-pantheon by that same SHA — proving the
+# constant is actually wired into the heredoc, not just declared and unused.
+if [[ -n "$way_a_pin" ]] && grep -qF "G-Schumacher44/review-pantheon@\${WAY_A_PIN_SHA}" "$INSTALL_SH"; then
+  pass "install.sh's generated workflow interpolates WAY_A_PIN_SHA into the review-pantheon uses: line"
 else
-  pass "every anthropics/claude-code-action@ reference is a full commit SHA"
+  fail "install.sh's generated workflow does not reference \${WAY_A_PIN_SHA} in a G-Schumacher44/review-pantheon uses: line"
 fi
 
 # spec-aware Apollo (review-gate: "verify delivery against the governing spec") — action.yml
@@ -160,9 +171,8 @@ done
 
 # action.yml must declare the github_token input — passing the workflow token to
 # claude-code-action explicitly is what lets consumers skip granting id-token: write (see
-# DESIGN.md's "Security posture" and action/review.yml's header comment for why: claude-code-
-# action's token.ts checks github_token FIRST and only falls back to its internal OIDC-token-
-# exchange bootstrap when it's unset).
+# DESIGN.md's "Security posture": claude-code-action's token.ts checks github_token FIRST and
+# only falls back to its internal OIDC-token-exchange bootstrap when it's unset).
 if grep -qE '^  github_token:' "$ACTION_YML"; then
   pass "action.yml declares a github_token input"
 else
@@ -171,7 +181,7 @@ fi
 
 # Every one of the five run-agent (claude-code-action) steps in action.yml must wire
 # github_token through to the underlying action — one per agent (artemis, apollo, socrates,
-# diogenes, plato), same count as the claude_code_oauth_token / anthropic_api_key wiring above.
+# diogenes, plato).
 action_github_token_wires="$(grep -cE 'github_token: \$\{\{ inputs\.github_token \}\}' "$ACTION_YML")"
 if [[ "$action_github_token_wires" -eq 5 ]]; then
   pass "action.yml wires github_token into all 5 run-agent steps"
@@ -179,12 +189,66 @@ else
   fail "action.yml wires github_token into $action_github_token_wires run-agent step(s), expected 5"
 fi
 
-# action/review.yml (the vendored workflow) must also pass github_token through to
-# claude-code-action, for the same id-token-avoidance reason.
-if grep -qE 'github_token: \$\{\{ github\.token \}\}' "$REVIEW_YML"; then
-  pass "action/review.yml wires github_token into its claude-code-action step"
+# ---------------------------------------------------------------------------------------------
+# CRITICAL-1's config/MCP/hooks auto-discovery vector (adversarial review, round 8, live Artemis
+# blocker on this PR's own self-hosted gate — corrected in round 9 after a P2 finding on the
+# round-8 fix ITSELF). History, briefly (full writeup: action.yml's own "steps:"-level comment):
+#   - Round 8 first fix: unconditional --bare in claude_args PLUS a hand-rolled `rm -rf .mcp.json
+#     .claude CLAUDE.md` "scrub" step.
+#   - --bare broke --json-schema-driven structured_output on this Action lane (a live
+#     self-hosted-gate run failed both agents to UNVERIFIED) — reverted, asserted ABSENT below.
+#   - The scrub step was DESTRUCTIVE to a CONSUMING repo's own workspace: a repo that legitimately
+#     tracks `.claude/`/`CLAUDE.md`/`.mcp.json` and runs steps after this action in the same job
+#     would find those files permanently deleted — a real P2, more serious than its badge, and
+#     the opposite of this action's own "nothing is copied into the target repo" promise.
+#   - Round 9 fix: REMOVED the scrub step entirely. `anthropics/claude-code-action`'s own pinned
+#     source (`src/entrypoints/run.ts`, the SHA pinned above) already restores
+#     `.claude`/`.mcp.json`/`.claude.json`/`.gitmodules`/`.ripgreprc`/`CLAUDE.md`/
+#     `CLAUDE.local.md`/`.husky` from the PR's base branch, UNCONDITIONALLY for every PR-triggered
+#     run — confirmed firing live in this repo's own self-check log (the exact console line):
+#     `Restoring .claude, .mcp.json, .claude.json, .gitmodules, .ripgreprc, CLAUDE.md,
+#     CLAUDE.local.md, .husky from origin/dev (PR head is untrusted)`. No code of this repo's own
+#     mutates the consuming workspace for this vector at all — the safest possible fix.
+# ---------------------------------------------------------------------------------------------
+
+if grep -qE '^\s*--bare\s*$' "$ACTION_YML"; then
+  fail "action.yml passes --bare in claude_args — this breaks --json-schema/structured_output on this Action surface (confirmed via a live self-hosted-gate failure); reverted deliberately, see the claude_args step's own comment"
 else
-  fail "action/review.yml MISSING github_token wiring on its claude-code-action step"
+  pass "action.yml does NOT pass --bare (would break --json-schema/structured_output on this Action surface — confirmed live)"
+fi
+
+# The scrub step must NOT exist (a round-9 regression guard, inverted from the round-8
+# assertion this replaces): re-adding a hand-rolled workspace-mutating scrub step would reopen
+# the exact adopter-data-loss bug round 9 closed, and is redundant with the native
+# restore-config protection documented above.
+if grep -qF 'name: Scrub Claude auto-discovery surface from the workspace' "$ACTION_YML"; then
+  fail "action.yml has a 'Scrub Claude auto-discovery surface' step again — this class of fix was reverted for destroying a consuming repo's own tracked .claude//.mcp.json/CLAUDE.md; use claude-code-action's own native restore-config protection instead (see the steps:-level comment at the top of this file)"
+else
+  pass "action.yml does NOT scrub/mutate the workspace for the CRITICAL-1 vector (relies on claude-code-action's own native restore-config protection instead)"
+fi
+
+# Non-destructiveness, checked broadly, not just for the exact round-8 shape: action.yml may not
+# contain a LIVE (non-comment) `rm -rf`/`rm -f`/`rm -r` (any form) targeting .mcp.json, .claude,
+# or CLAUDE.md anywhere at all — this is the actual invariant the coordinator's round-9 finding
+# cares about (adopter content must never be deleted by this repo's own code), not just "no step
+# with this exact name". Comment lines are exempt (this file deliberately documents the reverted
+# round-8 shape, `rm -rf .mcp.json .claude CLAUDE.md`, as HISTORY — a YAML `#`-prefixed line,
+# after stripping leading whitespace, same convention `grep -v` filters elsewhere in this repo's
+# own suites use for "this text describes past code, not live code").
+# Any rm form is destructive here — recursive OR not, flags or none, target in ANY argument
+# position: `rm -f .mcp.json`, `rm --force CLAUDE.md`, `rm -f -r .claude`, bare `rm .mcp.json`,
+# AND `rm -rf build/ .mcp.json` (target after other paths) all delete adopter content just as
+# surely as the original round-8 `rm -rf` shape did. So the match is deliberately maximal:
+# `rm` followed by ANYTHING on the same line that ends up naming adopter content. Bias is
+# fail-closed — a non-comment line that says `rm` and mentions .mcp.json/.claude/CLAUDE.md
+# anywhere after it trips the guard even if the mention were somehow benign; that's the right
+# failure mode for a class this repo has already shipped once (round 8).
+destructive_hits="$(grep -nE '(^|[^a-zA-Z0-9_-])rm[[:space:]]+.*(\.mcp\.json|\.claude([^-]|$)|CLAUDE\.md)' "$ACTION_YML" | grep -vE ':[[:space:]]*#' || true)"
+if [[ -n "$destructive_hits" ]]; then
+  fail "action.yml contains a LIVE rm (any form) targeting .mcp.json/.claude/CLAUDE.md — this would destroy a consuming repo's own tracked content:"
+  while IFS= read -r line; do echo "    $line"; done <<<"$destructive_hits"
+else
+  pass "action.yml: no LIVE (non-comment) rm of any form targeting .mcp.json/.claude/CLAUDE.md anywhere in the file"
 fi
 
 # ---------------------------------------------------------------------------------------------

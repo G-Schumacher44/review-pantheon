@@ -41,11 +41,11 @@ listed here doesn't exist; an unrecognized argument prints usage and exits nonze
 ## `gate.conf`
 
 Lives at the target repo's root, simple `key=value`, one per line, everything optional (falls
-back to the default shown). **CLI surface only** — the published action and the vendored workflow
-don't read it at all; `action.yml`'s equivalents are explicit `with:` inputs, and
-`action/review.yml` has no config surface (see DESIGN.md's ["Surface
-differences"](../DESIGN.md#surface-differences)). `install.sh` does not install `gate.conf` for
-you — copy [`gate.conf.example`](../gate.conf.example) yourself.
+back to the default shown). **CLI surface only** — the published action doesn't read it at all;
+`action.yml`'s equivalents are explicit `with:` inputs, and every workflow-file install method
+(Way A, Way C) has no config surface of its own, since both are thin callers of `action.yml` (see
+DESIGN.md's ["Surface differences"](../DESIGN.md#surface-differences)). `install.sh` does not
+install `gate.conf` for you — copy [`gate.conf.example`](../gate.conf.example) yourself.
 
 | Key | Default | Notes |
 |---|---|---|
@@ -76,11 +76,12 @@ file-execution vector to worry about in the first place.
 ## Execution tiers: readonly vs trusted
 
 `readonly` is the default on every surface that invokes Claude — the CLI (`pantheon.providers`'
-claude lane), the published action (`action.yml`), and the vendored workflow
-(`action/review.yml`). All three configure the identical `Bash(<wrapper path> *)` allowlist plus
-`--permission-mode dontAsk`, routing every Bash call through `pantheon/execution.py`'s wrapper
-instead of a bare `git` prefix pattern (a prefix match can't distinguish `git diff` from `git
-diff --output=tracked-file`, which git's own docs describe as a write).
+claude lane) and the published action (`action.yml`), which every workflow-file install method
+inherits since it's the only implementation now (issue #36). Both configure the identical
+`Bash(<wrapper path> *)` allowlist plus `--permission-mode dontAsk`, routing every Bash call
+through `pantheon/execution.py`'s wrapper instead of a bare `git` prefix pattern (a prefix match
+can't distinguish `git diff` from `git diff --output=tracked-file`, which git's own docs describe
+as a write).
 
 **What the wrapper allows, in full:**
 

@@ -22,8 +22,8 @@
 # base-pinning, via real git fixture repos rather than an extracted bash block). Still explicitly
 # OUT OF SCOPE (bash/Action-lane surfaces this port doesn't touch): Part B (cross-surface
 # consistency between the claude lane now in pantheon/providers.py and the still-bash
-# action.yml/action/review.yml Action lane) and Part D (action/review.yml's base-pinned
-# wrapper resolution — Action-lane, unrelated to this module). tests/test-execution-tier.sh
+# action.yml Action lane) and Part D (the Action lane's own base-pinned wrapper resolution,
+# unrelated to this module). tests/test-execution-tier.sh
 # itself is UNCHANGED and still runs its own Parts A-G, green, against bash — this file does not
 # replace it.
 #

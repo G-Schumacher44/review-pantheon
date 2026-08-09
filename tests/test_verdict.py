@@ -5,9 +5,9 @@ decide()/extract_last_json()/the full decision pipeline are already covered end 
 black-box bash suite (tests/test-verdict-decision-python.sh, driven via
 `python3 -m pantheon.verdict <agent> <raw-file>`) — this file covers only what that suite can't
 cheaply express: the $GITHUB_OUTPUT side effect emit_github_output() adds at this slice, needed
-to make `python3 -m pantheon.verdict` a drop-in replacement for action/decide_verdict.py's own
-identically-named function at both of the Action's call sites (action.yml's composite steps,
-action/review.yml's vendored decide step — both read steps.<id>.outputs.* downstream).
+to make this module a drop-in replacement for action/decide_verdict.py's own identically-named
+function at the Action's call sites (action.yml's composite steps, which read
+steps.<id>.outputs.* downstream).
 """
 
 from __future__ import annotations

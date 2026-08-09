@@ -6,8 +6,9 @@
 # reasoning), so the five possible agents each get their own literal build/run/decide step
 # trio. This script is what keeps that unrolling from becoming five hand-copied prompt-builder
 # bodies: one file, invoked once per enabled agent, same fence-stripping + context-block shape
-# as action/review.yml's inline "Build prompt" step (kept identical on purpose — so a persona
-# sees the same context regardless of which surface invoked it).
+# the vendored action/review.yml's own inline "Build prompt" step used before issue #36 deleted
+# it (kept identical on purpose while both existed — so a persona saw the same context
+# regardless of which surface invoked it; this is now the only surface).
 #
 # Usage: build_prompt.sh <agent-name> <personas-dir> <prompt-out-file>
 # Reads from env: REPO_NAME, PR_NUMBER, PR_TITLE, BASE_SHA, HEAD_SHA, BASE_REF, RULES_FILE,
@@ -95,8 +96,8 @@ pantheon_fence_id_for() {
   done
 }
 
-# Strip YAML frontmatter (same fence-counting approach as action/review.yml's inline step and
-# install.sh's persona_body()) — the second `---` fence ends the frontmatter block.
+# Strip YAML frontmatter (same fence-counting approach as install.sh's persona_body()) — the
+# second `---` fence ends the frontmatter block.
 awk '
   /^---[[:space:]]*$/ { fence++; next }
   fence >= 2 { print }
