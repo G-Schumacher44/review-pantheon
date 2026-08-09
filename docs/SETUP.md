@@ -8,8 +8,16 @@ CLI, no files in your repo), see
 [Way C](#way-c--published-action-zero-repo-footprint-action-only) below. Binding contract:
 `DESIGN.md`. Doc index: [docs/README.md](README.md).
 
-`pantheon` is the CLI — `pantheon gate` / `pantheon counsel`, installable via `pipx`/`pip`
-(stdlib-only, no runtime dependency).
+`pantheon` is the CLI — `pantheon gate` / `pantheon counsel`, stdlib-only with no runtime
+dependency. Shortest installs, straight from a package manager:
+
+```bash
+pipx install review-pantheon                        # PyPI (or: pip install review-pantheon)
+brew install g-schumacher44/tap/review-pantheon      # Homebrew tap
+```
+
+Either gives you the `pantheon` and `pantheon-git-readonly` binaries; the ways below cover the
+repo-gate install (Way A/C) and the from-checkout/user-prefix alternatives (Way B).
 
 ## Prerequisites
 
@@ -169,9 +177,9 @@ to `.github/workflows/review-gate.yml` in your repo and wire one secret — that
 whole install. `action.yml` at this repo's root is a composite GitHub Action; the `uses:
 G-Schumacher44/review-pantheon@v1` reference reads personas and the `pantheon` package's
 verdict-decision module (`pantheon.verdict`) from its own checkout, so nothing
-lands in your repo at all. **The `@v1` tag lands with this repo's first release (see
-[RELEASING.md](../RELEASING.md)) — until then it 404s on a brand-new checkout; pin a commit SHA
-or a local checkout instead**, same caveat as `examples/review-gate.yml`'s own header comment.
+lands in your repo at all. **`@v1` tracks the latest release — it moves when a new one is cut
+(see [RELEASING.md](../RELEASING.md)); pin a full commit SHA instead if you want updates on
+your own schedule**, which is exactly the trade Way A's generated workflow makes for you.
 See `DESIGN.md`'s ["Published
 action"](../DESIGN.md#published-action) section for what's bundled, what's overridable
 (`personas_path`, `agents`, `rules_file`, `spec_file`, `model`, `execution`), and the sequential-vs-matrix

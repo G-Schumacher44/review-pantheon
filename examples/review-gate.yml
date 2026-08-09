@@ -2,10 +2,10 @@
 # .github/workflows/review-gate.yml — nothing else lands in your repo. See docs/SETUP.md's
 # "Way C" for the setup checklist.
 #
-# `uses: G-Schumacher44/review-pantheon@v1` below resolves once this repo's first `v*.*.*` tag
-# has been cut and the `v1` major tag moved to point at it (see RELEASING.md at repo root) — the
-# tag doesn't exist yet on a brand-new checkout of this repo. Nothing to do here; this note is
-# just so a `@v1` 404 before that point reads as "not released yet," not as a typo.
+# `uses: G-Schumacher44/review-pantheon@v1` below tracks the latest release — the `v1` major
+# tag moves when a new release is cut (see RELEASING.md at repo root). Want updates only on
+# your own schedule? Replace `@v1` with a full release-commit SHA — the same trade
+# install.sh's generated Way A workflow makes for you.
 name: review-pantheon
 
 on:
