@@ -34,8 +34,7 @@ shape exists) is the convention this tier is designed around, not an access rest
   runs Socrates first when the decision is still open, then Diogenes + Plato on the resulting
   shape, and synthesizes the verdicts.
 - **Through the CLI gate** — a documented exception, not the default workflow:
-  `pantheon gate --pr <n> --agents "socrates diogenes plato"` (the deprecated `review-gate`
-  compat shim accepts the identical flags this release). Mechanically this gates *exactly*
+  `pantheon gate --pr <n> --agents "socrates diogenes plato"`. Mechanically this gates *exactly*
   like Artemis/Apollo would: a `NO_GO`/`GUT`/`FRACTURED` verdict produces the same 🔴 blocked
   comment and nonzero exit a `STOP` from Artemis would. "Counsel never gates" is a usage
   convention (only Artemis/Apollo run automatically in CI) — the CLI itself doesn't distinguish

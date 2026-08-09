@@ -9,8 +9,8 @@ access. Doc index: [docs/README.md](docs/README.md). Binding contract: [DESIGN.m
 
 - [ ] **`dev` is green.** `origin/dev`'s latest commit has a passing `ci` run (all three jobs:
       `lint-and-test`, `setup-smoke`, `composite-action-self-check`).
-- [ ] **Bump `pyproject.toml`'s `version` to match the tag you're about to cut** (port slice 5) —
-      PEP 440 form, no `v` prefix (tag `vX.Y.Z` → `version = "X.Y.Z"`). Do this as part of the
+- [ ] **Bump `pyproject.toml`'s `version` to match the tag you're about to cut** — PEP 440 form,
+      no `v` prefix (tag `vX.Y.Z` → `version = "X.Y.Z"`). Do this as part of the
       `dev` → `main` promotion PR below (or a follow-up commit on `main` before tagging) — it must
       land on the commit you're about to tag. `.github/workflows/release.yml`'s `test` job gates
       on this: a tag that doesn't match `pyproject.toml`'s version fails loud, before the build
@@ -34,17 +34,16 @@ access. Doc index: [docs/README.md](docs/README.md). Binding contract: [DESIGN.m
       2. **Enforce the promotion order.** Refuses unless the tagged commit is reachable from
          `origin/main` — a well-formed `vX.Y.Z` tag cut straight from `dev` (skipping the
          promotion step above) fails here, not silently.
-      3. **Verify the tag matches `pyproject.toml`'s version** (port slice 5, the bump step
-         above) — fails loud on mismatch, before any build or test step runs.
+      3. **Verify the tag matches `pyproject.toml`'s version** (the bump step above) — fails
+         loud on mismatch, before any build or test step runs.
       4. **Re-run the lint/fixture/quality-gate suite.** The same suite `ci.yml`'s `lint-and-test`
-         job runs — every fixture suite (bash and Python-port), plus the `pantheon` package's own
-         `pip install -e .` + `ruff`/`mypy`/`pytest` gates — pinned at the tag (not a branch head).
-      5. **Build and publish.** Only if step 4 passes: builds `review-pantheon-vX.Y.Z.tar.gz` (the
-         CLI surface: `cli/`, `agents/`, `skills/`, `pantheon/`, `pyproject.toml`, `bootstrap.sh`,
-         `install.sh`, `action/decide_verdict.py`, `action/review.yml` — the two `action/` files
-         `install.sh`'s default mode requires — `REVIEW_RULES.example.md`, `gate.conf.example`,
-         `LICENSE`, `README.md`), generates `SHA256SUMS`, and publishes both as a GitHub Release
-         with auto-generated notes.
+         job runs — every fixture suite, plus the `pantheon` package's own `pip install -e .` +
+         `ruff`/`mypy`/`pytest` gates — pinned at the tag (not a branch head).
+      5. **Build and publish.** Only if step 4 passes: builds `review-pantheon-vX.Y.Z.tar.gz`
+         (`agents/`, `skills/`, `pantheon/`, `pyproject.toml`, `bootstrap.sh`, `install.sh`,
+         `action/review.yml` — the one `action/` file `install.sh`'s default mode requires —
+         `REVIEW_RULES.example.md`, `gate.conf.example`, `LICENSE`, `README.md`), generates
+         `SHA256SUMS`, and publishes both as a GitHub Release with auto-generated notes.
 - [ ] **Verify the release workflow went green and both files attached** before announcing
       anything: `gh run list --workflow=release.yml --limit 1` and
       `gh release view vX.Y.Z` (confirm `review-pantheon-vX.Y.Z.tar.gz` AND `SHA256SUMS` are

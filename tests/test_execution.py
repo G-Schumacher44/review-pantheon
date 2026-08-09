@@ -398,35 +398,40 @@ def test_live_resolution_of_the_actually_installed_pantheon_git_readonly_script(
 
 
 def test_build_readonly_argv_refuses_a_dash_flag_on_log() -> None:
-    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+    # --follow is not on log's own safe-flag allowlist (issue #26) — still refused.
+    with pytest.raises(execution.WrapperRefused, match="safe-flag allowlist"):
         execution.build_readonly_argv(["log", "--follow"])
 
 
 def test_build_readonly_argv_refuses_a_short_dash_flag_on_status() -> None:
-    with pytest.raises(execution.WrapperRefused, match="not permitted"):
-        execution.build_readonly_argv(["status", "-s"])
+    # -z (NUL-terminated output) is not on status's own safe-flag allowlist — still refused
+    # ("-s"/"--short" ARE now allowed, issue #26, so this uses a genuinely unsafe flag instead).
+    with pytest.raises(execution.WrapperRefused, match="safe-flag allowlist"):
+        execution.build_readonly_argv(["status", "-z"])
 
 
 def test_build_readonly_argv_refuses_a_dash_flag_on_show() -> None:
-    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+    with pytest.raises(execution.WrapperRefused, match="safe-flag allowlist"):
         execution.build_readonly_argv(["show", "--format=%H"])
 
 
 def test_build_readonly_argv_refuses_a_bare_double_dash_anywhere() -> None:
     # The '--' pathspec-separator boundary belongs to the wrapper alone (it appends its own
     # trailing '--' after a validated diff range) — a caller-supplied one must never be accepted,
-    # on any subcommand, not just diff.
-    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+    # on any subcommand, not just diff, and is refused UNCONDITIONALLY (never treated as an
+    # "allowed flag" — issue #26's allowlist never covers it).
+    with pytest.raises(execution.WrapperRefused, match="'--' pathspec separator"):
         execution.build_readonly_argv(["log", "--"])
-    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+    with pytest.raises(execution.WrapperRefused, match="'--' pathspec separator"):
         execution.build_readonly_argv(["status", "--"])
 
 
 def test_build_readonly_argv_refuses_a_dash_prefixed_diff_range_looking_argument() -> None:
     # A '-'-prefixed argument must be refused even when it superficially looks like a valid diff
-    # range (contains '..') — the dash-prefix check runs BEFORE range validation, for every
-    # subcommand uniformly.
-    with pytest.raises(execution.WrapperRefused, match="not permitted"):
+    # range (contains '..') — the dash-prefix/allowlist check runs BEFORE range validation, for
+    # every subcommand uniformly. "--stat=main..head" is not literally "--stat" (the allowlist
+    # matches exact flag tokens, not a "--stat" prefix with an attached value) so it's refused.
+    with pytest.raises(execution.WrapperRefused, match="safe-flag allowlist"):
         execution.build_readonly_argv(["diff", "--stat=main..head"])
 
 
@@ -435,7 +440,101 @@ def test_build_readonly_argv_accepts_a_plain_positional_argument_without_a_dash(
     # this same check — proves the fixtures above are exercising the dash-prefix branch
     # specifically, not some other, over-broad refusal.
     assert execution.build_readonly_argv(["status"]) == ["status"]
-    assert execution.build_readonly_argv(["log", "main"]) == ["log", "main"]
+    # log's own return value now also carries the forced --no-ext-diff/--no-textconv (see
+    # test_build_readonly_argv_forces_no_ext_diff_and_no_textconv_on_log below for why).
+    assert execution.build_readonly_argv(["log", "main"]) == ["log", "--no-ext-diff", "--no-textconv", "main"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Safe-flag allowlist (issue #26) — the readonly wrapper's own "no flags of any kind" default
+# made the shipped-default tier unable to complete a review at all (an agent reaching for
+# --stat/--name-only/-U0/--oneline got refused every time and gave up, emitting prose instead of
+# a verdict — verified live by the operator: `pantheon counsel --pr 25` returned 3x UNVERIFIED).
+# tests/test-git-readonly-wrapper.sh's "Safe-flag allowlist" sections are the black-box,
+# real-git-subprocess proof (every existing attack fixture there stays refused); this file adds
+# direct, in-process coverage of build_readonly_argv()'s own token classification.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_build_readonly_argv_accepts_a_safe_flag_on_status() -> None:
+    assert execution.build_readonly_argv(["status", "--short"]) == ["status", "--short"]
+    assert execution.build_readonly_argv(["status", "-s"]) == ["status", "-s"]
+
+
+def test_build_readonly_argv_accepts_a_safe_flag_on_log() -> None:
+    assert execution.build_readonly_argv(["log", "--oneline"]) == [
+        "log",
+        "--oneline",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]
+
+
+def test_build_readonly_argv_forces_no_ext_diff_and_no_textconv_on_log() -> None:
+    # Codex review finding (P1) on this PR's own safe-flag allowlist: git's own docs say
+    # -U<n>/--unified=<n> on `log` IMPLIES --patch, making `log` a second diff-producing
+    # subcommand (alongside diff/show) that needs the identical --no-ext-diff/--no-textconv
+    # forcing — missing here pre-fix. Live-reproduced before landing the fix: a two-commit repo
+    # with `*.evil diff=pwn` + a configured `diff.pwn.textconv` fires the configured helper via
+    # `log -U0 HEAD~1..HEAD` on the pre-fix wrapper (tests/test-git-readonly-wrapper.sh has the
+    # full black-box, real-subprocess proof; this is the direct in-process shape check).
+    argv = execution.build_readonly_argv(["log", "-U0", "HEAD~1..HEAD"])
+    assert "--no-ext-diff" in argv
+    assert "--no-textconv" in argv
+
+
+def test_build_readonly_argv_accepts_diff_with_stat_and_a_real_range(tmp_path) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("a")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "first"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("b")
+    subprocess.run(["git", "commit", "-q", "-am", "second"], cwd=repo, check=True)
+
+    argv = execution.build_readonly_argv(["diff", "--stat", "HEAD~1...HEAD"], cwd=str(repo))
+    assert argv[0] == "diff"
+    assert "--stat" in argv
+    assert argv[-1] == "--"
+
+
+def test_build_readonly_argv_refuses_a_flag_not_on_that_subcommand_own_allowlist() -> None:
+    # --stat is safe for diff/show/log but NOT for status — the allowlist is per-subcommand, not
+    # a single flat set shared across all four.
+    with pytest.raises(execution.WrapperRefused, match="safe-flag allowlist"):
+        execution.build_readonly_argv(["status", "--stat"])
+
+
+def test_build_readonly_argv_still_refuses_every_historically_dangerous_flag() -> None:
+    for argv in (
+        ["diff", "--output=/tmp/pwned"],
+        ["diff", "--ext-diff"],
+        ["show", "--textconv", "HEAD"],
+        ["log", "--exec-path=/tmp"],
+        ["status", "-c", "core.pager=curl"],
+        ["diff", "-c", "core.pager=curl"],
+    ):
+        with pytest.raises(execution.WrapperRefused):
+            execution.build_readonly_argv(argv)
+
+
+def test_build_readonly_argv_still_refuses_a_bare_double_dash_even_with_a_safe_flag_present() -> None:
+    # A safe flag on the allowlist never licenses the caller to also supply '--' — the wrapper
+    # owns that boundary unconditionally (see the module's own "Caller-supplied `--`" matrix row).
+    with pytest.raises(execution.WrapperRefused, match="'--' pathspec separator"):
+        execution.build_readonly_argv(["diff", "--stat", "--", "HEAD~1...HEAD"])
+
+
+def test_is_safe_flag_unified_context_only_applies_to_diff_shaped_subcommands() -> None:
+    assert execution._is_safe_flag("diff", "-U3")
+    assert execution._is_safe_flag("show", "--unified=5")
+    assert execution._is_safe_flag("log", "-U0")
+    assert not execution._is_safe_flag("status", "-U3")
 
 
 def test_forced_env_force_clears_the_python_family_defensively(monkeypatch) -> None:
