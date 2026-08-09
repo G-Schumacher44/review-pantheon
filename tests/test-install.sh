@@ -270,6 +270,22 @@ else
   fail "workflow ownership: reinstall after delete produced different content"
 fi
 
+# personas_path must be an ACTIVE input in the generated workflow, not a commented-out example.
+# Way A vendors personas into .github/review-agents precisely so the repo owns them; a stub that
+# doesn't point the gate at them makes them decorative — and silently disables customized
+# personas carried over from a pre-collapse install (Codex P2 on the collapse PR). Guard the
+# exact regression: a future heredoc edit re-commenting or dropping the line must fail here.
+if grep -qE '^\s+personas_path:\s+\.github/review-agents\s*$' "$WF"; then
+  pass "generated workflow: personas_path is active (uncommented) and points at .github/review-agents"
+else
+  fail "generated workflow: personas_path missing or commented out — vendored/customized personas would be silently unused"
+fi
+if grep -qE '^\s*#.*personas_path:' "$WF"; then
+  fail "generated workflow: a commented-out personas_path line coexists with (or shadows) the active one"
+else
+  pass "generated workflow: no commented-out personas_path shadowing the active input"
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Customization refusal — a hand-edited generated file is left alone and reported skipped.
 # ---------------------------------------------------------------------------

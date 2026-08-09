@@ -729,8 +729,8 @@ action.yml                 the published composite action (see "Published action
                            comparably thin SHA-pinned caller of this same file
 examples/review-gate.yml   the ~20-line consumer stub for action.yml; the entire footprint of
                            the published-action surface in a target repo
-tests/                     14 bash fixture-test scripts (black-box against the CLI, or unit
-                           tests for install.sh/bootstrap.sh/release.yml's own logic) plus 8
+tests/                     15 bash fixture-test scripts (black-box against the CLI, or unit
+                           tests for install.sh/bootstrap.sh/release.yml's own logic) plus 9
                            pytest files (tests/test_*.py) — CONTRIBUTING.md's dev-setup tables
                            are the canonical, complete list (verified against `git ls-tree -r
                            tests/`; CI asserts the two stay in sync). Don't re-list them here —
