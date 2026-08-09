@@ -218,9 +218,13 @@ jobs:
           # see docs/SETUP.md's "Bedrock/Vertex/Foundry" note for the full recipe.
           claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
-          # personas_path: .github/review-agents  # point at this repo's own vendored persona
-          #                                        # copies (installed alongside this file)
-          #                                        # instead of review-pantheon's bundled set.
+          # Way A's point is personas your repo owns: this installer vendors them into
+          # .github/review-agents/ (base-pinned reads — see action.yml's personas_path input),
+          # and this input makes the gate actually USE them. At install time they're
+          # byte-identical to the bundled set, so behavior starts identical; edits (or
+          # customizations carried over from a pre-collapse install) apply on the next PR.
+          # Delete this line to use review-pantheon's bundled personas instead.
+          personas_path: .github/review-agents
           # execution: trusted   # DANGER: grants every agent full Bash instead of the default
           #                      # read-only git allowlist (diff/show/log/status). Own-repo/
           #                      # trusted-author use only — never for reviewing a fork PR you

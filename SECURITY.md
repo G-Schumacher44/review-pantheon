@@ -114,6 +114,17 @@ What that means in practice:
   the installer never overwrites a file that lacks its GENERATED marker (the old vendored copy
   has none), so it reports a skip with this same delete-and-rerun instruction instead.
 
+  Two more migration steps if you'd gone further than the default install:
+  - **Required checks (do this or every PR blocks):** the old matrix workflow reported per-agent
+    contexts — `review (artemis)`, `review (apollo)` — that the generated replacement does not
+    emit; it reports one `review` context. If you made the old contexts required, branch
+    protection will wait forever for checks that can no longer report. Update the required list:
+    remove the old matrix contexts, require `review`.
+  - **Customized personas keep working by default:** the generated workflow sets
+    `personas_path: .github/review-agents`, so persona copies the migration preserved (the
+    installer never overwrites an edited persona) stay in effect. Only if you deleted that line
+    from the generated stub does the gate fall back to review-pantheon's bundled set.
+
   If you want required-means-reviewed, adopt one of the patterns below first.
 
 ### Never use `pull_request_target`
