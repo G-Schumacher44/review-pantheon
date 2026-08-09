@@ -117,12 +117,14 @@ AGENTS_SRC="$SCRIPT_DIR/agents"
 SKILLS_SRC="$SCRIPT_DIR/skills"
 RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
 
-# The thin caller's pin — the full commit SHA the `v1` tag (v0.1.0's release) dereferences to,
-# verified live via `gh api repos/G-Schumacher44/review-pantheon/git/ref/tags/v1` and then
-# dereferencing the returned tag object's `object.sha`. A full 40-char commit SHA, not a moving
-# tag, matching how action.yml itself pins anthropics/claude-code-action (see that file's header
-# comment for the rationale: a tag's owner can move it, a commit SHA cannot). To re-pin to a
-# newer release: resolve the new tag's commit the same way and replace the two constants below.
+# The thin caller's pin — the full commit SHA of the release named in WAY_A_PIN_RELEASE,
+# derived by dereferencing that release's own tag (NOT the moving `v1` major tag):
+#   gh api repos/G-Schumacher44/review-pantheon/git/ref/tags/<WAY_A_PIN_RELEASE>
+# then, for an annotated tag, dereferencing the returned tag object's `object.sha` — or locally,
+# `git rev-parse <WAY_A_PIN_RELEASE>^{}`. A full 40-char commit SHA, not a tag, matching how
+# action.yml itself pins anthropics/claude-code-action (a tag's owner can move it, a commit SHA
+# cannot). To re-pin: resolve the new release tag's commit the same way, update BOTH constants
+# (RELEASING.md's post-release checklist carries this step), and run tests/test-install.sh.
 WAY_A_PIN_SHA="1cf3fc7ea79363dd501519439d40fde04ca84491"
 WAY_A_PIN_RELEASE="v0.2.0"
 
