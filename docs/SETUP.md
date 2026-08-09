@@ -17,7 +17,7 @@ CLI, no files in your repo), see
 |---|---|---|
 | `bash` | Everything | 3.2+ (stock macOS) through 5.x (Linux). No bashisms newer than that. **Windows:** the CLI surface needs a POSIX shell — use WSL or Git Bash. The Action surface runs on GitHub's Linux runners and works from any OS with no local shell at all. |
 | `git` | Everything | The CLI locates the target repo via `git rev-parse --show-toplevel` and fetches PR refs directly (`refs/pull/<n>/head`) — no local branch checkout needed. |
-| `gh`, authenticated | PR mode (`gate --pr`) | `pantheon gate --pr` shells out to `gh pr view` / `gh pr comment`. Run `gh auth status` first if unsure. Not needed for branch mode (`gate --branch`) or `counsel`, which resolve everything from local git. |
+| `gh`, authenticated | PR mode (`--pr`) | `--pr` (on `gate` and `counsel` alike) shells out to `gh pr view` / `gh pr comment`. Run `gh auth status` first if unsure. Not needed in branch mode (`--branch`), which resolves everything from local git. |
 | `python3` (>=3.9) | Everything (CLI and Action) | `pantheon` (the CLI) and `pantheon.verdict` (the Action's verdict decider) are both stdlib-only Python — no runtime dependency to install beyond the interpreter itself. |
 | `curl` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Only needed for the no-local-checkout install path — fetches the repo tarball from GitHub's codeload endpoint. Not needed for a local-checkout install, `install.sh`, or normal CLI/Action use. |
 | `tar` | `bootstrap.sh` remote-fetch (`curl \| bash`) only | Extracts the tarball `curl` fetches. Same scope as `curl` above — not needed otherwise. |
