@@ -98,3 +98,8 @@ with a permissions error, that's the ruleset doing its job, not a bug.
       update both constants, run `tests/test-install.sh` to confirm the generated stub picks it
       up) — a routine patch release may not need every adopter's generated workflow bumped
       immediately, but don't let it silently drift indefinitely either.
+- [ ] **Bump the Homebrew tap** ([g-schumacher44/homebrew-tap](https://github.com/G-Schumacher44/homebrew-tap),
+      `Formula/review-pantheon.rb`): point `url` at the new PyPI sdist and update `sha256`
+      (`curl -s https://pypi.org/pypi/review-pantheon/json` → the sdist entry's URL + digest —
+      wait for the PyPI publish job above to finish first). Without this, `brew install` keeps
+      serving the previous release indefinitely.

@@ -8,8 +8,16 @@ CLI, no files in your repo), see
 [Way C](#way-c--published-action-zero-repo-footprint-action-only) below. Binding contract:
 `DESIGN.md`. Doc index: [docs/README.md](README.md).
 
-`pantheon` is the CLI — `pantheon gate` / `pantheon counsel`, installable via `pipx`/`pip`
-(stdlib-only, no runtime dependency).
+`pantheon` is the CLI — `pantheon gate` / `pantheon counsel`, stdlib-only with no runtime
+dependency. Shortest installs, straight from a package manager:
+
+```bash
+pipx install review-pantheon                        # PyPI (or: pip install review-pantheon)
+brew install g-schumacher44/tap/review-pantheon      # Homebrew tap
+```
+
+Either gives you the `pantheon` and `pantheon-git-readonly` binaries; the ways below cover the
+repo-gate install (Way A/C) and the from-checkout/user-prefix alternatives (Way B).
 
 ## Prerequisites
 

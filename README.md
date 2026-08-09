@@ -41,8 +41,15 @@ Zero footprint — drop this into a workflow file (plus a PR trigger and `pull-r
 then, pin a commit SHA or point `uses:` at a local checkout instead; a bare `@v1` 404s on a
 brand-new checkout, not a typo.)*
 
-Nothing else lands in your repo. Want to try it first with zero tokens spent? From a local
-checkout, in a venv (`pip install -e .`):
+Nothing else lands in your repo. The CLI installs from PyPI or Homebrew:
+
+```bash
+pipx install review-pantheon            # or: pip install review-pantheon
+brew install g-schumacher44/tap/review-pantheon
+```
+
+Want to try it first with zero tokens spent? From any install (or a local
+checkout in a venv, `pip install -e .`):
 
 ```bash
 pantheon gate --pr <number> --dry-run
