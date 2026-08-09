@@ -1,6 +1,6 @@
 """tests/test_cli_helpers.py — pytest unit layer for pantheon.cli's pure-function seams that
 neither tests/test-prompt-assembly-python.sh nor tests/test-execution-tier-python.sh already
-exercise (docs/PYTHON-PORT.md section 4's port slice 4 deliverable: "no 1:1 duplication of the
+exercise (this port's slice-4 deliverable: "no 1:1 duplication of the
 black-box exams").
 
 Scope: `_parse_conf_text` (the gate.conf key=value parser) — no black-box suite drives this
@@ -1070,3 +1070,65 @@ def test_branch_resolver_names_a_detached_head_without_failing(tmp_path) -> None
     assert branch_name != "HEAD"
     assert "detached" in branch_name
     assert head[:8] in branch_name
+
+
+def test_fallback_version_derives_from_the_adjacent_pyproject(tmp_path) -> None:
+    """The uninstalled-checkout fallback must DERIVE its version from pyproject.toml, not
+    hand-copy a literal — the release ceremony only ever bumps pyproject.toml, so a literal
+    here would go stale on the very next release (Codex P2 on PR #45)."""
+    import pantheon
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "x"\nversion = "9.8.7"\n', encoding="utf-8")
+
+    assert pantheon._fallback_version(str(pyproject)) == "9.8.7+local"
+
+    # And the real, no-argument path resolves this repo's own pyproject.toml — whatever version
+    # it says, suffixed +local, never a bare release string.
+    derived = pantheon._fallback_version()
+    assert derived.endswith("+local")
+    assert not derived.startswith("0+unknown")
+
+
+def test_fallback_version_degrades_to_unknown_never_a_fake_release(tmp_path) -> None:
+    """Both error branches must land on "0+unknown" — an unreadable pyproject.toml (OSError)
+    and one with no version key (regex miss). Anything else risks an uninstalled checkout
+    reporting a plausible-but-wrong version in bug reports."""
+    import pantheon
+
+    assert pantheon._fallback_version(str(tmp_path / "does-not-exist.toml")) == "0+unknown"
+
+    keyless = tmp_path / "pyproject.toml"
+    keyless.write_text('[project]\nname = "x"\n', encoding="utf-8")
+    assert pantheon._fallback_version(str(keyless)) == "0+unknown"
+
+    # An indented `version =` inside some other table must NOT satisfy the anchored regex.
+    nested = tmp_path / "nested.toml"
+    nested.write_text('[tool.thing]\n  version = "1.2.3"\n', encoding="utf-8")
+    assert pantheon._fallback_version(str(nested)) == "0+unknown"
+
+
+def test_fallback_version_only_reads_the_project_table(tmp_path) -> None:
+    """An UNINDENTED `version =` in a foreign table — before or after [project] — must never
+    win over (or substitute for) [project]'s own version. This is the Codex/CodeRabbit finding
+    from PR #46's first cut: the original regex scanned the whole file, so [tool.x]'s version
+    shadowed the release version whenever its table came first."""
+    import pantheon
+
+    foreign_first = tmp_path / "foreign_first.toml"
+    foreign_first.write_text(
+        '[tool.x]\nversion = "6.6.6"\n\n[project]\nname = "x"\nversion = "1.2.3"\n',
+        encoding="utf-8",
+    )
+    assert pantheon._fallback_version(str(foreign_first)) == "1.2.3+local"
+
+    foreign_only = tmp_path / "foreign_only.toml"
+    foreign_only.write_text('[tool.x]\nversion = "6.6.6"\n', encoding="utf-8")
+    assert pantheon._fallback_version(str(foreign_only)) == "0+unknown"
+
+    project_then_foreign = tmp_path / "project_then_foreign.toml"
+    project_then_foreign.write_text(
+        '[project]\nname = "x"\nversion = "1.2.3"\n\n[tool.x]\nversion = "6.6.6"\n',
+        encoding="utf-8",
+    )
+    assert pantheon._fallback_version(str(project_then_foreign)) == "1.2.3+local"

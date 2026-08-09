@@ -1,16 +1,15 @@
-"""pantheon.verdict — the verdict-extraction-and-decision path (docs/PYTHON-PORT.md section 6).
+"""pantheon.verdict — the verdict-extraction-and-decision path.
 
 This is the ONE Python implementation of the rule DESIGN.md's "Two runtimes, one rule" section
-describes, and it is written to absorb ``action/decide_verdict.py``'s logic byte-for-byte (same
-decision order, same fields, same fail-closed posture) — docs/PYTHON-PORT.md's Slice-2 charter
-for this module is "byte-identical DECISIONS are the requirement now"; the actual switchover
-(the Action calling this module instead of ``action/decide_verdict.py`` directly, and that file's
-retirement) is Slice 5, not this one. Do not edit ``action/decide_verdict.py`` as part of this
-module landing — it stays the Action's canonical runtime until Slice 5's absorption.
+describes. It absorbed the standalone ``action/decide_verdict.py`` script's logic byte-for-byte
+(same decision order, same fields, same fail-closed posture) — "byte-identical DECISIONS are the
+requirement now." The switchover is complete: ``action/review.yml``'s "Decide verdict" step now
+invokes this module directly (by its own base-pinned absolute path), and ``action/decide_verdict.py``
+itself was removed alongside the rest of the bash CLI in #29.
 
-This module also replaces ``cli/lib/verdict.sh`` (the bash+jq half of the same two-runtime rule)
-for the CLI lane once Slice 4/5 wire ``pantheon.cli`` up to it. Both existing implementations
-document the same decision order; this module keeps it identical:
+This module also replaced the retired bash CLI's ``verdict.sh`` (the bash+jq half of the same
+two-runtime rule, removed in #29) for the CLI lane — ``pantheon.cli`` now calls this module
+directly. Both implementations documented the same decision order; this module keeps it identical:
 
   1. Extract the trailing JSON object (parse-anchored suffix scan — see ``extract_last_json``).
   2. The parsed candidate must be exactly one JSON document (nothing after it) and an object with
@@ -27,20 +26,20 @@ document the same decision order; this module keeps it identical:
      isn't already red, force color=red and invariant_fired=True — even when the stated
      ``verdict`` word itself was invalid. An object that failed step 3 never reaches this step.
 
-Every candidate this module parses goes through ``pantheon.jqjson`` (docs/PYTHON-PORT.md's "JSON
-boundary" section) — not a direct call anywhere in this file to Python's own json module's
-parse/serialize entry points. See that module's own module docstring for why: this port found
+Every candidate this module parses goes through ``pantheon.jqjson`` — not a direct call anywhere
+in this file to Python's own json module's parse/serialize entry points. See that module's own
+module docstring for why: this port found
 three straight rounds of the same class of divergence (a non-standard JSON-extension token, a
 lone surrogate, a pathologically long integer) by patching one Python-specific failure mode at a
 time, which never converges — ``pantheon.jqjson`` is the single, catch-all-postured place this
 port's own parsing now lives, so this file and ``pantheon.render`` don't each carry their own
 copy of that judgment call.
 
-Fixture suite: tests/test-verdict-decision.sh (bash-internal in its original form — sources
-cli/lib/verdict.sh and execs action/decide_verdict.py directly). Its black-box Python equivalent,
-per docs/PYTHON-PORT.md section 4, is tests/test-verdict-decision-python.sh, which drives this
-module the same way the original suite drives action/decide_verdict.py: as a subprocess, via
-``python3 -m pantheon.verdict <expected-agent> <raw-output-file>``.
+Fixture suite: tests/test-verdict-decision-python.sh — the black-box Python equivalent of the
+original bash-internal suite (tests/test-verdict-decision.sh, which sourced the retired bash
+CLI's verdict.sh and exec'd action/decide_verdict.py directly, and was removed alongside the bash
+CLI in #29). Drives this module the same way the original suite drove action/decide_verdict.py:
+as a subprocess, via ``python3 -m pantheon.verdict <expected-agent> <raw-output-file>``.
 """
 
 from __future__ import annotations
@@ -51,9 +50,9 @@ import sys
 
 from pantheon import jqjson
 
-# Per-agent verdict vocabulary -> gate color. Mirrors cli/lib/verdict.sh's agent_color() case
-# statement AND action/decide_verdict.py's VOCAB dict exactly — same agents, same words, same
-# colors. DESIGN.md's verdict-contract table is the source of truth this mirrors.
+# Per-agent verdict vocabulary -> gate color. Mirrors the retired bash CLI's verdict.sh's
+# agent_color() case statement AND action/decide_verdict.py's VOCAB dict exactly — same agents,
+# same words, same colors. DESIGN.md's verdict-contract table is the source of truth this mirrors.
 VOCAB: dict[str, dict[str, str]] = {
     "artemis": {"SHIP": "green", "FIX_FIRST": "yellow", "STOP": "red"},
     "apollo": {"ACCEPT": "green", "ACCEPT_WITH_NOTES": "yellow", "RETURN": "red"},
@@ -74,7 +73,7 @@ TYPE_STRICT_REASON = (
 
 
 def extract_last_json(raw: str) -> str:
-    """Parse-anchored suffix scan — identical algorithm to cli/lib/verdict.sh's
+    """Parse-anchored suffix scan — identical algorithm to the retired bash CLI's verdict.sh's
     extract_last_json/_pantheon_single_json and action/decide_verdict.py's extract_last_json,
     kept in sync by contract (DESIGN.md's "Two runtimes, one rule").
 
@@ -85,8 +84,9 @@ def extract_last_json(raw: str) -> str:
     enforces on its own (it raises on any non-whitespace content after the first complete value
     — "Extra data" is one of the many failure shapes ``pantheon.jqjson.JqParseError`` covers), so
     no extra work is needed here beyond a bare parse attempt per candidate; this is the same
-    guarantee cli/lib/verdict.sh's ``_pantheon_single_json`` helper has to reconstruct by hand on
-    top of jq's more permissive stream parser. This probe also inherits ``pantheon.jqjson``'s
+    guarantee the retired bash CLI's verdict.sh's ``_pantheon_single_json`` helper had to
+    reconstruct by hand on top of jq's more permissive stream parser. This probe also inherits
+    ``pantheon.jqjson``'s
     UTF-8-validity and jq-compatible-constant handling for free — a candidate real jq would
     reject (a lone surrogate, say) is correctly never treated as parseable here either, so the
     scan properly falls through to an earlier or later ``{`` instead of ending on a
@@ -115,7 +115,7 @@ def extract_last_json(raw: str) -> str:
 
 
 def top_finding_of(verdict_obj: dict) -> str:
-    """Same fallback chain as cli/lib/verdict.sh's top_finding computation and
+    """Same fallback chain as the retired bash CLI's verdict.sh's top_finding computation and
     action/decide_verdict.py's top_finding_of: first finding's "severity: issue (file:line)", or
     "no findings" if there are none, or if the shape is malformed enough that the first entry
     isn't even an object (verified live against real jq: a non-object first element makes jq's
@@ -148,8 +148,8 @@ def top_finding_of(verdict_obj: dict) -> str:
     interpolation (``"\\(...)"``) would produce for the same value — caught live on this PR: a
     boolean ``.file`` rendered as Python's "True" here where bash's real decider renders "true").
     The fully-composed string is then run through ``pantheon.jqjson.subst`` ONCE — mirroring
-    bash's own mechanics exactly: cli/lib/verdict.sh builds this ENTIRE "severity: issue
-    (file:line)" string inside a SINGLE jq expression, captured by ONE ``$(...)`` command
+    bash's own mechanics exactly: the retired bash CLI's verdict.sh built this ENTIRE "severity:
+    issue (file:line)" string inside a SINGLE jq expression, captured by ONE ``$(...)`` command
     substitution, so bash's trailing-newline stripping happens once, on the whole assembled
     text — not per-field before interpolation, the way ``pantheon.render``'s per-field
     extractions need it (see that module's own use of ``subst`` for why the two shapes differ)."""
@@ -168,8 +168,8 @@ def top_finding_of(verdict_obj: dict) -> str:
 
 def blocker_present(verdict_obj: dict) -> bool:
     """The blocker invariant's read: has_blocker is True (strictly — not truthy), OR any finding
-    has severity == "blocker". Mirrors action/decide_verdict.py's blocker_present and
-    cli/lib/verdict.sh's equivalent jq expression exactly."""
+    has severity == "blocker". Mirrors action/decide_verdict.py's blocker_present and the retired
+    bash CLI's verdict.sh's equivalent jq expression exactly."""
     if verdict_obj.get("has_blocker") is True:
         return True
     return any(isinstance(f, dict) and f.get("severity") == "blocker" for f in verdict_obj.get("findings") or [])
@@ -177,7 +177,7 @@ def blocker_present(verdict_obj: dict) -> bool:
 
 def type_strict_ok(verdict_obj: dict) -> bool:
     """Type-strict check of the invariant-read surface only (verdict/has_blocker/findings/every
-    findings[].severity) — mirrors cli/lib/verdict.sh's jq type-strict check and
+    findings[].severity) — mirrors the retired bash CLI's verdict.sh's jq type-strict check and
     action/decide_verdict.py's type_strict_ok exactly (same fields, same order of evaluation).
     Display fields (file/line/issue/scenario/summary) are deliberately NOT checked here — see
     DESIGN.md's "Validation surface" section; pantheon.render owns sanitizing those at render
@@ -203,8 +203,9 @@ def type_strict_ok(verdict_obj: dict) -> bool:
 
 def decide(expected_agent: str, raw: str) -> dict:
     """Full decision pipeline: extract -> parse -> required keys -> type-strict validation ->
-    vocabulary lookup -> blocker invariant. Same decision order as cli/lib/verdict.sh's
-    decide_verdict() and action/decide_verdict.py's decide() — see this module's docstring for
+    vocabulary lookup -> blocker invariant. Same decision order as the retired bash CLI's
+    verdict.sh's decide_verdict() and action/decide_verdict.py's decide() — see this module's
+    docstring for
     the full rule. Always returns a decision dict; never raises on malformed input (malformed
     input is exactly what this function exists to classify, not something that should abort the
     caller). The JSON-boundary rule: any ``pantheon.jqjson.JqParseError`` — a syntax error, an
@@ -359,9 +360,9 @@ def emit_github_output(decision: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """``python3 -m pantheon.verdict <expected-agent> <raw-output-file>`` — the black-box CLI
-    shim docs/PYTHON-PORT.md section 4 calls for so the migration-exam harness can drive this
-    module as a subprocess, the same way tests/test-verdict-decision.sh's original bash-internal
-    suite drives action/decide_verdict.py today. Deliberately mirrors decide_verdict.py's own
+    shim the migration-exam harness needs to drive this module as a subprocess, the same way
+    tests/test-verdict-decision.sh's original bash-internal suite (removed in #29) drove
+    action/decide_verdict.py. Deliberately mirrors decide_verdict.py's own
     ``main()`` argv shape and exit-code contract (0 = green/yellow, 1 = red/unverified, 2 =
     usage) — this is the CLI surface that lets a fixture written for one runtime run unchanged
     against the other.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/test-json-boundary.sh — asserts pantheon.jqjson is the ONE place this port's Python
-# modules parse, serialize, OR stringify-for-display JSON, per docs/PYTHON-PORT.md's "JSON
-# boundary" section.
+# modules parse, serialize, OR stringify-for-display JSON — the port's "JSON boundary" (see the
+# incident history below).
 #
 # Four straight review-gate rounds on pantheon/verdict.py and pantheon/render.py found the same
 # class of divergence, one Python-vs-jq mismatch at a time: a non-standard JSON-extension token,

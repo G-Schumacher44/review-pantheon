@@ -1,5 +1,5 @@
-"""pantheon/basepin.py — symlink-safe base-pinned file reads. Replaces
-cli/lib/pantheon-base-pin.sh.
+"""pantheon/basepin.py — symlink-safe base-pinned file reads. Replaces the retired bash CLI's
+`pantheon-base-pin.sh` (removed in #29).
 
 Every base-pinned read in this repo (issue #6's class statement, DESIGN.md's "Security posture")
 uses ``git show <base-sha>:<path>`` to read a file's content from the PR's BASE commit instead of
@@ -48,8 +48,8 @@ git). ``base_pinned_read()`` below normalizes the REQUESTED path itself through
 logic already used for resolved symlink targets — before the walk ever begins, so
 ``dir//file.md`` and ``dir/file.md/`` both normalize to ``dir/file.md`` up front. The bash
 original only ever normalized a *resolved symlink target*, never the caller's own input path;
-this is a genuine behavioral closure of docs/PYTHON-PORT.md's cited class, not a restatement of
-the existing symlink-target normalization.
+this is a genuine behavioral closure of issue #10's cited class, not a restatement of the
+existing symlink-target normalization.
 
 Every ``git`` call below goes through ``pantheon.execution.run_git()`` — the same constructed-
 clean-environment, GLOBAL_OVERRIDES-carrying core the readonly wrapper uses (see
@@ -57,9 +57,9 @@ clean-environment, GLOBAL_OVERRIDES-carrying core the readonly wrapper uses (see
 four-subcommand allowlist. This module is trusted, CLI-internal plumbing (not the persona-facing
 Bash-tool surface the wrapper's argv gate exists to constrain), so it calls ``git`` directly
 through the shared hardened core rather than through ``run_readonly_wrapper()``'s argv gate —
-same environment discipline, no subcommand restriction, exactly mirroring how
-cli/lib/pantheon-base-pin.sh calls ``git -C <repo_dir> ls-tree``/``show`` directly rather than
-routing through cli/lib/pantheon-git-readonly.sh.
+same environment discipline, no subcommand restriction, exactly mirroring how the retired bash
+CLI's `pantheon-base-pin.sh` (removed in #29) called ``git -C <repo_dir> ls-tree``/``show``
+directly rather than routing through its `pantheon-git-readonly.sh` counterpart.
 """
 
 from __future__ import annotations
@@ -99,7 +99,8 @@ def normalize_repo_path(path: str) -> str | None:
     Returns the normalized path on success, or None on failure: an absolute input, an empty
     input, a ".." that would climb above the repo root (the repo root is component index zero;
     there is no parent to climb to), or an input that fully collapses to nothing (e.g. "./.").
-    Mirrors cli/lib/pantheon-base-pin.sh's pantheon_normalize_repo_path exactly.
+    Mirrors the retired bash CLI's `pantheon-base-pin.sh` (removed in #29) —
+    pantheon_normalize_repo_path — exactly.
     """
     if not path or path.startswith("/"):
         return None
@@ -248,11 +249,12 @@ def base_pinned_read(base_sha: str, path: str, repo_dir: str = ".") -> BasePinne
 
 # ---------------------------------------------------------------------------------------------
 # CLI — subcommand-dispatch shape mirroring pantheon.execution's "wrapper" CLI, for
-# tests/test-base-pinned-read.sh's Python-native black-box equivalent (docs/PYTHON-PORT.md §4):
+# tests/test-base-pinned-read.sh's Python-native black-box equivalent:
 #
 #   python -m pantheon.basepin read <base-sha> <path> <dest-file> [repo-dir]
-#     — mirrors cli/lib/pantheon-base-pin.sh's `pantheon_base_pinned_read` contract exactly:
-#       writes resolved content to <dest-file>, exits 0/1/2 (see this module's docstring).
+#     — mirrors the retired bash CLI's `pantheon-base-pin.sh` (removed in #29) —
+#       `pantheon_base_pinned_read` — contract exactly: writes resolved content to <dest-file>,
+#       exits 0/1/2 (see this module's docstring).
 #   python -m pantheon.basepin normalize <path>
 #     — mirrors `pantheon_normalize_repo_path`: prints the normalized path and exits 0 on
 #       success, prints nothing and exits 1 on refusal.

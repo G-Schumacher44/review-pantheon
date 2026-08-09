@@ -1,5 +1,5 @@
 """tests/test_state.py — pytest unit layer for pantheon.state's cross-filesystem write safety
-(docs/PYTHON-PORT.md section 4's port slice 4 deliverable).
+(this port's slice-4 deliverable).
 
 Deliberately NOT a re-run of tests/test-state-persistence-python.sh's own scenarios (the
 green/yellow-recording rule, malformed-state protection, load_state/reviewed_sha_for/
@@ -72,8 +72,8 @@ def test_update_state_cleans_up_its_temp_file_on_a_write_failure(tmp_path, monke
 # malformed state file as "no prior state," run every agent, and post a full-review comment --
 # and since update_state() correctly refuses to ever overwrite that malformed file, EVERY
 # subsequent invocation would repeat the exact same thing, forever (a duplicate-comment loop).
-# Mirrors bash's own posture: cli/review-gate's SEEN_SHA="$(jq -r ... "$STATE_FILE")" runs under
-# `set -euo pipefail`, aborting the whole script on a malformed read.
+# Mirrors the retired bash CLI's own posture (removed in #29): its SEEN_SHA="$(jq -r ... "$STATE_FILE")" ran
+# under `set -euo pipefail`, aborting the whole script on a malformed read.
 # ---------------------------------------------------------------------------------------------
 
 
@@ -171,7 +171,7 @@ def test_update_state_warns_and_returns_on_an_unwritable_directory_never_raises(
 
 
 # ---------------------------------------------------------------------------------------------
-# Symlink refusal at bootstrap -- issue #21 P2 (docs/PYTHON-PORT.md's port slice 5). The
+# Symlink refusal at bootstrap -- issue #21 P2 (this port's slice-5 deliverable). The
 # pre-fix bootstrap_state_file() used `if not os.path.exists(state_file): open(state_file, "w")`
 # -- os.path.exists() follows symlinks and reads False for a DANGLING one (the target doesn't
 # exist), so that condition was True and the open() ran anyway. A plain open(path, "w") on a
@@ -274,10 +274,10 @@ def test_update_state_warns_and_returns_on_a_dangling_symlink_never_raises_never
 # ---------------------------------------------------------------------------------------------
 # CRITICAL-3 fix (adversarial review): a state-write FAILURE for a green/yellow outcome must be
 # signaled to the caller (never just a stderr warning nobody checks) so pantheon.cli's run_gate()
-# can fail the whole run closed — matching real bash's own posture: cli/review-gate calls
-# update_review_gate_state as a bare top-level statement under `set -euo pipefail`, and that
-# function's own `mv "$tmp_state" "$state_file"` line is NOT inside an if-condition, so a failing
-# `mv` (this exact chmod-555 shape) aborts the WHOLE bash script nonzero right there — never a
+# can fail the whole run closed — matching the retired bash CLI's own posture (removed in #29): it
+# called update_review_gate_state as a bare top-level statement under `set -euo pipefail`, and that
+# function's own `mv "$tmp_state" "$state_file"` line was NOT inside an if-condition, so a failing
+# `mv` (this exact chmod-555 shape) aborted the WHOLE bash script nonzero right there — never a
 # silent "comment posted, exit 0 anyway" the way this function's own PRE-fix behavior was.
 # update_state() itself still never raises (see its own docstring); the fix is its boolean
 # return, which pantheon.cli.run_gate() now checks (see tests/test_cli_helpers.py's structural
@@ -387,7 +387,7 @@ def test_update_state_on_an_empty_existing_file_matches_bashs_real_no_record_qui
     # documents from an empty file argument and so produces ZERO BYTES of output regardless of
     # the filter -- confirmed live below -- which then gets `mv`'d over $state_file: the file
     # ends up EMPTY again, recording NOTHING, even though the operation "succeeds" (exit 0).
-    # This port replicates that exactly (docs/PYTHON-PORT.md's "byte-compatible... not a
+    # This port replicates that exactly (this port's own "byte-compatible... not a
     # redesign" charter), not "improves" on it.
     state_file = tmp_path / "state.json"
     state_file.write_text("")

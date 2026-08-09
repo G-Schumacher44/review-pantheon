@@ -756,9 +756,11 @@ bootstrap.sh                user-level, repo-independent CLI install (Way B) —
                            instead of dev's current HEAD (see RELEASING.md and
                            .github/workflows/release.yml below)
 .github/workflows/release.yml  tag-push (`v*.*.*`, strict-semver-validated) release gate: re-
-                           runs ci.yml's lint-and-test suite pinned at the tag, then builds the
+                           runs ci.yml's lint-and-test suite pinned at the tag, builds the
                            versioned surface tarball + SHA256SUMS and publishes both as a
-                           GitHub Release
+                           GitHub Release, then publishes the sdist/wheel to PyPI via the
+                           trusted-publisher OIDC exchange (publish-pypi job, `id-token: write`,
+                           gated on the Release step succeeding)
 RELEASING.md                the operator's release ceremony — dev green, dev->main promotion
                            PR, tagging main, moving the v1 major tag, post-release verification
 docs/                      anything that doesn't fit above

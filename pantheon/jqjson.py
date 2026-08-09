@@ -1,7 +1,7 @@
 """pantheon.jqjson — the single jq-compatible JSON parse/serialize boundary.
 
-Three straight review-gate rounds on docs/PYTHON-PORT.md's Slice 2 (pantheon/verdict.py,
-pantheon/render.py) found real, reproducible divergences between Python's ``json`` module and
+Three straight review-gate rounds on Slice 2 (pantheon/verdict.py, pantheon/render.py) found
+real, reproducible divergences between Python's ``json`` module and
 real jq, one instance at a time: a JSON boolean stringifying as Python's Title-case ``True``
 instead of jq's lowercase ``true``; the non-standard ``NaN``/``Infinity``/``-Infinity`` JSON-
 extension tokens surviving as literal Python floats instead of jq's own coercion; a lone UTF-16
