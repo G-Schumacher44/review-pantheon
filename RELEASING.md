@@ -25,7 +25,7 @@ access. Doc index: [docs/README.md](docs/README.md). Binding contract: [DESIGN.m
       git tag -a vX.Y.Z origin/main -m "vX.Y.Z"
       git push origin vX.Y.Z
       ```
-      The push fires `.github/workflows/release.yml`, which runs five steps in order:
+      The push fires `.github/workflows/release.yml`, which runs six steps in order:
       1. **Reject a non-strict tag.** The workflow's own `v*.*.*` trigger is a glob and would
          otherwise also fire on `v1.2.3-rc1` or similar, but `bootstrap.sh --version` only ever
          accepts strict `vX.Y.Z` (digits only, no `-rc1`/build-suffix) — a release built from
@@ -56,10 +56,13 @@ access. Doc index: [docs/README.md](docs/README.md). Binding contract: [DESIGN.m
       `gh release view vX.Y.Z` (confirm `review-pantheon-vX.Y.Z.tar.gz` AND `SHA256SUMS` are
       both listed as assets, not just one), and `pip index versions review-pantheon` (or the
       package's PyPI project page) to confirm `X.Y.Z` published.
-- [ ] **First/major tag only — tick the GitHub Marketplace box.** The workflow's `gh release
-      create` step above publishes the Release non-interactively, so this is a follow-up edit:
-      open the Release in the GitHub UI (Releases → the tag → Edit release) and check "Publish
-      this Action to the GitHub Marketplace" before saving. `action.yml`'s branding block
+- [ ] **Tick the GitHub Marketplace box — every release, not just the first.** The workflow's
+      `gh release create` step above publishes the Release non-interactively, so this is a
+      follow-up edit: open the Release in the GitHub UI (Releases → the tag → Edit release) and
+      check "Publish this Action to the GitHub Marketplace" before saving. Marketplace does NOT
+      automatically adopt a repo's newer releases or a moved `v1` tag — a release that skips this
+      checkbox leaves the Marketplace listing pointing at the previous published release even
+      though PyPI, the GitHub Release, and `v1` have all advanced. `action.yml`'s branding block
       (`branding:`) already satisfies Marketplace's listing requirements, so this is a checkbox,
       not a follow-up implementation task.
 
