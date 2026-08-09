@@ -8,8 +8,16 @@ CLI, no files in your repo), see
 [Way C](#way-c--published-action-zero-repo-footprint-action-only) below. Binding contract:
 `DESIGN.md`. Doc index: [docs/README.md](README.md).
 
-`pantheon` is the CLI — `pantheon gate` / `pantheon counsel`, installable via `pipx`/`pip`
-(stdlib-only, no runtime dependency).
+`pantheon` is the CLI — `pantheon gate` / `pantheon counsel`, stdlib-only with no runtime
+dependency. Shortest installs, straight from a package manager:
+
+```bash
+pipx install review-pantheon                        # PyPI (or: pip install review-pantheon)
+brew install g-schumacher44/tap/review-pantheon      # Homebrew tap
+```
+
+Either gives you the `pantheon` and `pantheon-git-readonly` binaries; the ways below cover the
+repo-gate install (Way A/C) and the from-checkout/user-prefix alternatives (Way B).
 
 ## Prerequisites
 
@@ -35,10 +43,19 @@ git clone <this repo> review-pantheon
 ./review-pantheon/install.sh /path/to/your-repo
 ```
 
-Copies the five personas, the verdict-decision script, and the GitHub Action workflow into
-your target repo (`.github/review-agents/`, `.github/workflows/review.yml`), so your repo's own
-CI checkout can see them without depending on review-pantheon existing on that runner. Prefer
-this over Way C if you want the gate's own files reviewable in your repo's history. Add
+Copies the five personas and a `REVIEW_RULES.md` house-rules template into your target repo
+(`.github/review-agents/`, `REVIEW_RULES.md`), and GENERATES a thin-caller
+`.github/workflows/review.yml` (~25 lines) that calls this repo's own published composite
+action, pinned to a full commit SHA rather than a moving tag — see that generated file's own
+header comment for the pin and how to re-pin it. **Honest tradeoff (issue #36):** unlike the
+pre-v0.1.0 version of Way A, this now depends on review-pantheon existing as a public GitHub
+repo at gate-run time — a `uses:` reference resolves at RUN time, not install time, so a
+`review-pantheon@<sha>` step still needs github.com reachable from the runner. If that's a
+blocker (an air-gapped runner with no path to github.com), vendor `action.yml` +
+`action/lib/*.sh` + `agents/` + `pantheon/` into your own tree yourself and pin a SHA there — see
+that generated workflow's own comment for the pointer. What Way A still gets you over Way C: the
+personas and house-rules template land in your repo's own history, so a target repo can fork a
+persona and point the generated workflow's `personas_path` input at its own copy. Add
 `--claude --cursor --codex --gemini` to also generate in-editor/in-CLI projections — for Claude
 Code that's the counsel agents, the four canonical skills (`gate`, `counsel`, `spec-driven`,
 `design-contract` — `.claude/skills/<name>/SKILL.md`), and `/counsel` + `/gate` commands; other
@@ -55,10 +72,11 @@ the CLI at all, only the Action.
    (interactive, requires a Claude Code subscription), then store it with
    `gh secret set CLAUDE_CODE_OAUTH_TOKEN`.
 2. Set the repo variable `REVIEW_GATE_ENABLED=true` (the workflow no-ops without it).
-3. `.github/workflows/review.yml` ships pinned to a real, verified
-   `anthropics/claude-code-action` commit SHA (see that file's header comment for the release
-   and the source it was checked against) — if you re-pin it yourself, confirm the SHA still
-   matches a release you trust before relying on this gate.
+3. `.github/workflows/review.yml` ships pinned to a real, verified `review-pantheon` release
+   commit (see that file's header comment for the release and how to re-pin) — confirm that pin
+   still matches a release you trust before relying on this gate. The
+   `anthropics/claude-code-action` pin that release itself uses lives inside its own
+   `action.yml`, not in the generated stub.
 4. Open a test PR with a deliberately planted blocker and confirm the gate goes **red** first.
 5. Only after step 4 passes, consider making the check required.
    On a repository that accepts outside contributions, read
@@ -78,9 +96,9 @@ the CLI at all, only the Action.
 Same generators as Way A's `--claude`/`--cursor`/`--codex`/`--gemini`, run at **user level**
 (`$HOME`) instead of into a target repo, so the counsel personas are available in every project
 on the machine without re-installing per-repo. No target-repo argument — `--user` errors if one
-is given — and at least one tool flag is required. The gate files (workflow, the vendored
-`pantheon` package, `REVIEW_RULES.md`) are **not** installed under `--user`: a PR gate belongs to one repo's CI, so
-run plain `install.sh /path/to/repo` (Way A) per repo for those.
+is given — and at least one tool flag is required. The gate files (the generated workflow,
+personas, `REVIEW_RULES.md`) are **not** installed under `--user`: a PR gate belongs to one
+repo's CI, so run plain `install.sh /path/to/repo` (Way A) per repo for those.
 
 Verified per tool against each tool's current official docs (see `install.sh`'s own
 `install_claude`/`install_cursor`/`install_codex`/`install_gemini` comment blocks for the exact
@@ -159,9 +177,9 @@ to `.github/workflows/review-gate.yml` in your repo and wire one secret — that
 whole install. `action.yml` at this repo's root is a composite GitHub Action; the `uses:
 G-Schumacher44/review-pantheon@v1` reference reads personas and the `pantheon` package's
 verdict-decision module (`pantheon.verdict`) from its own checkout, so nothing
-lands in your repo at all. **The `@v1` tag lands with this repo's first release (see
-[RELEASING.md](../RELEASING.md)) — until then it 404s on a brand-new checkout; pin a commit SHA
-or a local checkout instead**, same caveat as `examples/review-gate.yml`'s own header comment.
+lands in your repo at all. **`@v1` tracks the latest release — it moves when a new one is cut
+(see [RELEASING.md](../RELEASING.md)); pin a full commit SHA instead if you want updates on
+your own schedule**, which is exactly the trade Way A's generated workflow makes for you.
 See `DESIGN.md`'s ["Published
 action"](../DESIGN.md#published-action) section for what's bundled, what's overridable
 (`personas_path`, `agents`, `rules_file`, `spec_file`, `model`, `execution`), and the sequential-vs-matrix
@@ -180,9 +198,16 @@ composite action** — `anthropics/claude-code-action` itself supports them (`us
 `use_vertex`, `use_foundry`, `anthropic_federation_rule_id`, and friends — see
 [its cloud-providers docs](https://github.com/anthropics/claude-code-action/blob/main/docs/cloud-providers.md)),
 but `action.yml`'s own auth-assert step requires one of the two inputs above and doesn't expose
-a passthrough for the cloud-provider ones. If you need pure cloud-provider auth (no Anthropic
-token at all), use Way A instead: `install.sh` vendors `action/review.yml` into your repo,
-which is then yours to edit — add the cloud-provider inputs to its `with:` block directly.
+a passthrough for the cloud-provider ones. **This is a hard gap on every install method now**
+(issue #36): Way A's generated stub calls this same `action.yml` via `uses:`, so editing its
+`with:` block can't add inputs `action.yml` itself doesn't declare — GitHub Actions passes
+unknown `with:` inputs through untouched, it doesn't wire them anywhere. If you need pure
+cloud-provider auth (no Anthropic token at all), the only path today is the air-gapped
+alternative from Way A's own paragraph above: vendor `action.yml` + `action/lib/*.sh` +
+`agents/` + `pantheon/` into your own tree and write a workflow that calls
+`anthropics/claude-code-action` directly with the cloud-provider inputs — action.yml's own
+`claude_code_oauth_token`/`anthropic_api_key`/`claude_args` steps are the reference for how to
+wire that action correctly.
 
 **Post-install checklist:**
 
@@ -198,9 +223,13 @@ which is then yours to edit — add the cloud-provider inputs to its `with:` blo
    cannot be gated (GitHub withholds secrets from fork runs), so the check passes on them
    **because it skipped** — a required green there does not mean the PR was reviewed.
 
-Still want the Action surface but prefer the files reviewable in your own repo's history (or don't
-want to depend on this repo being public)? That's Way A, not Way C — `install.sh` vendors
-`action/review.yml` instead of referencing this repo's `action.yml` directly.
+Still want the Action surface but prefer the personas/house-rules reviewable in your own repo's
+history, and a pin you control explicitly rather than a floating major tag? That's Way A, not Way
+C — both now reference this repo's `action.yml` via `uses:` (issue #36 collapsed Way A's old
+vendored reimplementation into the same thin-caller shape), but Way A pins a full commit SHA you
+re-pin deliberately (re-run `install.sh`, or hand-edit) where Way C tracks the moving `v1` tag.
+Neither Way avoids depending on this repo being public at gate-run time — see Way A's own
+paragraph above for the air-gapped alternative if that's a hard requirement.
 
 </details>
 

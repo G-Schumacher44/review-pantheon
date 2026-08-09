@@ -1203,16 +1203,18 @@ def test_readonly_tier_end_to_end_produces_a_parseable_verdict(tmp_path, monkeyp
     assert "f.txt" in decision["verdict_json"]["summary"]
 
 
-def test_verdict_json_schema_stays_byte_identical_across_ALL_THREE_surfaces() -> None:
+def test_verdict_json_schema_stays_byte_identical_across_BOTH_surfaces() -> None:
     """VERDICT_JSON_SCHEMA promises byte-identity with every surface that enforces a schema.
     Nothing enforced it until this test (a live self-hosted-gate finding, artemis @ PR #28).
 
-    THREE copies, not two -- and the third is why this test enumerates its own targets instead of
-    grepping for a variable name. `action.yml` assigns `JSON_SCHEMA='...'`, but `action/review.yml`
-    embeds the schema INLINE as `--json-schema '...'` with no variable at all. A search for the
-    NAME finds two copies and reports the third absent; only a search for the CONTENT finds all
-    three. That is exactly how the third copy drifted a full revision behind (Codex, PR #28) after
-    the first two were fixed together.
+    TWO copies, not three: `pantheon.providers.VERDICT_JSON_SCHEMA` (this module) and
+    `action.yml`'s `JSON_SCHEMA='...'` assignment. A third copy used to live inline in the
+    vendored `action/review.yml` as `--json-schema '...'`, with no variable name at all -- that
+    was exactly how it once drifted a full revision behind (Codex, PR #28) before this test
+    existed, and exactly why this test enumerates its own targets by regex instead of grepping
+    for a variable name. Issue #36 deleted that vendored duplicate (install.sh's Way A now
+    generates a thin caller of action.yml instead), so there are only two copies left to compare
+    -- see DESIGN.md's "Validation surface" section for the current count.
 
     Compares raw TEXT, not parsed-and-re-serialized JSON: the claim is byte-identity, and a parsed
     comparison would pass while the surfaces disagreed on key order -- the drift a reader diffing
@@ -1220,7 +1222,6 @@ def test_verdict_json_schema_stays_byte_identical_across_ALL_THREE_surfaces() ->
     """
     surfaces = {
         "action.yml": r"JSON_SCHEMA='([^']*)'",
-        "action/review.yml": r"--json-schema '(\{[^']*\})'",
     }
 
     for relpath, pattern in surfaces.items():

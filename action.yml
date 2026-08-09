@@ -1,12 +1,14 @@
 # action.yml — review-pantheon as a published GitHub Action.
 #
 # The zero-footprint install: a target repo's whole integration is the ~20-line workflow stub
-# at examples/review-gate.yml — nothing is copied into the target repo (contrast with
-# install.sh's Way A, which vendors personas + action/review.yml + the pantheon package into the
-# target repo so its own runner can see them). Every file this action reads at run time —
-# personas, the pantheon package (whose `pantheon.verdict` module decides every verdict —
-# the one implementation every lane calls), action/lib/*.sh, the JSON schema below — is read
-# from `${{ github.action_path }}`, i.e.
+# at examples/review-gate.yml (Way C) — nothing is copied into the target repo. install.sh's Way
+# A generates a comparably thin caller of this same file (issue #36 — it used to vendor a whole
+# second ~1,000-line reimplementation instead; that duplicate is gone). Every file this action
+# reads at run time — its bundled personas, the pantheon package (whose `pantheon.verdict`
+# module decides every verdict — the one implementation every lane calls), action/lib/*.sh, the
+# JSON schema below — is read from `${{ github.action_path }}` (with the one opt-in exception
+# documented a few paragraphs down: the `personas_path` input, base-pinned from the consuming
+# repo's base commit), i.e.
 # review-pantheon's own checkout as GitHub Actions pulls it for the `uses:` reference (run via
 # `PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py"`
 # — a `pip install` is not needed, a stdlib-only package runs straight from its own checkout).
@@ -54,9 +56,9 @@
 #     passing `--json-schema '<schema>'` in `claude_args` — see
 #     https://github.com/anthropics/claude-code-action/blob/be7b93b1907a4abad570368f3c74b6fe3807510b/docs/usage.md#structured-outputs.
 #     This is a materially better mechanism than the old "extract trailing JSON from raw text"
-#     approach the vendored action/review.yml historically used (and still uses, for the
-#     CLI-independent reasons documented there) — the schema is enforced by the upstream action
-#     itself, not just hoped for in a persona's closing instructions.
+#     approach the now-deleted vendored action/review.yml used to rely on (issue #36) — the
+#     schema is enforced by the upstream action itself, not just hoped for in a persona's
+#     closing instructions.
 #
 # Composite-action constraints (verified against GitHub's own docs, not assumed):
 #   - No `strategy`/`matrix` inside a composite action — that's a job-level-only concept. A
@@ -68,19 +70,20 @@
 #     '<name>')`. That's structural duplication (GitHub Actions leaves no alternative for a
 #     `uses:` step specifically), not logic duplication — the logic each trio shares
 #     (prompt-building, verdict-deciding) lives once in action/lib/*.sh and `pantheon.verdict`
-#     (the package module both this file and action/review.yml call), invoked five times with
-#     different arguments, not five times hand-written.
-#   - Every agent here runs SEQUENTIALLY in one job, not as parallel matrix legs the way
-#     action/review.yml's artemis/apollo run. Simplicity over parallelism: one job means the
+#     (the one implementation this file calls, invoked five times with different arguments, not
+#     five times hand-written).
+#   - Every agent here runs SEQUENTIALLY in one job, not as parallel matrix legs — a composite
+#     action can't use `strategy`/`matrix` at all (see above), so there is no way to run agents
+#     as concurrent matrix legs the way the now-deleted vendored action/review.yml's
+#     artemis/apollo pair used to (issue #36). Simplicity over parallelism: one job means the
 #     per-agent decide steps' outputs are readable directly via `steps.<id>.outputs` by the
-#     final combine step in the SAME job — no cross-job artifact upload/download round-trip
-#     (which is why review.yml needs one; matrix legs can't expose distinct job outputs back to
-#     a downstream job, see that file's own comment). The cost is wall-clock: N agents run one
-#     after another, not concurrently. Given the default panel is two agents and this action
-#     targets whoever wants the simplest possible install, that tradeoff was made deliberately
-#     — parallelizing multiple agents inside one composite action isn't achievable without the
-#     same job-boundary machinery review.yml already carries, and this action's whole point is
-#     to not require the target repo to maintain that machinery itself.
+#     final combine step in the SAME job — no cross-job artifact upload/download round-trip. The
+#     cost is wall-clock: N agents run one after another, not concurrently. Given the default
+#     panel is two agents and this action targets whoever wants the simplest possible install,
+#     that tradeoff was made deliberately — parallelizing multiple agents inside one composite
+#     action isn't achievable without job-boundary machinery a composite action structurally
+#     cannot have, and this action's whole point is not requiring the target repo to maintain
+#     that machinery itself.
 #   - `steps.<id>.outcome` inside a composite action's own conditionals was historically broken
 #     (always empty — actions/runner#1578) but was fixed via actions/runner#1600; current
 #     runner versions support it, and `if: always()` on later composite steps behaves the same
@@ -111,8 +114,8 @@
 
 name: "review-pantheon gate"
 description: >-
-  Fail-closed AI review gate (Artemis/Apollo) and counsel panel (Socrates/Diogenes/Plato) for
-  spec-driven development. Read-only, blocker-invariant, zero files installed in your repo.
+  Fail-closed AI review gate — Artemis/Apollo twins on every PR. Read-only, blocker-invariant,
+  zero files in your repo.
 branding:
   icon: shield
   color: blue
@@ -175,10 +178,9 @@ inputs:
     default: ""
   post_comment:
     description: >-
-      Post one combined PR comment (the same format as action/review.yml's). Set to "false" to
-      only compute verdicts and print the would-be comment to the step log without posting —
-      this action's own exit status still reflects the gate result (fails on red/unverified)
-      either way.
+      Post one combined PR comment. Set to "false" to only compute verdicts and print the
+      would-be comment to the step log without posting — this action's own exit status still
+      reflects the gate result (fails on red/unverified) either way.
     required: false
     default: "true"
   execution:
@@ -370,8 +372,8 @@ runs:
         # auth-input assertion step above.
         #
         # readonly is routed through pantheon/execution.py's `wrapper` CLI (this action's own
-        # checkout at $ACTION_PATH — no vendoring needed, unlike action/review.yml below), not a
-        # bare `Bash(git diff *)`-style prefix pattern: a prefix match can't tell a read-only git
+        # checkout at $ACTION_PATH — no vendoring needed), not a bare `Bash(git diff *)`-style
+        # prefix pattern: a prefix match can't tell a read-only git
         # subcommand from the same subcommand carrying a writing/execution-capable flag
         # (`--output=`, `--ext-diff`) — a real Codex finding on this PR. See that module's own
         # docstring for the finding this closes. Invoked by its OWN ABSOLUTE PATH (never

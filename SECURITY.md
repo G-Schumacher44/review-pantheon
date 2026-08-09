@@ -11,10 +11,12 @@ tool execution" for the wrapper's exec-surface matrix — what `pantheon/executi
 a Bash call and what it deliberately rejects.
 
 Supported: the CLI — `pantheon gate`/`pantheon counsel` (the `pantheon` Python package,
-`pantheon/*.py`) — the published action (`action.yml`), and the vendored workflow
-(`action/review.yml`) as shipped from `dev`/`main` on this repo. A fork with local
-modifications, or an older pinned SHA of the published action, is outside this policy's scope —
-report against the current `dev` first.
+`pantheon/*.py`) — and the published action (`action.yml`) as shipped from `dev`/`main` on this
+repo. Every install method that lands a workflow file in a target repo (`install.sh`'s Way A,
+`examples/review-gate.yml`'s Way C) is a thin caller of that same `action.yml`, not a separate
+implementation, since issue #36 deleted the vendored `action/review.yml` reimplementation that
+used to exist here. A fork with local modifications, or an older pinned SHA of the published
+action, is outside this policy's scope — report against the current `dev` first.
 
 ## Reporting a vulnerability
 
@@ -23,7 +25,7 @@ this repo: **Security tab → Report a vulnerability**
 ([direct link](https://github.com/G-Schumacher44/review-pantheon/security/advisories/new)). This
 keeps the report and any discussion out of public view until a fix is ready.
 
-What to include: the surface affected (CLI / published action / vendored workflow), the smallest
+What to include: the surface affected (CLI / published action), the smallest
 reproduction you have, and — if it's an injection-class finding — what the injected content
 achieved (e.g. "read a file outside base-pinned provenance," "escaped the read-only wrapper's argv
 validation"), not just that a prompt was echoed back.
@@ -40,12 +42,13 @@ posture"](DESIGN.md#security-posture) section (the full read-provenance matrix a
 exec-surface matrix; fix-round history lives in this repo's git history, not in a doc) — what
 follows is a scoped summary of what matters when triaging a report, not a second full retelling.
 
-### `readonly` only tool-scopes three Claude surfaces
+### `readonly` only tool-scopes two Claude surfaces
 
-`execution=readonly` (the default) restricts Bash on exactly three surfaces, all of them
-invoking Claude: the CLI (`pantheon.providers`' claude lane), the published action (`action.yml`),
-and the vendored workflow (`action/review.yml`) — each configures the same
-`Bash(<wrapper path> *)` allowlist plus `--permission-mode dontAsk`. The codex/gemini/cursor
+`execution=readonly` (the default) restricts Bash on exactly two surfaces, both of them
+invoking Claude: the CLI (`pantheon.providers`' claude lane) and the published action
+(`action.yml`) — each configures the same `Bash(<wrapper path> *)` allowlist plus
+`--permission-mode dontAsk`. Every workflow-file install method (Way A, Way C) is a thin caller
+of `action.yml`, so it inherits this scoping rather than configuring its own. The codex/gemini/cursor
 lanes in `pantheon.providers` invoke their own CLIs directly and never consume the wrapper:
 Codex, Gemini, and Cursor have no equivalent tool-scoping mechanism in their own CLIs as of v1,
 so a best-effort lane carries **no tool restriction at all** — its only guard against a hostile
@@ -65,7 +68,7 @@ policy doesn't treat as gate-defeating.
 
 For everything the wrapper does see (any flag, any subcommand beyond the built-in-safe set
 above), it closes the arbitrary-command-execution primitive through the tool-call surface on the
-three Claude surfaces. That's one layer among several — base-pinned provenance, schema
+two Claude surfaces. That's one layer among several — base-pinned provenance, schema
 validation, the blocker invariant, cross-review by a second agent — not a claim that reviewing a
 hostile fork PR is safe in general. **None of it eliminates a schema-valid, deceptive
 verdict from an agent that injected content has fully compromised** — an accepted, documented
@@ -86,32 +89,41 @@ the gate now says so out loud instead of failing with a misleading message.**
 
 GitHub does not expose `secrets.*` to a `pull_request` run originating from a fork. The reason is
 sound: the PR's own code executes in that job, so any credential available there would be an
-outside contributor's for the taking. The vendored workflow runs on `pull_request`; the composite action runs on whatever the
-calling workflow triggers, which for every documented install here is also `pull_request`. Either
-way, on a fork the provider credential arrives as the empty string and no review call is possible.
+outside contributor's for the taking. Every documented install here — Way A's generated stub and
+Way C's `examples/review-gate.yml` — triggers on `pull_request` and calls the composite action
+(`action.yml`) via `uses:`. On a fork the provider credential arrives as the empty string and no
+review call is possible.
 
 What that means in practice:
 
-- **Vendored lane** (`action/review.yml`, Way A): the `review` job does not run on fork PRs, and a
-  separate `fork-notice` job states plainly that the PR is **NOT GATED**, in the log and in the
-  run's step summary.
-- **Published-action lane** (`action.yml`, Ways B/C): the job runs, but the action detects the
-  fork at its auth step and skips every subsequent step, emitting the same NOT GATED notice and
-  step summary. The check ends green-because-skipped rather than red-because-unauthenticated.
-  Nothing else in your workflow needs to change.
+- **The job runs, but the action detects the fork** at its auth step and skips every subsequent
+  step, emitting a NOT GATED notice and step summary. The check ends green-because-skipped rather
+  than red-because-unauthenticated. Nothing in your workflow needs to change.
 - **A green check on a fork PR means the gate skipped, not that the change passed.** Review it
   manually. This is the one dangerous misreading, so it is stated at every surface a maintainer
   might look at.
 - Consequently, think twice before making this a **required** status check on a repository that
-  accepts outside contributions — and note the two lanes report differently, which matters under
-  branch protection:
-  - **Published-action lane:** the job runs and succeeds with every step skipped, so the check
-    reports **success**. A required check does not block the PR; the hazard is the opposite one —
-    "required check green" reads as "reviewed" when nothing was reviewed.
-  - **Vendored lane:** the `review` job is skipped at *job* level, so the check reports
-    **skipped** rather than success. Branch protection treats that differently again, and this
-    project has not tested it end to end — verify the behavior on your own repository before
-    relying on it.
+  accepts outside contributions: the job runs and succeeds with every step skipped, so the check
+  reports **success**. A required check does not block the PR; the hazard is the opposite one —
+  "required check green" reads as "reviewed" when nothing was reviewed.
+- **Pre-#36 note:** a repo whose `.github/workflows/review.yml` still carries the OLD vendored
+  `action/review.yml` (installed before issue #36, never re-run through `install.sh` since) has a
+  separate `fork-notice` job and the `review` job skipped at *job* level instead — the check
+  reports **skipped**, not success, under that older shape. To migrate, **delete the old
+  `.github/workflows/review.yml`, then re-run `install.sh`** — a bare re-run is not enough:
+  the installer never overwrites a file that lacks its GENERATED marker (the old vendored copy
+  has none), so it reports a skip with this same delete-and-rerun instruction instead.
+
+  Two more migration steps if you'd gone further than the default install:
+  - **Required checks (do this or every PR blocks):** the old matrix workflow reported per-agent
+    contexts — `review (artemis)`, `review (apollo)` — that the generated replacement does not
+    emit; it reports one `review` context. If you made the old contexts required, branch
+    protection will wait forever for checks that can no longer report. Update the required list:
+    remove the old matrix contexts, require `review`.
+  - **Customized personas keep working by default:** the generated workflow sets
+    `personas_path: .github/review-agents`, so persona copies the migration preserved (the
+    installer never overwrites an edited persona) stay in effect. Only if you deleted that line
+    from the generated stub does the gate fall back to review-pantheon's bundled set.
 
   If you want required-means-reviewed, adopt one of the patterns below first.
 
@@ -158,18 +170,21 @@ If a reviewer agent were fully compromised by injected content, here's what it c
 surfaces this repo directly controls, independent of every layer above:
 
 - **GitHub permissions are the outer bound — as shipped, not as enforced by `action.yml` itself.**
-  `examples/review-gate.yml` (the published action's documented consumer stub) and
-  `action/review.yml` (the vendored workflow) both set `contents: read` and `pull-requests:
+  Both documented consumer stubs — `examples/review-gate.yml` (Way C) and `install.sh`'s
+  generated `.github/workflows/review.yml` (Way A) — set `contents: read` and `pull-requests:
   write` — no write access to code, branches, releases, or repo settings, only posting one PR
   comment. **This is not a hard ceiling the published action enforces on every consumer,
   though:** a composite action can't declare its own `permissions:` block (`action.yml`'s own
   header comment states this) — it inherits whatever the CALLING workflow grants. A consumer who
-  wires `uses: G-Schumacher44/review-pantheon@v1` into a job with broader permissions (e.g.
+  wires `uses: G-Schumacher44/review-pantheon@<ref>` into a job with broader permissions (e.g.
   `contents: write`) hands a compromised run that broader reach; GitHub enforces the *consumer's*
   chosen scope, not this repo's documented minimum. Use the documented `contents: read` /
-  `pull-requests: write` block from `examples/review-gate.yml` — widening it defeats this layer.
-- **The reviewer itself is pinned, not a moving target.** Both the published action and the
-  vendored workflow pin `anthropics/claude-code-action` to a full commit SHA
+  `pull-requests: write` block — widening it defeats this layer.
+- **The reviewer itself is pinned, not a moving target.** The published action pins
+  `anthropics/claude-code-action` to a full commit SHA
   (`be7b93b1907a4abad570368f3c74b6fe3807510b`, v1.0.183 — read directly from that release's own
-  `action.yml`, not assumed or copied from older docs), not a moving tag. Re-pinning to a newer
-  release is an explicit, auditable edit, not something that changes under a consumer on its own.
+  `action.yml`, not assumed or copied from older docs), not a moving tag — every consumer
+  inherits that pin, since there is only the one implementation now (issue #36). Way A adds a
+  second pin on top: the generated stub itself references `G-Schumacher44/review-pantheon` by a
+  full commit SHA, not the floating `v1` tag Way C's stub uses — re-pinning either one is an
+  explicit, auditable edit, not something that changes under a consumer on its own.

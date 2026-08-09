@@ -72,20 +72,20 @@ jobs:
           pip install --quiet pyyaml
           python3 -c "
           import yaml
-          for f in ('action.yml', 'action/review.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
+          for f in ('action.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'):
               with open(f) as fh:
                   yaml.safe_load(fh)
               print(f + ': OK')
           "
 
-      # actionlint, NOT just the YAML parse above. A pre-flip security review found
-      # action/review.yml carrying `|| "literal"` inside a `${{ }}` expression — the expression
-      # grammar accepts SINGLE-quoted literals only, so GitHub rejected the file at queue time and
-      # the vendored workflow every Way-A adopter installs reviewed exactly zero PRs. The YAML
-      # parse above could never catch it: the file IS valid YAML, and ci.yml's own header notes
-      # review.yml never runs against this repo, so nothing executed it either. A check that
-      # cannot fail for the actual failure mode is green by construction; this is the check that
-      # can.
+      # actionlint, NOT just the YAML parse above. A pre-flip security review found the
+      # since-deleted vendored action/review.yml (issue #36 collapsed it into a thin caller of
+      # action.yml — see DESIGN.md's "Published action" section) carrying `|| "literal"` inside a
+      # `${{ }}` expression — the expression grammar accepts SINGLE-quoted literals only, so
+      # GitHub rejected the file at queue time and the vendored workflow every Way-A adopter
+      # installed reviewed exactly zero PRs. The YAML parse above could never catch it: the file
+      # WAS valid YAML, and nothing in this repo's own CI executed it either. A check that cannot
+      # fail for the actual failure mode is green by construction; this is the check that can.
       #
       # SCOPE, precisely — actionlint does NOT catch the shell-injection shape. An earlier version
       # of this comment claimed it did; that was verified FALSE (re-inserting
@@ -109,21 +109,20 @@ jobs:
         run: |
           set -euo pipefail
           bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/${ACTIONLINT_SHA}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
-          # action/review.yml is a vendored workflow that lives outside .github/workflows, so
-          # actionlint's own auto-discovery does not see it — name it explicitly. Passing it as an
-          # argument is what makes this step cover the file that actually shipped broken.
-          #
+          # actionlint's own auto-discovery covers .github/workflows/*.yml (ci.yml, release.yml).
           # action.yml is NOT lintable here and cannot be: it is composite-action metadata, so
           # actionlint rejects it ("\"jobs\" section is missing in workflow"). That leaves the
-          # flagship published surface — the `@v1` path every non-vendoring adopter uses — without
-          # expression-grammar coverage, which is why the next step exists.
+          # published surface — the sole Action surface since issue #36 collapsed the vendored
+          # action/review.yml into a thin caller of it — without expression-grammar coverage,
+          # which is why the next step exists.
           #
           # -ignore SC2016 ("expressions don't expand in single quotes"): informational only. All
           # occurrences are deliberate single-quoted `grep`/`sed` regex patterns in this file and
           # release.yml (verified: removing the flag surfaces exactly those, nothing else).
-          ./actionlint -color -ignore 'SC2016' .github/workflows/*.yml action/review.yml
+          ./actionlint -color -ignore 'SC2016' .github/workflows/*.yml
 
-      # The guard actionlint cannot provide, for BOTH Action surfaces including action.yml.
+      # The guard actionlint cannot provide, for the Action surface (action.yml — composite
+      # metadata actionlint refuses to parse, see the actionlint step's own comment above).
       # Two classes, both found live on this repo by a pre-flip security review:
       #   1. double-quoted string literals inside `${{ }}` — invalid grammar, rejected at queue
       #      time, workflow silently never runs.

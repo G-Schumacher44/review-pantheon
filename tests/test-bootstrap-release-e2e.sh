@@ -38,7 +38,9 @@ TARBALL_NAME="${NAME}.tar.gz"
 # Build the fixture release tarball — same explicit manifest as release.yml's "Build versioned
 # tarball" step (agents/, skills/, pantheon/, pyproject.toml, bootstrap.sh, install.sh,
 # REVIEW_RULES.example.md, gate.conf.example, LICENSE, README.md), staged under a top-level
-# review-pantheon-<tag>/ dir.
+# review-pantheon-<tag>/ dir. No action/ entry — issue #36 deleted the vendored
+# action/review.yml; install.sh's Way A now GENERATES its thin-caller workflow instead of
+# reading a shipped copy, so there is nothing under action/ for a release tarball to carry.
 # ---------------------------------------------------------------------------
 section "Build fixture release tarball (release.yml's manifest, verbatim)"
 
@@ -51,8 +53,6 @@ cp -R "$ROOT/pantheon" "$STAGE/pantheon"
 cp "$ROOT/pyproject.toml" "$STAGE/pyproject.toml"
 cp "$ROOT/bootstrap.sh" "$STAGE/bootstrap.sh"
 cp "$ROOT/install.sh" "$STAGE/install.sh"
-mkdir -p "$STAGE/action"
-cp "$ROOT/action/review.yml" "$STAGE/action/review.yml"
 cp "$ROOT/REVIEW_RULES.example.md" "$STAGE/REVIEW_RULES.example.md"
 cp "$ROOT/gate.conf.example" "$STAGE/gate.conf.example"
 cp "$ROOT/LICENSE" "$STAGE/LICENSE"
@@ -76,12 +76,16 @@ fi
 pass "generated real SHA256SUMS for the fixture tarball"
 
 # ---------------------------------------------------------------------------
-# Regression check for a Codex P1 finding on this repo's history: install.sh's default
-# (no --user) mode reads $SCRIPT_DIR/action/review.yml and the vendored pantheon/ package, and
-# dies loud if either is missing — a release tarball that ships install.sh without them ships a
-# broken installer. Runs install.sh straight from the STAGED tree (pre-tar, same layout a real
-# extraction produces) against a fresh scratch target, proving the manifest above is not just
-# "the files are present" but "the shipped install.sh actually works."
+# Regression check for a Codex P1 finding on this repo's history (pre-#36): install.sh's default
+# (no --user) mode used to read $SCRIPT_DIR/action/review.yml and the vendored pantheon/
+# package, and died loud if either was missing — a release tarball that shipped install.sh
+# without them shipped a broken installer. Since issue #36, install.sh GENERATES its
+# thin-caller workflow instead of reading a shipped copy, and vendors no pantheon/ package at
+# all — so the regression this guards against now is a release tarball whose install.sh dies for
+# ANY reason (a missing agents//skills/ dir, say) when run from the staged tree. Runs install.sh
+# straight from the STAGED tree (pre-tar, same layout a real extraction produces) against a
+# fresh scratch target, proving the manifest above is not just "the files are present" but "the
+# shipped install.sh actually works."
 # ---------------------------------------------------------------------------
 section "install.sh runs successfully from the staged release tree (default mode)"
 
@@ -93,8 +97,8 @@ else
   fail "packaged install.sh exited nonzero: $install_out"
 fi
 
-if [[ -f "$SCRATCH_TARGET/.github/review-agents/pantheon/verdict.py" && -f "$SCRATCH_TARGET/.github/workflows/review.yml" ]]; then
-  pass "packaged install.sh installed the vendored pantheon package and review.yml from the packaged action/ files"
+if [[ -f "$SCRATCH_TARGET/.github/review-agents/artemis.md" && -f "$SCRATCH_TARGET/.github/workflows/review.yml" && ! -e "$SCRATCH_TARGET/.github/review-agents/pantheon" ]]; then
+  pass "packaged install.sh installed personas + generated review.yml, vendored no pantheon/ package"
 else
   fail "packaged install.sh did not install the expected gate files: $install_out"
 fi

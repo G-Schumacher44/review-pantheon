@@ -274,13 +274,13 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini", "cursor")
 _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 
 # The verdict-contract JSON Schema (DESIGN.md's "Verdict contract") — the SAME schema text
-# action.yml/action/review.yml already pass to claude-code-action's own `claude_args` via
-# `--json-schema` (kept byte-identical deliberately, not re-derived, so every surface that can
-# enforce a schema at all enforces the identical one). Issue #26 item 3: the CLI (Python) lane
-# used to invoke `claude -p ...` and merely HOPE the model ended with a trailing JSON object,
-# relying entirely on pantheon.verdict's own trailing-JSON-extraction fallback — the flag this
-# constant is used with (`--json-schema`, confirmed present via `claude --help`) exists and the
-# two GitHub Action surfaces already use it; this module's own `_claude()` now does too.
+# action.yml already passes to claude-code-action's own `claude_args` via `--json-schema` (kept
+# byte-identical deliberately, not re-derived, so every surface that can enforce a schema at all
+# enforces the identical one). Issue #26 item 3: the CLI (Python) lane used to invoke
+# `claude -p ...` and merely HOPE the model ended with a trailing JSON object, relying entirely
+# on pantheon.verdict's own trailing-JSON-extraction fallback — the flag this constant is used
+# with (`--json-schema`, confirmed present via `claude --help`) exists and the GitHub Action
+# surface already uses it; this module's own `_claude()` now does too.
 #
 # THE SCHEMA MIRRORS THE DECISION SURFACE ONLY — it must never be stricter than
 # `pantheon.verdict.decide()`, or a verdict the binding contract ACCEPTS becomes UNVERIFIED
@@ -296,11 +296,12 @@ _WRAPPER_SCRIPT_NAME = "pantheon-git-readonly"
 # a much weaker finding, and the schema is the strongest shape signal the generation gets.
 # Permissive-but-declared keeps the guidance without reintroducing the strictness.
 #
-# THREE copies, not two: this constant, `action.yml`'s `JSON_SCHEMA`, and `action/review.yml`'s
-# INLINE `--json-schema '...'` argument, which has NO variable name — a grep for `JSON_SCHEMA`
-# finds two and reports the third absent, which is how it once drifted a revision behind. The
-# byte-identity test searches by content for that reason. Change one, change all three (#32
-# tracks deriving them from this constant instead).
+# TWO copies, not three: this constant and `action.yml`'s `JSON_SCHEMA`. A third copy used to
+# live in the vendored `action/review.yml` as an INLINE `--json-schema '...'` argument with NO
+# variable name — a grep for `JSON_SCHEMA` found two and reported the third absent, which is how
+# it once drifted a revision behind; the byte-identity test searches by content for that reason.
+# Issue #36 deleted that vendored duplicate. Change one, change both (#32 tracks deriving them
+# from this constant instead).
 VERDICT_JSON_SCHEMA = (
     '{"type":"object","properties":{"agent":{"type":"string"},"verdict":{"type":"string"},'
     '"has_blocker":{"type":"boolean"},"findings":{"type":"array","items":{"type":"object",'
@@ -923,9 +924,9 @@ def _claude(
     module's own docstring's per-lane disclosures) and this lane's own PRE-fix behavior relied
     entirely on ``pantheon.verdict``'s trailing-JSON-extraction scan to find a verdict object
     somewhere in the model's raw text output — hope, not enforcement. ``claude --help`` documents
-    ``--json-schema <schema>``, and the two GitHub Action surfaces (``action.yml``,
-    ``action/review.yml``) already pass an identical schema via ``claude_args`` and read the
-    result from ``structured_output``. Confirmed live (this fix's own investigation, a real
+    ``--json-schema <schema>``, and the GitHub Action surface (``action.yml``) already passes an
+    identical schema via ``claude_args`` and reads the result from ``structured_output``.
+    Confirmed live (this fix's own investigation, a real
     ``claude -p ... --json-schema '<schema>' --output-format json`` invocation, WITHOUT
     ``--bare``): stdout is ONE JSON envelope object carrying a ``structured_output`` key holding
     the schema-validated object itself — :func:`_extract_structured_output` (see its own

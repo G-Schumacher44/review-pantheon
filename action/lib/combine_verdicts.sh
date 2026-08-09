@@ -9,10 +9,10 @@
 # bootstrap.sh's CLI-only install footprint (which never touches action/). `pantheon.render` is
 # the one renderer implementation every lane calls — this file's job is just to normalize this
 # job's per-agent step outputs (env vars, see below) into its `<NAME>_*` env-var contract and
-# call it. action/review.yml (the vendored, install.sh-Way-A workflow) is the one render path
-# that can't invoke it directly — a target repo never gets a copy of pantheon/ except as a
-# base-pinned $RUNNER_TEMP read — so it stays a hand-synced inline copy; see its own header
-# comment.
+# call it. The vendored action/review.yml used to be a second render path that couldn't invoke
+# it directly (a target repo never got a copy of pantheon/ except as a base-pinned $RUNNER_TEMP
+# read, so it stayed a hand-synced inline copy) — issue #36 deleted that surface, leaving this
+# script as the only place that assembles the comment for an Action-lane run.
 #
 # Usage: combine_verdicts.sh <space-separated agent list, e.g. "artemis apollo">
 #
@@ -29,8 +29,7 @@
 #   POST_COMMENT      - "true"/"false"; "false" computes the result and prints it but posts
 #                       nothing (the action's own exit status still reflects the gate result
 #                       either way, via GITHUB_OUTPUT's overall_color below)
-#   APOLLO_DOCS_SKIPPED - "true"/"false"; synthesizes apollo's docs-only SKIPPED result the
-#                       same way action/review.yml's "Save verdict artifact" step does, since
+#   APOLLO_DOCS_SKIPPED - "true"/"false"; synthesizes apollo's docs-only SKIPPED result since
 #                       there's no separate artifact-writing step in this flow to do it in
 # Writes: $GITHUB_OUTPUT's overall_color (green|yellow|red|unverified).
 set -uo pipefail
