@@ -33,7 +33,11 @@ def _fallback_version(pyproject_path: str | None = None) -> str:
     tree (this path only runs when the package is NOT pip-installed, so pyproject.toml sits
     next to this package by construction) and mark it `+local` so it can never masquerade as a
     real installed release. Regex, not tomllib — tomllib is 3.11+ and this package supports
-    3.9; an anchored key match on the [project] table's own line is enough for a fallback.
+    3.9. The match is genuinely scoped to the [project] table: the table's body is isolated
+    first (from its `[project]` header to the next `[` table header), then the version key is
+    matched inside that slice only — a `version =` line in any other table, before or after,
+    never satisfies it (Codex/CodeRabbit finding on PR #46's first cut, where the regex
+    scanned the whole file and the docstring merely claimed table-scoping).
     `pyproject_path` exists for the test seam only — production callers pass nothing."""
     import os
     import re
@@ -41,9 +45,11 @@ def _fallback_version(pyproject_path: str | None = None) -> str:
     pyproject = pyproject_path or os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")
     try:
         with open(pyproject, encoding="utf-8") as fh:
-            match = re.search(r'^version\s*=\s*"([^"]+)"', fh.read(), flags=re.MULTILINE)
+            text = fh.read()
     except OSError:
-        match = None
+        return "0+unknown"
+    table = re.search(r"^\[project\]\s*$(.*?)(?=^\[|\Z)", text, flags=re.MULTILINE | re.DOTALL)
+    match = re.search(r'^version\s*=\s*"([^"]+)"', table.group(1), flags=re.MULTILINE) if table else None
     return f"{match.group(1)}+local" if match else "0+unknown"
 
 

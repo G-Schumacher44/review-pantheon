@@ -1106,3 +1106,29 @@ def test_fallback_version_degrades_to_unknown_never_a_fake_release(tmp_path) -> 
     nested = tmp_path / "nested.toml"
     nested.write_text('[tool.thing]\n  version = "1.2.3"\n', encoding="utf-8")
     assert pantheon._fallback_version(str(nested)) == "0+unknown"
+
+
+def test_fallback_version_only_reads_the_project_table(tmp_path) -> None:
+    """An UNINDENTED `version =` in a foreign table — before or after [project] — must never
+    win over (or substitute for) [project]'s own version. This is the Codex/CodeRabbit finding
+    from PR #46's first cut: the original regex scanned the whole file, so [tool.x]'s version
+    shadowed the release version whenever its table came first."""
+    import pantheon
+
+    foreign_first = tmp_path / "foreign_first.toml"
+    foreign_first.write_text(
+        '[tool.x]\nversion = "6.6.6"\n\n[project]\nname = "x"\nversion = "1.2.3"\n',
+        encoding="utf-8",
+    )
+    assert pantheon._fallback_version(str(foreign_first)) == "1.2.3+local"
+
+    foreign_only = tmp_path / "foreign_only.toml"
+    foreign_only.write_text('[tool.x]\nversion = "6.6.6"\n', encoding="utf-8")
+    assert pantheon._fallback_version(str(foreign_only)) == "0+unknown"
+
+    project_then_foreign = tmp_path / "project_then_foreign.toml"
+    project_then_foreign.write_text(
+        '[project]\nname = "x"\nversion = "1.2.3"\n\n[tool.x]\nversion = "6.6.6"\n',
+        encoding="utf-8",
+    )
+    assert pantheon._fallback_version(str(project_then_foreign)) == "1.2.3+local"
