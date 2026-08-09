@@ -235,11 +235,15 @@ fi
 # round-8 shape, `rm -rf .mcp.json .claude CLAUDE.md`, as HISTORY — a YAML `#`-prefixed line,
 # after stripping leading whitespace, same convention `grep -v` filters elsewhere in this repo's
 # own suites use for "this text describes past code, not live code").
-# Any rm form is destructive here — recursive OR not, flags or none: `rm -f .mcp.json`,
-# `rm --force CLAUDE.md`, `rm -f -r .claude`, and bare `rm .mcp.json` all delete adopter
-# content just as surely as the original round-8 `rm -rf` shape did. Option tokens are matched
-# as zero-or-more `-…` words so no particular flag (or any flag at all) is required.
-destructive_hits="$(grep -nE '(^|[^a-zA-Z0-9_-])rm[[:space:]]+(-[^[:space:]]+[[:space:]]+)*[^[:space:]]*(\.mcp\.json|\.claude([^-]|$)|CLAUDE\.md)' "$ACTION_YML" | grep -vE ':[[:space:]]*#' || true)"
+# Any rm form is destructive here — recursive OR not, flags or none, target in ANY argument
+# position: `rm -f .mcp.json`, `rm --force CLAUDE.md`, `rm -f -r .claude`, bare `rm .mcp.json`,
+# AND `rm -rf build/ .mcp.json` (target after other paths) all delete adopter content just as
+# surely as the original round-8 `rm -rf` shape did. So the match is deliberately maximal:
+# `rm` followed by ANYTHING on the same line that ends up naming adopter content. Bias is
+# fail-closed — a non-comment line that says `rm` and mentions .mcp.json/.claude/CLAUDE.md
+# anywhere after it trips the guard even if the mention were somehow benign; that's the right
+# failure mode for a class this repo has already shipped once (round 8).
+destructive_hits="$(grep -nE '(^|[^a-zA-Z0-9_-])rm[[:space:]]+.*(\.mcp\.json|\.claude([^-]|$)|CLAUDE\.md)' "$ACTION_YML" | grep -vE ':[[:space:]]*#' || true)"
 if [[ -n "$destructive_hits" ]]; then
   fail "action.yml contains a LIVE rm (any form) targeting .mcp.json/.claude/CLAUDE.md — this would destroy a consuming repo's own tracked content:"
   while IFS= read -r line; do echo "    $line"; done <<<"$destructive_hits"

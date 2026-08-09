@@ -109,8 +109,10 @@ What that means in practice:
 - **Pre-#36 note:** a repo whose `.github/workflows/review.yml` still carries the OLD vendored
   `action/review.yml` (installed before issue #36, never re-run through `install.sh` since) has a
   separate `fork-notice` job and the `review` job skipped at *job* level instead — the check
-  reports **skipped**, not success, under that older shape. Re-run `install.sh` to pick up the
-  current thin-caller stub and its uniform, single-surface behavior described above.
+  reports **skipped**, not success, under that older shape. To migrate, **delete the old
+  `.github/workflows/review.yml`, then re-run `install.sh`** — a bare re-run is not enough:
+  the installer never overwrites a file that lacks its GENERATED marker (the old vendored copy
+  has none), so it reports a skip with this same delete-and-rerun instruction instead.
 
   If you want required-means-reviewed, adopt one of the patterns below first.
 

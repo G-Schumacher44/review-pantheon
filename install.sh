@@ -212,7 +212,10 @@ jobs:
       - uses: G-Schumacher44/review-pantheon@${WAY_A_PIN_SHA} # ${WAY_A_PIN_RELEASE} — see this file's header comment for how to re-pin
         with:
           # Set exactly one of these two — it fails loud otherwise. No Bedrock/Vertex/Foundry/
-          # OIDC passthrough here; see docs/SETUP.md's Way C if you need pure cloud-provider auth.
+          # OIDC passthrough here — or in ANY install method (the composite action declares no
+          # cloud-provider inputs). If you need pure cloud-provider auth, the supported path is
+          # maintaining your own workflow that wires anthropics/claude-code-action directly —
+          # see docs/SETUP.md's "Bedrock/Vertex/Foundry" note for the full recipe.
           claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
           # personas_path: .github/review-agents  # point at this repo's own vendored persona
