@@ -210,7 +210,12 @@ done
 # Run it from an unrelated directory, via its absolute prefix path — proves the installed venv
 # resolves correctly from a prefix install, not just from an in-repo checkout.
 NEUTRAL_DIR="$(mktemp -d)"
-PREFIX_HELP_OUT="$(cd "$NEUTRAL_DIR" && "$SCRATCH_PREFIX/venv/bin/pantheon" --help 2>&1)"
+# NO_COLOR: Python 3.14's argparse colorizes --help, and it honors FORCE_COLOR even when
+# stdout is a pipe. A contributor with FORCE_COLOR set in their shell would otherwise get
+# ANSI escapes wrapped around "usage:" and this anchored grep would fail on a perfectly
+# healthy install. CI does not set it, so the breakage only ever shows up locally — the
+# environment-dependent-test shape this repo keeps finding.
+PREFIX_HELP_OUT="$(cd "$NEUTRAL_DIR" && NO_COLOR=1 "$SCRATCH_PREFIX/venv/bin/pantheon" --help 2>&1)"
 PREFIX_HELP_STATUS=$?
 rm -rf "$NEUTRAL_DIR"
 
