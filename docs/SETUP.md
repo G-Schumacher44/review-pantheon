@@ -190,10 +190,16 @@ composite action** — `anthropics/claude-code-action` itself supports them (`us
 `use_vertex`, `use_foundry`, `anthropic_federation_rule_id`, and friends — see
 [its cloud-providers docs](https://github.com/anthropics/claude-code-action/blob/main/docs/cloud-providers.md)),
 but `action.yml`'s own auth-assert step requires one of the two inputs above and doesn't expose
-a passthrough for the cloud-provider ones. If you need pure cloud-provider auth (no Anthropic
-token at all), use Way A instead: `install.sh` generates `.github/workflows/review.yml` into
-your repo, which is then yours to edit — add the cloud-provider inputs to its `with:` block
-directly (it's a real, short, committed file, not a hidden dependency — editing it is expected).
+a passthrough for the cloud-provider ones. **This is a hard gap on every install method now**
+(issue #36): Way A's generated stub calls this same `action.yml` via `uses:`, so editing its
+`with:` block can't add inputs `action.yml` itself doesn't declare — GitHub Actions passes
+unknown `with:` inputs through untouched, it doesn't wire them anywhere. If you need pure
+cloud-provider auth (no Anthropic token at all), the only path today is the air-gapped
+alternative from Way A's own paragraph above: vendor `action.yml` + `action/lib/*.sh` +
+`agents/` + `pantheon/` into your own tree and write a workflow that calls
+`anthropics/claude-code-action` directly with the cloud-provider inputs — action.yml's own
+`claude_code_oauth_token`/`anthropic_api_key`/`claude_args` steps are the reference for how to
+wire that action correctly.
 
 **Post-install checklist:**
 
