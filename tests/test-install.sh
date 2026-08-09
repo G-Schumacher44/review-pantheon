@@ -403,8 +403,8 @@ rm -rf "$FIXTURE_ROOT" "$T6"
 #    at least one tool flag. HOME is overridden per-invocation
 #    (`HOME=$SCRATCH "$INSTALL" --user ...`) so none of this ever touches the
 #    real $HOME — verified below by snapshotting the real paths a regression
-#    could leak into (including $HOME/.claude/agents, which on a dev-cockpit
-#    machine is a symlink into a real tracked repo) before and after every
+#    could leak into (including $HOME/.claude/agents, which on some machines
+#    is a symlink into a real tracked repo) before and after every
 #    invocation in this section, and asserting they're byte-for-byte
 #    unchanged.
 # ---------------------------------------------------------------------------
