@@ -19,9 +19,8 @@
 # Scope: this file covers what Parts B/B2 of the bash suite cover for the CLI lane specifically —
 # apollo-only spec-file gating, base-SHA-pinned rules/spec reads (never the working tree), the
 # fence-collision defense, and the follow-up-mode note. It does NOT re-cover Parts A/C/D/E (the
-# Action-lane / action.yml / action/review.yml YAML-embedded steps) — those are orthogonal to
-# this port (Python touches the CLI lane only) and stay exercised, unchanged, by the original
-# bash suite.
+# Action-lane / action.yml YAML-embedded steps) — those are orthogonal to this port (Python
+# touches the CLI lane only) and stay exercised, unchanged, by the original bash suite.
 #
 # No test framework — plain bash, `bash tests/test-prompt-assembly-python.sh` is the whole
 # invocation.

@@ -44,61 +44,54 @@ PERSONAS=(apollo artemis diogenes plato socrates)
 SKILLS=(gate counsel spec-driven design-contract)
 
 # ---------------------------------------------------------------------------
-# 1. Default (no flags) install is unchanged — gate files land, no editor/CLI dirs appear.
+# 1. Default (no flags) install — personas + REVIEW_RULES.md land, review.yml is GENERATED as a
+#    thin caller of the published action (issue #36 — no vendored pantheon/ package or
+#    action/review.yml copy any more), no editor/CLI dirs appear.
 # ---------------------------------------------------------------------------
 T1="$(mktemp -d)"
 "$INSTALL" "$T1" >/dev/null
 
 assert_file "default install: personas copied to .github/review-agents" "$T1/.github/review-agents/artemis.md"
-assert_file "default install: review.yml workflow copied" "$T1/.github/workflows/review.yml"
+assert_file "default install: review.yml workflow generated" "$T1/.github/workflows/review.yml"
+assert_file "default install: REVIEW_RULES.md installed" "$T1/REVIEW_RULES.md"
 
-# The verdict decider's real implementation, vendored as a package — action/review.yml's
-# "Resolve gate scripts (base-pinned)" step base-pin-reads exactly these four files at
-# .github/review-agents/pantheon/{__init__,jqjson,verdict,render}.py; "Resolve read-only git wrapper
-# (base-pinned)" base-pin-reads pantheon/execution.py. Missing any one of them is a dead
-# reference at gate-run time.
-for pyfile in __init__.py jqjson.py verdict.py render.py execution.py; do
-  assert_file "default install: pantheon/$pyfile copied" "$T1/.github/review-agents/pantheon/$pyfile"
-  if cmp -s "$ROOT/pantheon/$pyfile" "$T1/.github/review-agents/pantheon/$pyfile"; then
-    pass "default install: pantheon/$pyfile matches pantheon/$pyfile verbatim"
+# The generated workflow is a THIN CALLER, not a vendored reimplementation — it must pin
+# review-pantheon itself to a full 40-char commit SHA (install.sh's WAY_A_PIN_SHA), never a
+# moving tag, matching the discipline action.yml applies to anthropics/claude-code-action.
+WAY_A_SHA="$(grep -oE '^WAY_A_PIN_SHA="[0-9a-f]+"' "$INSTALL" | grep -oE '[0-9a-f]+' )"
+if [[ -n "$WAY_A_SHA" ]]; then
+  assert_contains "default install: generated review.yml pins review-pantheon to WAY_A_PIN_SHA" \
+    "$T1/.github/workflows/review.yml" "G-Schumacher44/review-pantheon@$WAY_A_SHA"
+else
+  fail "could not read WAY_A_PIN_SHA out of install.sh to check against"
+fi
+
+if grep -qE 'G-Schumacher44/review-pantheon@[A-Za-z0-9._-]+' "$T1/.github/workflows/review.yml" \
+  && ! grep -qE 'G-Schumacher44/review-pantheon@[0-9a-f]{40}' "$T1/.github/workflows/review.yml"; then
+  fail "default install: generated review.yml pins review-pantheon to something OTHER than a full 40-char commit SHA"
+else
+  pass "default install: generated review.yml's review-pantheon pin is a full commit SHA (or absent)"
+fi
+
+if python3 -c 'import yaml' 2>/dev/null; then
+  if python3 -c "import yaml; yaml.safe_load(open('$T1/.github/workflows/review.yml'))" 2>/dev/null; then
+    pass "default install: generated review.yml parses as valid YAML"
   else
-    fail "default install: pantheon/$pyfile differs from the shipped pantheon/$pyfile"
+    fail "default install: generated review.yml failed to parse as YAML"
   fi
-done
-
-# Live proof the vendored trio is actually IMPORTABLE and produces the same decision a real gate
-# run would — not just "the right bytes landed," but "this is a real, self-contained package a
-# base-pinned $PYTHONPATH can run standalone." Invoked by pantheon/verdict.py's own absolute
-# path, matching action/review.yml's own fixed invocation shape (never `python3 -m
-# pantheon.verdict` — a Codex P1 finding on this repo's history: `-m` prepends the caller's cwd
-# to sys.path[0] before PYTHONPATH, which would shadow this exact vendored copy with any
-# same-named pantheon/verdict.py sitting in cwd; see action/review.yml's "Decide verdict" step
-# comment for the full rationale).
-VENDORED_RAW="$(mktemp)"
-printf '%s' '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"ok"}' > "$VENDORED_RAW"
-if vendored_decision="$(PYTHONPATH="$T1/.github/review-agents" python3 "$T1/.github/review-agents/pantheon/verdict.py" artemis "$VENDORED_RAW" 2>/dev/null)" \
-  && grep -q '"color": "green"' <<<"$vendored_decision"; then
-  pass "default install: vendored pantheon/ package is importable and decides via its own absolute path (cwd-shadow-safe)"
 else
-  fail "default install: vendored pantheon/ package failed to import/decide (got: $vendored_decision)"
+  echo "note: python3 yaml (PyYAML) unavailable — skipping generated review.yml YAML-parse check, non-fatal"
 fi
-rm -f "$VENDORED_RAW"
 
-# pantheon/execution.py — action/review.yml's claude_args hardcodes a base-pinned invocation of
-# this exact vendored module as the readonly tier's sole Bash prefix (Codex P1 finding: a bare
-# `Bash(git diff *)`-style pattern can't tell a read-only git subcommand from the same subcommand
-# carrying a writing/execution-capable flag). Must land, or the vendored workflow's `readonly`
-# tier is a dead reference on install. Live proof it's actually invokable the same way
-# action/review.yml invokes it (`python3 <path> wrapper <subcommand> ...`), from a scratch git
-# repo so a real `status` call has something to run against.
-WRAPPER_SCRATCH_REPO="$(mktemp -d)"
-git -C "$WRAPPER_SCRATCH_REPO" init -q
-if wrapper_out="$(cd "$WRAPPER_SCRATCH_REPO" && python3 "$T1/.github/review-agents/pantheon/execution.py" wrapper status 2>&1)"; then
-  pass "default install: vendored pantheon/execution.py wrapper runs and accepts a legit 'status' call ($wrapper_out)"
+# No vendored pantheon/ package any more — the generated thin caller delegates all gate logic to
+# review-pantheon's own action.yml checkout at github.action_path, so install.sh has nothing left
+# to vendor for base-pinning to find (issue #36 deleted the ~1,000-line reimplementation that
+# needed it).
+if [[ ! -e "$T1/.github/review-agents/pantheon" ]]; then
+  pass "default install: no vendored pantheon/ package (nothing left to base-pin against)"
 else
-  fail "default install: vendored pantheon/execution.py wrapper failed on a legit 'status' call: $wrapper_out"
+  fail "default install: a pantheon/ package was vendored — should be dead weight since action/review.yml was deleted"
 fi
-rm -rf "$WRAPPER_SCRATCH_REPO"
 
 if [[ ! -e "$T1/.claude" && ! -e "$T1/.cursor" && ! -e "$T1/.agents" && ! -e "$T1/.gemini" ]]; then
   pass "default install: no editor/CLI dirs created without flags"
@@ -302,9 +295,7 @@ rm -rf "$T3"
 FIXTURE_ROOT="$(mktemp -d)"
 mkdir -p "$FIXTURE_ROOT/agents"
 cp "$INSTALL" "$FIXTURE_ROOT/install.sh"
-ln -s "$ROOT/action" "$FIXTURE_ROOT/action"
 ln -s "$ROOT/skills" "$FIXTURE_ROOT/skills"
-ln -s "$ROOT/pantheon" "$FIXTURE_ROOT/pantheon"
 cp "$ROOT/REVIEW_RULES.example.md" "$FIXTURE_ROOT/REVIEW_RULES.example.md"
 cp "$ROOT"/agents/*.md "$FIXTURE_ROOT/agents/"
 

@@ -3,9 +3,9 @@
 This is the ONE Python implementation of the rule DESIGN.md's "Two runtimes, one rule" section
 describes. It absorbed the standalone ``action/decide_verdict.py`` script's logic byte-for-byte
 (same decision order, same fields, same fail-closed posture) — "byte-identical DECISIONS are the
-requirement now." The switchover is complete: ``action/review.yml``'s "Decide verdict" step now
-invokes this module directly (by its own base-pinned absolute path), and ``action/decide_verdict.py``
-itself was removed alongside the rest of the bash CLI in #29.
+requirement now." The switchover is complete: ``action.yml``'s "Decide verdict" steps invoke this
+module directly (by its own absolute path — never ``-m``, see that file's header comment), and
+``action/decide_verdict.py`` itself was removed alongside the rest of the bash CLI in #29.
 
 This module also replaced the retired bash CLI's ``verdict.sh`` (the bash+jq half of the same
 two-runtime rule, removed in #29) for the CLI lane — ``pantheon.cli`` now calls this module
@@ -310,9 +310,9 @@ def emit_github_output(decision: dict) -> None:
     set — a no-op everywhere else (this module's own migration-exam fixture,
     tests/test-verdict-decision-python.sh, never sets it, and neither does a plain CLI-lane
     invocation). This is workflow plumbing, not part of the decision rule itself (see this
-    module's own docstring) — added at port slice 5, absorption, so that ``python3 -m
-    pantheon.verdict`` is what both Action call sites invoke (``action.yml``'s composite steps and
-    ``action/review.yml``'s vendored decide step — both read ``steps.<id>.outputs.*`` downstream).
+    module's own docstring) — added at port slice 5, absorption, so that this module's own
+    "Decide verdict" invocation (``action.yml``'s five composite steps) can read the result back
+    via ``steps.<id>.outputs.*`` downstream.
 
     The wire format: every key uses the multi-line-safe ``<<delim`` heredoc convention, with a
     random per-call delimiter via :mod:`secrets` so a value's own text can never terminate the
@@ -348,8 +348,8 @@ def emit_github_output(decision: dict) -> None:
         out.write(f"top_finding<<{delim}\n{decision['top_finding']}\n{delim}\n")
         out.write(f"findings_json<<{delim}\n{jqjson.dumps(verdict_json, ensure_ascii=True)}\n{delim}\n")
         # invariant_fired / reason: needed by the combined-comment renderer (pantheon.render, via
-        # action.yml's combine step / action/review.yml's own comment-build step) to show the
-        # "stated verdict was overridden" notice when the blocker invariant fired.
+        # action.yml's combine step) to show the "stated verdict was overridden" notice when the
+        # blocker invariant fired.
         # SAFE as a single line, and the ONLY exception: this value is a boolean literal this
         # module computes, never model-derived. Do not copy this line as a template for a new key —
         # anything carrying model text needs the heredoc form above, or the injection reopens.

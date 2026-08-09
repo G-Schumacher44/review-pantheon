@@ -123,9 +123,9 @@ Every agent run must end with a single JSON object (and nothing after it):
 - Gate signal precedence (worst wins): any red → 🔴 blocked; any unparseable/missing verdict →
   🟠 NOT GATED (fail); any yellow or loud skip → 🟡 review notes; all green → 🟢.
 - **The blocker invariant is enforced, not just documented.** `pantheon.verdict` — the ONE
-  verdict-decision implementation, called by every lane (the CLI's `pantheon gate`, the
-  published action's five "Decide verdict (<agent>)" steps, and the vendored `action/review.yml`'s
-  own "Decide verdict" step) — checks it after schema validation: if any finding has
+  verdict-decision implementation, called by every lane (the CLI's `pantheon gate` and the
+  published action's five "Decide verdict (<agent>)" steps) — checks it after schema
+  validation: if any finding has
   `severity: "blocker"` OR `has_blocker: true`, the signal is forced to red regardless of the
   stated `verdict` field, and the gate logs that the invariant fired. An object where the
   verdict and the findings disagree is treated as red, not trusted at face value. A finding with
@@ -164,11 +164,11 @@ reasons, and only one of them is schema-checked:
   other.
 
   This binds the `--json-schema` text the provider lanes hand to the model too. It lives in
-  **three** places — `pantheon.providers.VERDICT_JSON_SCHEMA`, `action.yml`'s `JSON_SCHEMA`, and
-  `action/review.yml`'s inline `--json-schema` argument — kept byte-identical, enforced by a test
-  that searches for the schema's *content* rather than a variable name (the third copy has no
-  variable, so a name-based search reports it absent — which is how it once drifted a revision
-  behind the other two).
+  **two** places — `pantheon.providers.VERDICT_JSON_SCHEMA` and `action.yml`'s `JSON_SCHEMA` —
+  kept byte-identical, enforced by a test that searches for the schema's *content* rather than a
+  variable name (a third copy used to live inline in the vendored `action/review.yml`, with no
+  variable name at all — a name-based search reported it absent, which is how it once drifted a
+  revision behind the other two; issue #36 deleted that copy).
 
   **That schema may never be stricter than the decider.** A schema that rejects a verdict
   `decide()` would have accepted fails closed in the wrong direction: the run surfaces as
@@ -267,17 +267,11 @@ nested inside that fold as its own collapsed block, so the machine-readable form
 just no longer the primary read. `pantheon.render` is the one implementation of this — invoked
 by `pantheon gate` directly and by `action/lib/combine_verdicts.sh` (the published action's
 renderer), so the CLI surface and the published-action surface read identically by construction,
-not by hand-kept-in-sync wording. `action/review.yml` (the vendored, install.sh-Way-A workflow)
-reaches it PARTIALLY. A target repo only ever gets the specific files base-pinned into
-`$RUNNER_TEMP` (see "Security posture" below), and `render.py` is now among them: `install.sh`
-vendors it and the workflow base-pins it, so that lane calls the real `sanitize_inline` on
-model-authored `verdict`/`top_finding` at WRITE time — the escaping is one implementation shared
-with the composite lane, not a second copy of the rules. What remains hand-synced on that surface
-is only the comment's LAYOUT: its "Build and post combined comment" step still assembles the
-plainer table + raw-JSON-dump shape in bash rather than calling `render_comment`, because the
-combine step runs in a separate job with no checkout and therefore no `pantheon` package. Closing
-that last gap needs the renderer reachable from that job (a second base-pin, or passing the
-rendered comment forward as an artifact) — not done here.
+not by hand-kept-in-sync wording. Every workflow-file install method (Way A, Way C) is a thin
+caller of the published action, so it inherits this identical rendering rather than reaching it
+partially — the vendored `action/review.yml` used to be a separate, partial-reach render path
+(a hand-synced inline comment-build step that called the real `sanitize_inline` for escaping but
+assembled its own plainer table shape) until issue #36 deleted it.
 
 ## House rules are pluggable
 
@@ -311,8 +305,8 @@ history, not here — a contract describes what's true now, not how it got that 
 
 - **PR metadata validation.** PR number (`^[0-9]+$`), branch names (`^[A-Za-z0-9._/-]+$`), and
   head/base SHA (hex) are validated before any of them touch a prompt or a shell command on
-  every surface — the CLI (`pantheon.cli`), the published action (`action.yml`), and the
-  vendored workflow (`action/review.yml`). Unsafe metadata → UNVERIFIED, not a crash.
+  every surface — the CLI (`pantheon.cli`) and the published action (`action.yml`), which every
+  workflow-file install method inherits. Unsafe metadata → UNVERIFIED, not a crash.
 - Model output is never interpolated into shell (`run:`) directly — it travels via files and
   env vars.
 - **Base-SHA-pinned context file reads.** `REVIEW_RULES.md` and the spec file (`DESIGN.md` by
@@ -338,17 +332,24 @@ history, not here — a contract describes what's true now, not how it got that 
   action's-own-checkout, i.e. trusted provenance; ⚠️ = judgment content, not gate behavior, kept
   as a documented exception; — = not applicable to that surface):
 
-  | File read | CLI (`pantheon gate`) | Published action (`action.yml`) | Vendored workflow (`action/review.yml`) |
-  |---|---|---|---|
-  | Personas (`agents/*.md`) | ✅ review-pantheon's own installed copy, never the target repo's | ✅ `$ACTION_PATH/agents` by default; ✅ base-pinned into `$RUNNER_TEMP` when `personas_path` is set | ✅ base-pinned into `$RUNNER_TEMP` |
-  | Verdict decider (`pantheon.verdict`) | ✅ this repo's own installed package | ✅ `$ACTION_PATH/pantheon/verdict.py` | ✅ base-pinned into `$RUNNER_TEMP` (its `__init__.py`/`jqjson.py`/`verdict.py` dependency closure, plus `render.py` for write-time `sanitize_inline`) |
-  | Read-only git wrapper (`pantheon.execution`) | ✅ this repo's own installed package | ✅ `$ACTION_PATH/pantheon/execution.py` | ✅ base-pinned into `$RUNNER_TEMP` |
-  | House rules / spec (`REVIEW_RULES.md` / `DESIGN.md`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned into `$RUNNER_TEMP` |
-  | `gate.conf`'s `execution=`/`provider=`/`rules_file=`/`spec_file=`/`agents=` keys | ✅ base-pinned (all five, one `git show`+parse) | — (no `gate.conf`; these are explicit inputs, operator-typed, not PR content) | — (no config surface at all) |
-  | `gate.conf`'s `model=`/`base_branch=` keys | ⚠️ working-tree-sourced — neither affects tool-execution breadth or which file is trusted as a judgment boundary (`model` only picks which model an already-scoped provider uses; `base_branch` is a fallback only ever consulted when `gh pr view` itself doesn't report a `baseRefName`) | — | — |
-  | `.review-gate-state.json` (follow-up-mode `reviewed_sha`) | ⚠️ working-tree-sourced (see "Honest limit" below) | — | — |
-  | Prompt-builder code (`pantheon.cli`, `action/lib/build_prompt.sh`, `action/lib/combine_verdicts.sh`) | ✅ this repo's own installed package | ✅ `$ACTION_PATH/...` | ✅ inline in the workflow file itself (this repo's own committed YAML, not the target repo's content) |
-  | The diff / file contents under review | untrusted **by design** — this is the data the gate exists to evaluate; never treated as instructions (`agents/*.md`'s "Untrusted data, not instructions") | same | same |
+  | File read | CLI (`pantheon gate`) | Published action (`action.yml`) |
+  |---|---|---|
+  | Personas (`agents/*.md`) | ✅ review-pantheon's own installed copy, never the target repo's | ✅ `$ACTION_PATH/agents` by default; ✅ base-pinned into `$RUNNER_TEMP` when `personas_path` is set |
+  | Verdict decider (`pantheon.verdict`) | ✅ this repo's own installed package | ✅ `$ACTION_PATH/pantheon/verdict.py` |
+  | Read-only git wrapper (`pantheon.execution`) | ✅ this repo's own installed package | ✅ `$ACTION_PATH/pantheon/execution.py` |
+  | House rules / spec (`REVIEW_RULES.md` / `DESIGN.md`) | ✅ base-pinned (`git show $BASE_SHA:path`) | ✅ base-pinned (`git show $BASE_SHA:path`) |
+  | `gate.conf`'s `execution=`/`provider=`/`rules_file=`/`spec_file=`/`agents=` keys | ✅ base-pinned (all five, one `git show`+parse) | — (no `gate.conf`; these are explicit inputs, operator-typed, not PR content) |
+  | `gate.conf`'s `model=`/`base_branch=` keys | ⚠️ working-tree-sourced — neither affects tool-execution breadth or which file is trusted as a judgment boundary (`model` only picks which model an already-scoped provider uses; `base_branch` is a fallback only ever consulted when `gh pr view` itself doesn't report a `baseRefName`) | — |
+  | `.review-gate-state.json` (follow-up-mode `reviewed_sha`) | ⚠️ working-tree-sourced (see "Honest limit" below) | — |
+  | Prompt-builder code (`pantheon.cli`, `action/lib/build_prompt.sh`, `action/lib/combine_verdicts.sh`) | ✅ this repo's own installed package | ✅ `$ACTION_PATH/...` |
+  | The diff / file contents under review | untrusted **by design** — this is the data the gate exists to evaluate; never treated as instructions (`agents/*.md`'s "Untrusted data, not instructions") | same |
+
+  Every workflow-file install method that lands in a target repo (`install.sh`'s Way A,
+  `examples/review-gate.yml`'s Way C) is a thin caller of the published action above, not a
+  separate surface — issue #36 deleted the vendored `action/review.yml` reimplementation that
+  used to have its own row here (base-pinning everything into `$RUNNER_TEMP` itself, since a
+  target repo's own checkout is untrusted PR content). That surface's whole reason to exist —
+  duplicating this provenance discipline a second time in bash — is gone with it.
 
   **A tracked symlink needs its own resolution, not a bare `git show`.** Git stores a tracked
   symlink as a mode-120000 blob whose "content" IS the link-target string, so a bare
@@ -386,11 +387,10 @@ history, not here — a contract describes what's true now, not how it got that 
   README quickstart) — the verification step there is "confirm the pinned SHA matches a release
   you trust," not "guess the interface," since the interface itself is now grounded (see
   "Published action" below).
-- Both the published action and the vendored workflow pass the workflow token to
-  `claude-code-action` explicitly (`github_token: ${{ github.token }}` / `${{ inputs.github_token }}`),
-  so consumers never need to grant `id-token: write` — that permission is only needed for
-  claude-code-action's internal OIDC-token-exchange fallback, which it skips entirely once a
-  `github_token` input is supplied.
+- The published action passes the workflow token to `claude-code-action` explicitly
+  (`github_token: ${{ inputs.github_token }}`), so consumers never need to grant
+  `id-token: write` — that permission is only needed for claude-code-action's internal
+  OIDC-token-exchange fallback, which it skips entirely once a `github_token` input is supplied.
 - **Tiered tool execution — read-only by default.** Every provider invocation's tool set is
   scoped by an `execution` setting: `readonly` (the default — `gate.conf`'s `execution=`, the
   CLI's `--execution` flag, or `action.yml`'s `execution` input) restricts Bash to exactly one
@@ -408,19 +408,15 @@ history, not here — a contract describes what's true now, not how it got that 
     `action.yml` reads `pantheon/execution.py` directly from its own checkout
     (`github.action_path`, no vendoring needed — that checkout is review-pantheon's own trusted
     tree, never the reviewed PR's), invoked by its own absolute path with `python3`, same
-    shadow-safety property without relying on an installed console script.
-    `action/review.yml` (the vendored, no-config-surface surface) is different: `install.sh`
-    vendors `pantheon/execution.py` INTO the target repo, and that repo's own checkout in this
-    workflow pulls the PR's own tree — so a naive `Bash(<path under $GITHUB_WORKSPACE> *)` rule
-    would let a PR simply replace the wrapper module with an arbitrary executable while the
-    identical permission-rule path still authorized running it. Fixed the same way this repo
-    already closes the identical class for `REVIEW_RULES.md`/`DESIGN.md` base-pinning: a
-    dedicated "Resolve read-only git wrapper (base-pinned)" step reads the wrapper's content from
-    the PR's **base** commit via `git show`, writes it to `$RUNNER_TEMP` (never the checked-out
-    working tree), and every `--allowedTools`/context-note reference points at that resolved
-    path — preceded by the same "Validate PR base/head SHAs" check `action.yml` already has, on
-    this surface too. A Way-A installer who genuinely needs `trusted` edits that vendored
-    workflow directly, same as before.
+    shadow-safety property without relying on an installed console script. Every workflow-file
+    install method (Way A, Way C) inherits this directly, since both are thin callers of
+    `action.yml` — there is no vendored copy of the wrapper in a target repo to protect any more.
+    (Before issue #36, the vendored `action/review.yml` DID copy `pantheon/execution.py` into the
+    target repo, which needed its own base-pinned resolution step to close the same shadow class
+    from a different angle — that whole mechanism is gone with the file it protected.) A Way-A
+    installer who genuinely needs `trusted` uncomments the `execution: trusted` line the
+    generated thin caller already ships, commented out — a one-line edit, not a wrapper-vendoring
+    concern any more.
   - Every runtime's generated per-run prompt tells the agent to call the wrapper in place of raw
     `git` when `readonly` is active (`pantheon.execution.execution_context_note`, templated into
     every prompt-builder) — the persona files themselves stay install-agnostic (rule 4) and can't
@@ -428,8 +424,8 @@ history, not here — a contract describes what's true now, not how it got that 
     substitution is told.
   - Codex, Gemini, and Cursor's provider lanes have no equivalent tool-scoping mechanism in
     their own CLIs as of v1, so this tiering currently applies to the Claude lane — the only
-    integration-tested one — across all three surfaces that invoke it; that gap is disclosed,
-    not silently assumed closed.
+    integration-tested one — across both surfaces that invoke it (the CLI, the Action); that gap
+    is disclosed, not silently assumed closed.
   - **What the wrapper closes today, in full: `pantheon/execution.py`'s own module docstring**
     is the single canonical enumeration (every git config key, attribute, or environment
     variable that names an executable or a write target, checked against git's own docs for
@@ -437,8 +433,8 @@ history, not here — a contract describes what's true now, not how it got that 
     vector → neutralization → verification status). Read that module directly rather than
     duplicating the table here.
 - **Provider processes launch from a neutral cwd, never the repo checkout — the CLI (Python)
-  lane.** (The two Action surfaces get the identical protection through a DIFFERENT mechanism,
-  since a `uses:` step can't be cwd-relocated — see "Both Action surfaces close the identical
+  lane.** (The Action surface gets the identical protection through a DIFFERENT mechanism,
+  since a `uses:` step can't be cwd-relocated — see "The Action surface closes the identical
   vector too" below.) `--allowedTools`/the read-only wrapper scope what a provider CLI's *tool
   calls* can do, but a provider CLI's own STARTUP also auto-discovers repo-local configuration
   from its current working directory — entirely before any tool call, entirely outside
@@ -488,32 +484,31 @@ history, not here — a contract describes what's true now, not how it got that 
     `test_run_agent_uses_neutral_cwd_under_readonly_execution`/
     `test_run_agent_uses_repo_root_as_cwd_under_trusted_execution` both prove the readonly
     tier's neutral-cwd protection holds independently of the trusted-tier behavior.
-  - **Both Action surfaces close the identical vector too.** `action.yml` (the published
-    composite action) and `action/review.yml` (the vendored, no-config-surface twin) each invoke
-    `claude-code-action` with cwd at the checked-out PR's own working tree — a `uses:` step has
-    no working-directory override the way this repo's own shell steps do, so the neutral-cwd
-    relocation the CLI lane uses is not available here. Neither surface passes `--bare` either
-    (it empirically breaks `--json-schema`-driven `structured_output` on this Action lane —
-    confirmed via a live self-hosted-gate failure). Both surfaces close the vector with ZERO
-    workspace mutation of this repo's own instead: `anthropics/claude-code-action`'s own pinned
-    source (`src/entrypoints/run.ts`, the exact SHA both surfaces trust) already restores
+  - **The Action surface closes the identical vector too.** `action.yml` (the published
+    composite action — the only Action surface since issue #36 deleted the vendored,
+    no-config-surface `action/review.yml`) invokes `claude-code-action` with cwd at the
+    checked-out PR's own working tree — a `uses:` step has no working-directory override the way
+    this repo's own shell steps do, so the neutral-cwd relocation the CLI lane uses is not
+    available here. It doesn't pass `--bare` either (it empirically breaks
+    `--json-schema`-driven `structured_output` on this Action lane — confirmed via a live
+    self-hosted-gate failure). It closes the vector with ZERO workspace mutation of this repo's
+    own instead: `anthropics/claude-code-action`'s own pinned source (`src/entrypoints/run.ts`,
+    the exact SHA this surface trusts) already restores
     `.claude`/`.mcp.json`/`.claude.json`/`.gitmodules`/`.ripgreprc`/`CLAUDE.md`/`CLAUDE.local.md`/
     `.husky` from the PR's base branch, unconditionally, for every PR-triggered run — before the
     CLI's own startup ever reads any of them. Confirmed firing live in this repo's own
     self-check log (`Restoring .claude, .mcp.json, .claude.json, .gitmodules, .ripgreprc,
-    CLAUDE.md, CLAUDE.local.md, .husky from origin/dev (PR head is untrusted)`). Neither surface
-    contains a hand-rolled scrub step of its own — that shape was tried and reverted (a
-    workspace-mutating step is destructive to a consuming repo's own tracked `.claude/`/
-    `.mcp.json`/`CLAUDE.md` content, the opposite of this action's zero-footprint promise) in
-    favor of relying entirely on the upstream action's own native protection.
+    CLAUDE.md, CLAUDE.local.md, .husky from origin/dev (PR head is untrusted)`). It contains no
+    hand-rolled scrub step of its own — that shape was tried and reverted (a workspace-mutating
+    step is destructive to a consuming repo's own tracked `.claude/`/`.mcp.json`/`CLAUDE.md`
+    content, the opposite of this action's zero-footprint promise) in favor of relying entirely
+    on the upstream action's own native protection.
 
-    Fixtures (`tests/test-action-refs.sh`): `--bare` asserted ABSENT on both surfaces (a
-    regression guard against a future "harmonize the flags" change silently re-breaking verdict
-    parsing); no step named "Scrub Claude auto-discovery surface" exists on either surface, and
-    — checked more broadly than just that one step name — neither file contains any LIVE
-    (non-comment) recursive `rm` targeting `.mcp.json`/`.claude`/`CLAUDE.md` anywhere at all (the
-    actual invariant that matters: adopter content must never be deleted by this repo's own
-    code), mutation-tested live before relying on it. Honest limit of what's locally
+    Fixtures (`tests/test-action-refs.sh`): `--bare` asserted ABSENT; no step named "Scrub Claude
+    auto-discovery surface" exists — and, checked more broadly than just that one step name, the
+    file contains no LIVE (non-comment) recursive `rm` targeting `.mcp.json`/`.claude`/`CLAUDE.md`
+    anywhere at all (the actual invariant that matters: adopter content must never be deleted by
+    this repo's own code), mutation-tested live before relying on it. Honest limit of what's locally
     reproducible, stated plainly: this repo cannot live-verify `claude-code-action`'s own
     `restoreConfigFromBase` behavior against a real GitHub Actions runner from its own CI (can't
     integration-test the published action until this repo is public — see "Published action"
@@ -540,17 +535,11 @@ history, not here — a contract describes what's true now, not how it got that 
   shared `config/gate.conf`, say) would have a bare `git show` return the link-target pathname
   text instead of content, silently reverting every one of these five keys to its compiled-in
   default.
-- **`REVIEW_RULES.md`/`DESIGN.md` are base-pinned on the vendored workflow (`action/review.yml`)
-  too.** `pantheon_base_pinned_read` (this workflow's own inlined copy of
-  `pantheon.basepin`'s algorithm) resolves CONTENT from the PR's BASE commit into
-  `$RUNNER_TEMP`, fenced with the same randomized BEGIN/END anti-collision markers
-  `action/lib/build_prompt.sh` uses for this content.
 - **`PR_TITLE`/`BASE_REF` are fenced with the same randomized-marker treatment file content
-  gets, on both Action surfaces** (`action/review.yml`'s inline "Build prompt" step,
-  `action/lib/build_prompt.sh`) — these two PR-event-context values are interpolated into
-  surrounding prose, not embedded raw: `PR_TITLE` specifically is PR-author-controlled data,
-  and both get the identical fence-and-label treatment base-pinned file content gets, at a
-  smaller scale.
+  gets, on both surfaces** (`pantheon.cli`'s prompt builder, `action/lib/build_prompt.sh`'s
+  "Build prompt" step) — these two PR-event-context values are interpolated into surrounding
+  prose, not embedded raw: `PR_TITLE` specifically is PR-author-controlled data, and both get the
+  identical fence-and-label treatment base-pinned file content gets, at a smaller scale.
 - **Honest limit on all of the above.** None of this — metadata validation, base-SHA pinning,
   randomized data-block fences, verdict schema/type validation, the blocker invariant,
   untrusted-data persona framing (every persona is told explicitly that everything it reads is
@@ -627,57 +616,58 @@ when the tree is dirty rather than refusing, since reviewing mid-edit is sometim
 The CLI and the Action share personas and the verdict-decision rule, but they are not
 identical tools. Differences are intentional, not oversights:
 
-| | CLI (`pantheon gate`) | GitHub Action (`action/review.yml`) |
+| | CLI (`pantheon gate`) | GitHub Action (`action.yml`) |
 |---|---|---|
 | Follow-up mode | Yes — incremental diff since last reviewed SHA (see above). | No — re-reviews the full diff on every push; no state persisted between runs. |
-| Configuration | `gate.conf` (provider, model, base branch, rules file, agent list, execution tier). | None — twin panel (artemis, apollo), `REVIEW_RULES.md`, and the read-only execution tier are hardcoded in the workflow. |
+| Configuration | `gate.conf` (provider, model, base branch, rules file, agent list, execution tier). | Explicit `with:` inputs (`agents`, `personas_path`, `rules_file`, `spec_file`, `model`, `execution`) — operator-typed in the consuming workflow, never PR content; every workflow-file install method (Way A, Way C) inherits this same input surface, since both are thin callers of this one file. |
 | Provider choice | Pluggable lane (`--provider`, `pantheon.providers`); Claude is the only integration-tested one. | Claude only, via `anthropics/claude-code-action`. |
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
-| Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Base-SHA-pinned into `$RUNNER_TEMP` — this surface's inline "Build prompt" step resolves rules/spec CONTENT the same way its "Resolve gate scripts (base-pinned)" step resolves the persona/pantheon-verdict trio. |
-| Persona / verdict-decider provenance | N/A — always this repo's own installed `agents/` and `pantheon` package; the target repo never supplies these on the CLI surface. | Base-pinned on both GitHub Action surfaces, same as the CLI's non-issue: the published `action.yml` reads `$ACTION_PATH/agents` and `$ACTION_PATH/pantheon/verdict.py` by default (this repo's own trusted checkout), base-pinned into `$RUNNER_TEMP` when `personas_path` opts into reading from the target repo instead; `action/review.yml` (a **different** file from this table's column) base-pins both into `$RUNNER_TEMP` via its own "Resolve gate scripts (base-pinned)" step. |
-| Provider startup config-discovery protection | Neutral cwd (a scratch directory `pantheon.cli` owns, never the checkout) — three layers, see "Security posture" above. `--bare` is CONDITIONAL (an explicit `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` env credential is present), since the CLI lane's documented primary auth path is a LOCAL interactive `claude auth login` keychain session with no token env var at all — an unconditional `--bare` would silently break that. | No cwd relocation available (a `uses:` step can't take a working-directory override), and NO `--bare` either (empirically breaks `--json-schema`/`structured_output` on this Action lane). Closes the vector with ZERO workspace mutation of this repo's own instead: `anthropics/claude-code-action`'s own pinned source (`src/entrypoints/run.ts`, the exact SHA both surfaces trust) already restores `.claude`/`.mcp.json`/`CLAUDE.md`/etc. from the PR's base branch, unconditionally, before the CLI's own startup ever reads them — confirmed firing live in this repo's own self-check log. See "Security posture" above, "Both Action surfaces close the identical vector too", for the full writeup. |
+| Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Base-SHA-pinned into `$RUNNER_TEMP` — the "Build prompt" step (`action/lib/build_prompt.sh`) resolves rules/spec CONTENT the same way the "Resolve gate scripts (base-pinned)" step resolves the persona/pantheon-verdict trio. |
+| Persona / verdict-decider provenance | N/A — always this repo's own installed `agents/` and `pantheon` package; the target repo never supplies these on the CLI surface. | The published `action.yml` reads `$ACTION_PATH/agents` and `$ACTION_PATH/pantheon/verdict.py` by default (this repo's own trusted checkout), base-pinned into `$RUNNER_TEMP` when `personas_path` opts into reading from the target repo instead. |
+| Provider startup config-discovery protection | Neutral cwd (a scratch directory `pantheon.cli` owns, never the checkout) — three layers, see "Security posture" above. `--bare` is CONDITIONAL (an explicit `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` env credential is present), since the CLI lane's documented primary auth path is a LOCAL interactive `claude auth login` keychain session with no token env var at all — an unconditional `--bare` would silently break that. | No cwd relocation available (a `uses:` step can't take a working-directory override), and NO `--bare` either (empirically breaks `--json-schema`/`structured_output` on this Action lane). Closes the vector with ZERO workspace mutation of this repo's own instead: `anthropics/claude-code-action`'s own pinned source (`src/entrypoints/run.ts`, the exact SHA this surface trusts) already restores `.claude`/`.mcp.json`/`CLAUDE.md`/etc. from the PR's base branch, unconditionally, before the CLI's own startup ever reads them — confirmed firing live in this repo's own self-check log. See "Security posture" above, "The Action surface closes the identical vector too", for the full writeup. |
 
 ## Published action
 
-`action.yml` at the repo root is a **third** surface on top of the CLI and the vendored
-`action/review.yml`: a composite GitHub Action a target repo consumes with a `uses:
-G-Schumacher44/review-pantheon@v1` reference and nothing else — zero files land in that repo
-(contrast with `install.sh`'s Way A, which vendors personas + `action/review.yml` + the
-`pantheon` package's verdict-decision, sanitizer and read-only-git modules (`pantheon/__init__.py`,
-`pantheon/jqjson.py`, `pantheon/verdict.py`, `pantheon/render.py`, `pantheon/execution.py` — the
-five base-pinned files
-`action/review.yml`'s own steps invoke by their own absolute path, never `python3 -m
-pantheon.verdict`/`python3 -m pantheon.execution` — see "Security posture" above for why) into
-the target repo precisely so its own runner can see them; the published action instead reads
-all of that from its own checkout at `github.action_path`, the copy GitHub Actions pulls for the
-`uses:` reference). `examples/review-gate.yml` is the whole consumer-side install — copy it to
-`.github/workflows/review-gate.yml` and wire one secret.
+`action.yml` at the repo root is the **one** Action surface, alongside the CLI — a composite
+GitHub Action a target repo consumes with a `uses: G-Schumacher44/review-pantheon@<ref>`
+reference and nothing else — zero implementation files land in that repo. It reads everything it
+needs (personas, the `pantheon` package's verdict-decision, sanitizer, and read-only-git
+modules, `action/lib/*.sh`) from its own checkout at `github.action_path`, the copy GitHub
+Actions pulls for the `uses:` reference. `examples/review-gate.yml` (Way C) is the whole
+consumer-side install for that reference alone — copy it to `.github/workflows/review-gate.yml`
+and wire one secret. `install.sh`'s Way A generates a comparably thin `uses:` caller of this same
+file, just pinned to a full commit SHA instead of the floating `v1` tag, plus personas and
+`REVIEW_RULES.md` landing in the target repo's own history — see "Layout" below and issue #36.
+Before that issue, Way A vendored a full second implementation (`action/review.yml`) instead of
+calling this file; that duplicate is gone.
 
 - **Bundled personas, overridable.** `agents/*.md` in this repo is read by default
   (`github.action_path/agents`); a target repo can point `personas_path` at its own directory
   instead (e.g. a repo-local fork of a persona) without forking this repo.
 - **`agents` input, same fixed five.** Same panel DESIGN.md defines everywhere else —
   `artemis apollo socrates diogenes plato` — default `"artemis apollo"`, the standard gate.
-- **Sequential, not matrix — a real tradeoff, not an oversight.** `action/review.yml` runs
-  Artemis and Apollo as two matrix legs (parallel), passing results between jobs via
-  upload/download-artifact because matrix legs can't expose distinct job outputs to a
-  downstream job. A **composite action cannot use `strategy`/`matrix` at all** — that's a
-  job-level-only GitHub Actions concept, verified against GitHub's own composite-action docs,
-  not assumed — so `action.yml` runs every enabled agent sequentially in one job instead. The
-  payoff is simplicity: no artifact round-trip, no separate job, one `uses:` line for the
-  consumer; the cost is wall-clock (N agents run one after another). Given this surface exists
-  specifically for the simplest possible install, that tradeoff was made on purpose.
+- **Sequential, not matrix — a real tradeoff, not an oversight.** A **composite action cannot use
+  `strategy`/`matrix` at all** — that's a job-level-only GitHub Actions concept, verified against
+  GitHub's own composite-action docs, not assumed — so `action.yml` runs every enabled agent
+  sequentially in one job instead of as parallel matrix legs. (Before issue #36, the vendored
+  `action/review.yml` ran Artemis and Apollo as two matrix legs in parallel, passing results
+  between jobs via upload/download-artifact — a real job-level workflow can do that; a composite
+  action structurally cannot, which is exactly why that duplicate implementation existed in the
+  first place.) The payoff of the sequential shape is simplicity: no artifact round-trip, no
+  separate job, one `uses:` line for the consumer; the cost is wall-clock (N agents run one after
+  another). Given this surface exists specifically for the simplest possible install, that
+  tradeoff was made on purpose.
 - **The `anthropics/claude-code-action` pin is now real**, not a placeholder — see the
   "Security posture" section above for the SHA, the release, and where it was verified.
 - **Fail-closed still applies.** Every agent step in `action.yml` runs with
   `continue-on-error: true` (so a provider failure or a red/unverified verdict never halts the
   action before it can post a comment and report the result), and the action's own final step
-  fails the job on red or unverified — same posture as the CLI's exit code and
-  `action/review.yml`'s decide step, just phrased for a composite action's constraints (no
-  `if: always()` chains needed when nothing upstream is allowed to hard-fail in the first
-  place — see `action.yml`'s own header comment for the composite-action mechanics this
-  relies on and what was verified about them, including that `steps.<id>.outcome` inside a
-  composite action was historically broken and has since been fixed upstream).
+  fails the job on red or unverified — same posture as the CLI's exit code, just phrased for a
+  composite action's constraints (no `if: always()` chains needed when nothing upstream is
+  allowed to hard-fail in the first place — see `action.yml`'s own header comment for the
+  composite-action mechanics this relies on and what was verified about them, including that
+  `steps.<id>.outcome` inside a composite action was historically broken and has since been
+  fixed upstream).
 
 **Honest limitation:** this action can't be integration-tested end-to-end — a real `uses:
 G-Schumacher44/review-pantheon@v1` invocation against a real PR — until this repo is public on
@@ -711,7 +701,7 @@ pantheon/                  the CLI — `pantheon gate`/`pantheon counsel`, stdli
                                            script's own entry point
                              basepin.py    symlink-safe base-pinned file reads
                              verdict.py    the ONE verdict-decision implementation, called by
-                                           the CLI and both Action surfaces
+                                           the CLI and the Action surface
                              render.py     the combined-PR-comment renderer
                              jqjson.py     the one jq-compatible JSON parse/serialize boundary
                              state.py      follow-up-mode state-file read/write
@@ -720,22 +710,23 @@ agents/                    five canonical personas (the single source of truth),
                            setuptools ships this directory as `pantheon.agents` in the wheel
                            (pyproject.toml's package-dir remap); invisible to every consumer
                            that reads the *.md files directly (install.sh, bootstrap.sh,
-                           action.yml/action/review.yml) — see the file's own header comment
+                           action.yml) — see the file's own header comment
 skills/                    four canonical Claude Code skills (gate, counsel, spec-driven,
                            design-contract) — the single hand-maintained source, same shape as
                            agents/ under rule 4; install.sh --claude copies them verbatim into
                            .claude/skills/<name>/SKILL.md, never regenerated
-action/review.yml          GitHub Actions twin gate — one matrix job (artemis, apollo legs),
-                           artifact-based result passing, fail-closed decision step
 action/lib/                shared shell helpers for action.yml (build_prompt.sh,
                            combine_verdicts.sh) — combine_verdicts.sh invokes `pantheon.render`
                            by its own absolute path (relative to this action's own checkout,
-                           safe because the published action ships this whole repo); NOT used
-                           by action/review.yml, which keeps its prompt-build and comment-post
-                           logic inline and hand-synced (see "Published action" above and
-                           "Combined PR comment" above for why that one surface still differs)
+                           safe because the published action ships this whole repo). Before
+                           issue #36, the vendored action/review.yml kept its own prompt-build
+                           and comment-post logic inline and hand-synced instead of calling
+                           these — that duplicate is gone, and this is now the only place that
+                           logic lives for the Action surface.
 action.yml                 the published composite action (see "Published action" above) —
-                           the whole install for a target repo is examples/review-gate.yml
+                           the whole install for a target repo via Way C is
+                           examples/review-gate.yml; install.sh's Way A generates a
+                           comparably thin SHA-pinned caller of this same file
 examples/review-gate.yml   the ~20-line consumer stub for action.yml; the entire footprint of
                            the published-action surface in a target repo
 tests/                     14 bash fixture-test scripts (black-box against the CLI, or unit

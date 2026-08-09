@@ -2,7 +2,8 @@
 """tests/check_action_expressions.py — the expression guard actionlint cannot provide.
 
 Two defect classes, both found LIVE on this repo by a pre-flip security review, both on the same
-three lines of ``action/review.yml``:
+three lines of the since-deleted vendored ``action/review.yml`` (issue #36 collapsed it into a
+thin caller of ``action.yml`` — see DESIGN.md's "Published action" section):
 
 1. **Double-quoted string literals inside ``${{ }}``.** The GitHub Actions expression grammar
    accepts SINGLE-quoted literals only. ``${{ x || "fallback" }}`` is rejected at queue time, so
@@ -34,9 +35,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Both Action surfaces. review.yml is a workflow; action.yml is composite-action metadata that
-# actionlint cannot parse — covering it here is the entire reason this file exists.
-TARGETS = ("action.yml", "action/review.yml")
+# The one Action surface (since issue #36 deleted the vendored action/review.yml duplicate).
+# action.yml is composite-action metadata that actionlint cannot parse — covering it here is the
+# entire reason this file exists.
+TARGETS = ("action.yml",)
 
 EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 
