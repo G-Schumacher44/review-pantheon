@@ -351,3 +351,9 @@ jobs:
 
       - name: Publish to PyPI (trusted publisher — OIDC, no token/secret input)
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2 — https://github.com/pypa/gh-action-pypi-publish/releases/tag/v1.14.2
+        with:
+          # PyPI filenames are immutable: if a transient failure lands the sdist but not the
+          # wheel (or vice versa), a naive re-run rebuilds both and dies on the already-published
+          # file BEFORE uploading the missing one — leaving the release permanently incomplete.
+          # skip-existing makes the re-run tolerate the already-published half and upload the rest.
+          skip-existing: true

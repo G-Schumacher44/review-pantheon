@@ -27,9 +27,35 @@ except ImportError:  # pragma: no cover — importlib.metadata is stdlib on Pyth
     )
     from importlib_metadata import version as _version  # type: ignore[no-redef]
 
+
+def _fallback_version(pyproject_path: str | None = None) -> str:
+    """Uninstalled-checkout fallback: read pyproject.toml's version from the adjacent source
+    tree (this path only runs when the package is NOT pip-installed, so pyproject.toml sits
+    next to this package by construction) and mark it `+local` so it can never masquerade as a
+    real installed release. Regex, not tomllib — tomllib is 3.11+ and this package supports
+    3.9. The match is genuinely scoped to the [project] table: the table's body is isolated
+    first (from its `[project]` header to the next `[` table header), then the version key is
+    matched inside that slice only — a `version =` line in any other table, before or after,
+    never satisfies it (Codex/CodeRabbit finding on PR #46's first cut, where the regex
+    scanned the whole file and the docstring merely claimed table-scoping).
+    `pyproject_path` exists for the test seam only — production callers pass nothing."""
+    import os
+    import re
+
+    pyproject = pyproject_path or os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")
+    try:
+        with open(pyproject, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return "0+unknown"
+    table = re.search(r"^\[project\]\s*$(.*?)(?=^\[|\Z)", text, flags=re.MULTILINE | re.DOTALL)
+    match = re.search(r'^version\s*=\s*"([^"]+)"', table.group(1), flags=re.MULTILINE) if table else None
+    return f"{match.group(1)}+local" if match else "0+unknown"
+
+
 try:
     __version__ = _version("review-pantheon")
 except PackageNotFoundError:
-    __version__ = "0.1.0+local"
+    __version__ = _fallback_version()
 
 __all__ = ["__version__"]
