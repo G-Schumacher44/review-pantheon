@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
-# tests/test-render-comment-python.sh — the black-box Python equivalent of
-# tests/test-render-comment.sh, per docs/PYTHON-PORT.md section 4's disposition for that suite:
+# tests/test-render-comment-python.sh — the black-box Python equivalent of the retired
+# tests/test-render-comment.sh. That suite's disposition:
 # "Needs a black-box/Python-native equivalent against the render module. Slice 2 exit bar."
 #
-# The original suite is bash-internal (it sources cli/lib/render_comment.sh directly and calls
-# its two public functions, pantheon_render_comment / pantheon_overall_color, in-process).
-# Sourcing a .py file the way that suite sources a .sh file is not the right shape for its
-# Python equivalent (docs/PYTHON-PORT.md section 4's own framing) — this file keeps the exact
+# The original suite was bash-internal (it sourced the retired bash CLI's render_comment.sh
+# (removed in #29) directly and called its two public functions, pantheon_render_comment /
+# pantheon_overall_color, in-process). Sourcing a .py file the way that suite sourced a .sh file
+# was not the right shape for its Python equivalent — this file keeps the exact
 # same fixture set (same per-agent env vars, same assertions, same expected substrings/counts)
 # and drives pantheon.render as a subprocess instead, via the module's CLI shim:
 #   python3 -m pantheon.render comment <head_sha> <agent...>   (reads the same *_COLOR/etc. env
 #   python3 -m pantheon.render overall <agent...>               vars the bash contract does)
 #
-# tests/test-render-comment.sh itself is untouched by this port (still sources
-# cli/lib/render_comment.sh) and stays green — this file is an ADDITION, not a replacement,
-# until Slice 5 retires the bash renderer.
+# tests/test-render-comment.sh itself was deleted along with the rest of the bash CLI in #29;
+# this file, originally an ADDITION alongside it, is now the sole suite covering this behavior.
 #
 # No test framework — plain bash, `bash tests/test-render-comment-python.sh` is the whole
 # invocation.

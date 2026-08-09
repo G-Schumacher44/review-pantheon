@@ -1,5 +1,5 @@
-"""tests/test_jqjson.py — pytest unit layer for pantheon.jqjson's own matrix (docs/PYTHON-PORT.md
-section 4's port slice 4 deliverable: "pytest unit layer for the jqjson matrix + pure-function
+"""tests/test_jqjson.py — pytest unit layer for pantheon.jqjson's own matrix (this port's
+slice-4 deliverable: "pytest unit layer for the jqjson matrix + pure-function
 seams ONLY — no 1:1 duplication of the black-box exams").
 
 This module is deliberately NOT a re-run of tests/test-json-boundary.sh (the mechanical
@@ -8,7 +8,7 @@ tests/test-render-comment-python.sh's own regression fixtures for this boundary 
 cover jqjson's behavior AS OBSERVED THROUGH pantheon.verdict/pantheon.render's decision/render
 output). This file tests pantheon.jqjson's own four functions DIRECTLY and in isolation — the
 fast, in-process unit layer those black-box subprocess-driven exams can't cheaply be — parametrized
-across the exact edge-case matrix docs/PYTHON-PORT.md section 5's "JSON boundary" bullet and this
+across the exact edge-case matrix this port's slice-5 "JSON boundary" work and this
 module's own docstring enumerate: non-standard constants, overflow/underflow numbers, excess-
 precision decimals, trailing-zero-formatted decimals (issue #19), lone surrogates, and the
 _RawBigNumber placeholder-collision-avoidance guarantee.

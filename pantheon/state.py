@@ -1,7 +1,8 @@
-"""pantheon/state.py — follow-up-mode state (docs/PYTHON-PORT.md section 6).
+"""pantheon/state.py — follow-up-mode state.
 
-Replaces the ``update_review_gate_state()`` function and the ``SEEN_SHA``/ancestry logic
-currently inline in ``cli/review-gate``. ``.review-gate-state.json`` lives at the TARGET repo's
+Replaces the ``update_review_gate_state()`` function and the ``SEEN_SHA``/ancestry logic that
+used to live inline in the retired bash CLI's ``review-gate`` script (removed in #29).
+``.review-gate-state.json`` lives at the TARGET repo's
 root (the repo being gated, not this package's own checkout), shape
 ``{"<pr-number>": {"reviewed_sha": "<sha>"}}`` — see docs/CLI.md's ["The state / follow-up
 model"](../docs/CLI.md#the-state--follow-up-model) for the full behavioral contract this module
@@ -14,11 +15,11 @@ implements:
     determines whether the recorded SHA is still a valid incremental base — an old SHA can remain
     a perfectly fetchable commit object without being an ancestor of the new head anymore.
   - **The recording rule is green/yellow-only, on purpose** — see :func:`update_state`'s own
-    docstring for the fail-closed rationale this mirrors from ``cli/review-gate``'s
-    ``update_review_gate_state()`` verbatim.
+    docstring for the fail-closed rationale this mirrors from the retired bash CLI's
+    ``update_review_gate_state()`` (removed in #29) verbatim.
 
-Every JSON parse/serialize in this module goes through ``pantheon.jqjson`` (docs/PYTHON-PORT.md's
-"JSON boundary" section), never Python's own ``json`` module directly. Every git call goes
+Every JSON parse/serialize in this module goes through ``pantheon.jqjson``, never Python's own
+``json`` module directly. Every git call goes
 through ``pantheon.execution.run_git`` — this module is trusted, CLI-internal plumbing (not the
 persona-facing Bash-tool surface ``pantheon.execution``'s argv-validating wrapper exists to
 constrain), same posture ``pantheon.basepin`` already documents for why it calls into that same
@@ -27,11 +28,12 @@ read, nothing here touches the network — ``git merge-base --is-ancestor`` is a
 comparison — so the hardened, PATH-restricted environment ``run_git`` constructs costs nothing
 here and buys the same defense-in-depth ``pantheon.basepin`` already accepts.
 
-Fixture suite: tests/test-state-persistence.sh (bash-internal in its original form — extracts
-``update_review_gate_state()`` verbatim from ``cli/review-gate`` via the ``$FUNCS_FILE`` pattern).
-Its black-box Python equivalent, per docs/PYTHON-PORT.md section 4, is
-tests/test-state-persistence-python.sh, which drives this module the same way the original suite
-drives the extracted bash function: via ``python -m pantheon.state update ...``.
+Fixture suite: tests/test-state-persistence-python.sh — the black-box Python equivalent of the
+original bash-internal suite (tests/test-state-persistence.sh, which extracted
+``update_review_gate_state()`` verbatim from the retired bash CLI's ``review-gate`` script via
+the ``$FUNCS_FILE`` pattern, and was removed alongside it in #29). Drives this module the same
+way that original suite drove the extracted bash function: via ``python -m pantheon.state update
+...``.
 """
 
 from __future__ import annotations
@@ -63,7 +65,8 @@ class StateFileMalformed(Exception):
     fail-closed-to-``{}`` default is. A Codex review finding on this port's own PR: a caller
     that's about to read state for FOLLOW-UP-MODE DETECTION (``pantheon.cli``'s ``run_gate()``)
     needs a stricter contract than a display/no-crash read does — mirrors bash's own posture for
-    this exact case: ``cli/review-gate``'s ``SEEN_SHA="$(jq -r ... "$STATE_FILE")"`` runs under
+    this exact case: the retired bash CLI's ``review-gate`` script had
+    ``SEEN_SHA="$(jq -r ... "$STATE_FILE")"`` run under
     ``set -euo pipefail``, so a malformed state file aborts the WHOLE SCRIPT right there, before
     any agent ever runs or any comment ever posts. Without the equivalent here, ``run_gate()``
     would silently treat a corrupted state file as "never reviewed," run every agent, and post a
@@ -75,9 +78,9 @@ class StateFileMalformed(Exception):
 
 
 def bootstrap_state_file(state_file: str) -> None:
-    """Creates ``state_file`` holding ``{}`` if it doesn't already exist — mirrors
-    ``cli/review-gate``'s unconditional
-    ``[[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"`` line, which runs before the
+    """Creates ``state_file`` holding ``{}`` if it doesn't already exist — mirrors the retired
+    bash CLI's ``review-gate`` script's unconditional
+    ``[[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"`` line, which ran before the
     dry-run/draft-skip branches are even reached (docs/CLI.md's own documented caveat: a
     ``--dry-run`` against a target repo that has never run the gate before still leaves a fresh,
     empty state file in the working tree). A no-op if the file already exists as a REGULAR file
@@ -231,7 +234,7 @@ def load_state_or_raise(state_file: str) -> dict:
 
 
 def reviewed_sha_for(state: dict, pr_number: str) -> str | None:
-    """``.[$pr].reviewed_sha // empty`` — mirrors ``cli/review-gate``'s
+    """``.[$pr].reviewed_sha // empty`` — mirrors the retired bash CLI's ``review-gate`` script's
     ``SEEN_SHA="$(jq -r --arg pr "$PR_NUMBER" '.[$pr].reviewed_sha // empty' "$STATE_FILE")"``
     exactly: a missing PR entry, an entry that isn't an object, a missing ``reviewed_sha`` key, or
     a non-string/empty value all read as "no prior SHA recorded" (``None``) — jq's ``//`` operator
@@ -247,9 +250,10 @@ def reviewed_sha_for(state: dict, pr_number: str) -> str | None:
 
 
 def is_ancestor(candidate_sha: str, ref: str, cwd: str | None = None) -> bool:
-    """``git merge-base --is-ancestor <candidate_sha> <ref>`` — mirrors ``cli/review-gate``'s
-    force-push-detection check exactly: an EXISTENCE check alone (``git cat-file -e``) isn't
-    enough, because after a force-push the old SHA can remain a perfectly valid, fetchable commit
+    """``git merge-base --is-ancestor <candidate_sha> <ref>`` — mirrors the retired bash CLI's
+    ``review-gate`` script's force-push-detection check exactly: an EXISTENCE check alone
+    (``git cat-file -e``) isn't enough, because after a force-push the old SHA can remain a
+    perfectly valid, fetchable commit
     object without still being an ancestor of the new head — ancestry is the actual invariant a
     safe incremental (follow-up) review needs. Routed through ``pantheon.execution.run_git`` for
     the same constructed-clean-environment discipline every other git call in this port uses (see
@@ -259,8 +263,9 @@ def is_ancestor(candidate_sha: str, ref: str, cwd: str | None = None) -> bool:
 
 
 def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, workdir: str) -> bool:
-    """Mirrors ``cli/review-gate``'s ``update_review_gate_state()`` exactly — including its own
-    header comment's rationale, restated here: this write happens ONLY for a green/yellow overall
+    """Mirrors the retired bash CLI's ``review-gate`` script's ``update_review_gate_state()``
+    exactly — including its own header comment's rationale, restated here: this write happens
+    ONLY for a green/yellow overall
     outcome. A carried finding (from an external reviewer's finding on a sibling system, treated
     as our own): the pre-fix version of this write ran unconditionally after any successful
     ``gh pr comment`` post, regardless of the computed verdict — so an UNVERIFIED result (a
@@ -299,8 +304,8 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
     ``mv``'d over ``$state_file``: the file ends up EMPTY again, recording NOTHING, even though
     the operation itself "succeeds" (exit 0). This function replicates that exactly — an empty
     existing file stays empty, no entry is written, `True` is still returned (matching bash's own
-    exit-0 shape for this case) — rather than "improving" it into a working self-heal, per
-    docs/PYTHON-PORT.md's "byte-compatible... not a redesign" charter. This is UNRELATED to
+    exit-0 shape for this case) — rather than "improving" it into a working self-heal, which would
+    violate this port's own byte-compatible, not-a-redesign charter. This is UNRELATED to
     :func:`load_state_or_raise`'s own READ-side self-heal (that one genuinely treats empty
     content as "no prior state" and is correct as documented there) — the two sides simply both
     happen to degrade to "empty" for the same underlying jq-empty-file-argument reason, not
@@ -324,8 +329,8 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
     directory, a green verdict → this function warned to stderr and returned, and
     ``run_gate()``'s own exit code was computed purely from ``overall``, landing on 0 — a SILENT
     fail-open a caller had no way to detect), caught that this function's own docstring claimed
-    parity with bash here that it did NOT actually have: real ``cli/review-gate`` calls
-    ``update_review_gate_state "$OVERALL" ...`` as a bare top-level statement, not inside an
+    parity with bash here that it did NOT actually have: the retired bash CLI's ``review-gate``
+    script called ``update_review_gate_state "$OVERALL" ...`` as a bare top-level statement, not inside an
     ``if``-condition, under the whole script's ``set -euo pipefail`` — and that function's own
     ``mv "$tmp_state" "$state_file"`` line (unlike the ``jq ... > "$tmp_state"`` redirect that
     precedes it, which IS an if-condition and so IS errexit-exempt) is a plain body statement: if
@@ -387,8 +392,8 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
         # gets `mv`'d over `$state_file`: the file ends up EMPTY again, recording NOTHING, even
         # though the whole operation "succeeds" (exit 0). This is a real, if unintuitive, quirk
         # of bash's own frozen implementation — this port's own charter is byte-compatible
-        # behavior parity (docs/PYTHON-PORT.md: "a language port of the same contract, not a
-        # redesign of it"), so it is replicated here exactly, not silently "improved" into
+        # behavior parity ("a language port of the same contract, not a redesign of it"), so it
+        # is replicated here exactly, not silently "improved" into
         # actually recording the entry the way an earlier version of this fix did. The READ side
         # (:func:`load_state_or_raise`) is NOT affected by this correction — bash's read query
         # (`jq -r ... "$STATE_FILE"`, also a filename argument) independently produces the
@@ -480,9 +485,10 @@ def update_state(overall: str, pr_number: str, head_sha: str, state_file: str, w
 
 # ---------------------------------------------------------------------------------------------
 # CLI — subcommand-dispatch shape mirroring pantheon.basepin/pantheon.execution's own module
-# CLIs, for tests/test-state-persistence-python.sh's black-box equivalent (docs/PYTHON-PORT.md
-# §4): ``python -m pantheon.state update <overall> <pr> <head-sha> <state-file> <workdir>``
-# mirrors cli/review-gate's extracted ``update_review_gate_state()`` contract exactly.
+# CLIs, for tests/test-state-persistence-python.sh's black-box equivalent:
+# ``python -m pantheon.state update <overall> <pr> <head-sha> <state-file> <workdir>``
+# mirrors the retired bash CLI's ``review-gate`` script's extracted
+# ``update_review_gate_state()`` contract exactly.
 # ---------------------------------------------------------------------------------------------
 
 
