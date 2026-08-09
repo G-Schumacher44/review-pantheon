@@ -68,7 +68,7 @@ policy doesn't treat as gate-defeating.
 
 For everything the wrapper does see (any flag, any subcommand beyond the built-in-safe set
 above), it closes the arbitrary-command-execution primitive through the tool-call surface on the
-three Claude surfaces. That's one layer among several — base-pinned provenance, schema
+two Claude surfaces. That's one layer among several — base-pinned provenance, schema
 validation, the blocker invariant, cross-review by a second agent — not a claim that reviewing a
 hostile fork PR is safe in general. **None of it eliminates a schema-valid, deceptive
 verdict from an agent that injected content has fully compromised** — an accepted, documented

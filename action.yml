@@ -4,9 +4,11 @@
 # at examples/review-gate.yml (Way C) — nothing is copied into the target repo. install.sh's Way
 # A generates a comparably thin caller of this same file (issue #36 — it used to vendor a whole
 # second ~1,000-line reimplementation instead; that duplicate is gone). Every file this action
-# reads at run time — personas, the pantheon package (whose `pantheon.verdict` module decides
-# every verdict — the one implementation every lane calls), action/lib/*.sh, the JSON schema
-# below — is read from `${{ github.action_path }}`, i.e.
+# reads at run time — its bundled personas, the pantheon package (whose `pantheon.verdict`
+# module decides every verdict — the one implementation every lane calls), action/lib/*.sh, the
+# JSON schema below — is read from `${{ github.action_path }}` (with the one opt-in exception
+# documented a few paragraphs down: the `personas_path` input, base-pinned from the consuming
+# repo's base commit), i.e.
 # review-pantheon's own checkout as GitHub Actions pulls it for the `uses:` reference (run via
 # `PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py"`
 # — a `pip install` is not needed, a stdlib-only package runs straight from its own checkout).

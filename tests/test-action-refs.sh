@@ -235,12 +235,16 @@ fi
 # round-8 shape, `rm -rf .mcp.json .claude CLAUDE.md`, as HISTORY — a YAML `#`-prefixed line,
 # after stripping leading whitespace, same convention `grep -v` filters elsewhere in this repo's
 # own suites use for "this text describes past code, not live code").
-destructive_hits="$(grep -nE 'rm[[:space:]]+-[a-zA-Z]*r[a-zA-Z]*[[:space:]].*(\.mcp\.json|\.claude([^-]|$)|CLAUDE\.md)' "$ACTION_YML" | grep -vE ':[[:space:]]*#' || true)"
+# Any rm form is destructive here — recursive OR not, flags or none: `rm -f .mcp.json`,
+# `rm --force CLAUDE.md`, `rm -f -r .claude`, and bare `rm .mcp.json` all delete adopter
+# content just as surely as the original round-8 `rm -rf` shape did. Option tokens are matched
+# as zero-or-more `-…` words so no particular flag (or any flag at all) is required.
+destructive_hits="$(grep -nE '(^|[^a-zA-Z0-9_-])rm[[:space:]]+(-[^[:space:]]+[[:space:]]+)*[^[:space:]]*(\.mcp\.json|\.claude([^-]|$)|CLAUDE\.md)' "$ACTION_YML" | grep -vE ':[[:space:]]*#' || true)"
 if [[ -n "$destructive_hits" ]]; then
-  fail "action.yml contains a recursive rm targeting .mcp.json/.claude/CLAUDE.md — this would destroy a consuming repo's own tracked content:"
+  fail "action.yml contains a LIVE rm (any form) targeting .mcp.json/.claude/CLAUDE.md — this would destroy a consuming repo's own tracked content:"
   while IFS= read -r line; do echo "    $line"; done <<<"$destructive_hits"
 else
-  pass "action.yml: no LIVE (non-comment) recursive rm targeting .mcp.json/.claude/CLAUDE.md anywhere in the file"
+  pass "action.yml: no LIVE (non-comment) rm of any form targeting .mcp.json/.claude/CLAUDE.md anywhere in the file"
 fi
 
 echo
