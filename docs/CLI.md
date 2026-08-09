@@ -10,8 +10,9 @@ and the `pantheon` package — if this doc and the code ever disagree, that's DE
 bug, not a judgment call.
 
 `pantheon` is the CLI — `pantheon gate` runs the standard twin-agent gate,
-`pantheon counsel` runs the counsel panel. Install: `pipx install <built pantheon artifact>`
-(or `pip install` into a venv) — see [SETUP.md](SETUP.md).
+`pantheon counsel` runs the counsel panel. Install: `pipx install review-pantheon` (PyPI),
+`brew install g-schumacher44/tap/review-pantheon`, or `pip install` into a venv — see
+[SETUP.md](SETUP.md).
 
 ## Command reference
 
