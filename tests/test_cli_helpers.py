@@ -1070,3 +1070,39 @@ def test_branch_resolver_names_a_detached_head_without_failing(tmp_path) -> None
     assert branch_name != "HEAD"
     assert "detached" in branch_name
     assert head[:8] in branch_name
+
+
+def test_fallback_version_derives_from_the_adjacent_pyproject(tmp_path) -> None:
+    """The uninstalled-checkout fallback must DERIVE its version from pyproject.toml, not
+    hand-copy a literal — the release ceremony only ever bumps pyproject.toml, so a literal
+    here would go stale on the very next release (Codex P2 on PR #45)."""
+    import pantheon
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "x"\nversion = "9.8.7"\n', encoding="utf-8")
+
+    assert pantheon._fallback_version(str(pyproject)) == "9.8.7+local"
+
+    # And the real, no-argument path resolves this repo's own pyproject.toml — whatever version
+    # it says, suffixed +local, never a bare release string.
+    derived = pantheon._fallback_version()
+    assert derived.endswith("+local")
+    assert not derived.startswith("0+unknown")
+
+
+def test_fallback_version_degrades_to_unknown_never_a_fake_release(tmp_path) -> None:
+    """Both error branches must land on "0+unknown" — an unreadable pyproject.toml (OSError)
+    and one with no version key (regex miss). Anything else risks an uninstalled checkout
+    reporting a plausible-but-wrong version in bug reports."""
+    import pantheon
+
+    assert pantheon._fallback_version(str(tmp_path / "does-not-exist.toml")) == "0+unknown"
+
+    keyless = tmp_path / "pyproject.toml"
+    keyless.write_text('[project]\nname = "x"\n', encoding="utf-8")
+    assert pantheon._fallback_version(str(keyless)) == "0+unknown"
+
+    # An indented `version =` inside some other table must NOT satisfy the anchored regex.
+    nested = tmp_path / "nested.toml"
+    nested.write_text('[tool.thing]\n  version = "1.2.3"\n', encoding="utf-8")
+    assert pantheon._fallback_version(str(nested)) == "0+unknown"

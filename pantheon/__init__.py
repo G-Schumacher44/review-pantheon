@@ -28,16 +28,17 @@ except ImportError:  # pragma: no cover — importlib.metadata is stdlib on Pyth
     from importlib_metadata import version as _version  # type: ignore[no-redef]
 
 
-def _fallback_version() -> str:
+def _fallback_version(pyproject_path: str | None = None) -> str:
     """Uninstalled-checkout fallback: read pyproject.toml's version from the adjacent source
     tree (this path only runs when the package is NOT pip-installed, so pyproject.toml sits
     next to this package by construction) and mark it `+local` so it can never masquerade as a
     real installed release. Regex, not tomllib — tomllib is 3.11+ and this package supports
-    3.9; an anchored key match on the [project] table's own line is enough for a fallback."""
+    3.9; an anchored key match on the [project] table's own line is enough for a fallback.
+    `pyproject_path` exists for the test seam only — production callers pass nothing."""
     import os
     import re
 
-    pyproject = os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")
+    pyproject = pyproject_path or os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")
     try:
         with open(pyproject, encoding="utf-8") as fh:
             match = re.search(r'^version\s*=\s*"([^"]+)"', fh.read(), flags=re.MULTILINE)
