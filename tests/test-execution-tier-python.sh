@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
 # tests/test-execution-tier-python.sh — Python-native black-box equivalent of
-# tests/test-execution-tier.sh's Slice-3-scoped portion, per docs/PYTHON-PORT.md §4's
-# disposition for that suite: "Mixed... The black-box behavioral assertions (readonly default,
+# tests/test-execution-tier.sh's Slice-3-scoped portion, per that suite's port disposition:
+# "Mixed... The black-box behavioral assertions (readonly default,
 # trusted opt-in, fail-closed on an unrecognized tier before any gh call) translate directly...
 # Slice 3 (execution module) / Slice 4 (full CLI wiring) exit bar."
 #
 # This file covers exactly the Slice-3 (module-level) slice of that disposition:
 #   - Part A equivalent: pantheon.execution's allowed_tools_for/validate_execution/
-#     execution_context_note, tested directly (the Python equivalent of sourcing
-#     cli/lib/execution.sh's three functions — pantheon.execution IS the module under test, so
-#     this imports it rather than shelling out, the same "test the unit directly" shape Part A of
-#     the bash original uses).
+#     execution_context_note, tested directly (the Python equivalent of sourcing the retired bash
+#     CLI's execution.sh (removed in #29) three functions — pantheon.execution IS the module
+#     under test, so this imports it rather than shelling out, the same "test the unit directly"
+#     shape Part A of the bash original uses).
 #   - Part F equivalent: structural regression guards on pantheon/execution.py's own source,
-#     mirroring the bash original's grep-based checks against cli/lib/pantheon-git-readonly.sh
-#     (adapted to Python's shape — a dict-literal env key, not a bash `export`/`unset`
-#     statement).
+#     mirroring the retired bash CLI's grep-based checks against its own
+#     pantheon-git-readonly.sh (removed in #29) (adapted to Python's shape — a dict-literal env
+#     key, not a bash `export`/`unset` statement).
 #
 # Slice 4 ADDS (below Part F): Part C equivalent (a real `pantheon gate --execution bogus-tier
 # --pr 1` invocation, now that pantheon.cli exists), Part E equivalent (--permission-mode dontAsk
 # in pantheon/providers.py's claude lane), and Part G equivalent (pantheon.cli's execution=
 # base-pinning, via real git fixture repos rather than an extracted bash block). Still explicitly
-# OUT OF SCOPE (bash/Action-lane surfaces this port doesn't touch, per docs/PYTHON-PORT.md §4):
-# Part B (cross-surface consistency across cli/providers/claude.sh, action.yml,
-# action/review.yml — those stay bash until Slice 5) and Part D (action/review.yml's base-pinned
+# OUT OF SCOPE (bash/Action-lane surfaces this port doesn't touch): Part B (cross-surface
+# consistency between the claude lane now in pantheon/providers.py and the still-bash
+# action.yml/action/review.yml Action lane) and Part D (action/review.yml's base-pinned
 # wrapper resolution — Action-lane, unrelated to this module). tests/test-execution-tier.sh
 # itself is UNCHANGED and still runs its own Parts A-G, green, against bash — this file does not
 # replace it.
@@ -261,9 +261,10 @@ fi
 # Part G equivalent (Slice 4, extended by a CRITICAL fix from a later adversarial review) —
 # pantheon.cli's gate.conf keys that shape gate BEHAVIOR (execution=/provider=/rules_file=/
 # spec_file=/agents=) are ALL base-pinned, not working-tree-pinned (the same Codex P1 finding
-# cli/review-gate's own Part G closes for execution= — the adversarial review generalized it to
-# the other four keys, closing docs/CLI.md's own disclosed issue #13 for provider= along the
-# way). Exercised via real git fixture repos and pantheon.cli's own
+# the retired bash CLI's review-gate script (removed in #29) closed for execution= in its own
+# Part G — the adversarial review generalized it to the other four keys, closing docs/CLI.md's
+# own disclosed issue #13 for provider= along the way). Exercised via real git fixture repos and
+# pantheon.cli's own
 # _load_base_pinned_gate_conf() (the single function that now resolves all five keys — see that
 # function's own docstring), the same shape tests/test-prompt-assembly-python.sh's Part P3 uses
 # for the sibling rules/spec-file CONTENT reads (this section covers the file-PATH selection,

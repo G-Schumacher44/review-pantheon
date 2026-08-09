@@ -1,11 +1,12 @@
-"""pantheon/providers.py — provider lane dispatch (docs/PYTHON-PORT.md section 6).
+"""pantheon/providers.py — provider lane dispatch.
 
-Replaces ``cli/providers/{claude,codex,gemini,cursor}.sh`` — one function per lane, dispatched by
+Replaces the retired bash CLI's per-lane provider scripts (``claude.sh``, ``codex.sh``,
+``gemini.sh``, ``cursor.sh`` — removed in #29) — one function per lane, dispatched by
 :func:`provider_run`, matching the spec's contract: ``provider_run(model, prompt_file) -> str``,
 "prints/returns the agent's raw output, raises/returns nonzero on failure." This module raises
 :class:`ProviderError` for the "nonzero" half (Python's own idiom for that contract) — every
-caller (``pantheon.cli``'s ``run_agent``) catches it exactly the way ``cli/review-gate`` checks
-``$provider_status -ne 0``, landing on UNVERIFIED, never a crash.
+caller (``pantheon.cli``'s ``run_agent``) catches it exactly the way the retired bash CLI's
+``review-gate`` checked ``$provider_status -ne 0``, landing on UNVERIFIED, never a crash.
 
 **Claude is the only integration-tested lane, same as v1** — ``codex``/``gemini``/``cursor`` are
 best-effort (docs/CLI.md's "Provider switch" section, DESIGN.md's "Provider lanes"): each asserts
@@ -41,7 +42,7 @@ previous round's fresh evidence exposed:
      and the repo root, so a repo-controlled PATH entry is caught regardless of which directory
      inside the repo the gate happened to be launched from.
   3. :func:`_provider_env` originally began from a full ``dict(os.environ)`` copy (only PATH
-     overridden) — contrary to docs/PYTHON-PORT.md §5's clean-environment requirement, and a
+     overridden) — contrary to this module's own clean-environment requirement, and a
      Codex finding demonstrated the concrete exploit: an execution-bearing variable an attacker
      can set ahead of the launcher process (``NODE_OPTIONS=--require=/repo/payload.js``,
      ``PYTHONPATH``, ``LD_PRELOAD``, ...) would still reach a matching provider CLI even with
@@ -65,14 +66,21 @@ construction).
 timeout=...)`` only terminates the DIRECT child process on a timeout — a provider CLI that itself
 spawns tool subprocesses (exactly what an LLM-driving CLI's own tool-execution loop does) can
 leave those descendants running past the timeout, still able to consume resources or touch the
-checkout. Mirrors ``cli/review-gate``'s own ``run_with_timeout`` fallback (TERM the whole process
-group, wait briefly, KILL if still alive): :func:`_run` starts each provider in its own session
+checkout. Mirrors the retired bash CLI's ``review-gate`` script's own ``run_with_timeout``
+fallback (removed in #29; TERM the whole process group, wait briefly, KILL if still alive):
+:func:`_run` starts each provider in its own session
 (``start_new_session=True``, POSIX — creates a new process group too) so :func:`_terminate_group`
 can signal the WHOLE group, not just the one PID ``subprocess.run`` would have reached.
 
-Fixture suites: none today — docs/PYTHON-PORT.md §9 notes this as a pre-existing coverage gap
-(no ``test-providers.sh`` exists for the bash lanes either), not one this port introduces or is
-obligated to close. ``pantheon.cli``'s own black-box exams exercise the ``claude`` lane's argv
+Fixture suites: no dedicated black-box suite — a disclosed, pre-existing gap the retired bash
+lanes shared too (no ``test-providers.sh`` existed for them either), not one this port
+introduces. ``tests/test_providers.py`` is the pytest unit layer that covers this module
+directly: argv construction, PATH resolution (:func:`_filtered_path`'s repo-root-aware
+checkout-relative-entry filtering), environment construction (:func:`_provider_env`'s allowlist,
+never a blanket ``os.environ`` copy), :class:`ProviderError`'s fail-closed behavior (CLI absent,
+nonzero exit, timeout), and :func:`_terminate_group` firing on a timeout — every case
+monkeypatches ``_resolve_cli``/``subprocess.Popen`` rather than shelling out to a real provider
+CLI. ``pantheon.cli``'s own black-box exams additionally exercise the ``claude`` lane's argv
 construction indirectly via ``--dry-run`` (which never calls a provider) and via the
 ``PANTHEON_CLI``-parameterized suites where a real ``claude`` CLI happens to be resolvable.
 
@@ -227,7 +235,8 @@ class ProviderError(Exception):
     """Raised whenever a provider lane fails — its CLI not found on ``PATH``, a nonzero exit, or
     a timeout. Mirrors bash's ``provider_run ... ; provider_status=$?`` contract: a caller
     (``pantheon.cli``'s ``run_agent``) catches this uniformly and lands on UNVERIFIED, the same
-    branch ``cli/review-gate`` takes on ``$provider_status -ne 0``. ``output`` carries whatever
+    branch the retired bash CLI's ``review-gate`` script took on ``$provider_status -ne 0``
+    (removed in #29). ``output`` carries whatever
     text the failed invocation actually produced (a "CLI not found" message, partial merged
     stdout+stderr) — the same text bash's own ``raw_output="$( ... 2>&1)"`` capture would still
     hold even on a nonzero exit, kept here purely for a caller that wants it for logging; never
@@ -239,20 +248,20 @@ class ProviderError(Exception):
         self.output = output
 
 
-# The fixed four lanes — mirrors cli/providers/'s directory contents exactly (docs/CLI.md's
-# `--provider <lane>` table). In bash, "unknown provider" is checked by file existence
-# (`[[ -f "$PROVIDERS_DIR/$PROVIDER.sh" ]]`) — issue #13, deliberately not fixed by this port (see
-# docs/PYTHON-PORT.md section 2's own "this port does not silently fix or relitigate that issue"
-# line). This tuple is the Python-shaped equivalent of that same coverage: an enumerated dispatch
-# table with no file to `source`, so there is no separate "does this name resolve to a script"
-# check to have a character-class gap in — the same four names, checked the same way (presence in
-# a fixed list), nothing hardened or relaxed relative to what bash already validates.
+# The fixed four lanes — mirrors the retired bash CLI's per-lane provider script directory
+# contents exactly (removed in #29; docs/CLI.md's `--provider <lane>` table). In bash, "unknown
+# provider" was checked by file existence (`[[ -f "$PROVIDERS_DIR/$PROVIDER.sh" ]]`) — issue #13,
+# deliberately not fixed by this port. This tuple is the Python-shaped equivalent of that same
+# coverage: an enumerated dispatch table with no file to `source`, so there is no separate "does
+# this name resolve to a script" check to have a character-class gap in — the same four names,
+# checked the same way (presence in a fixed list), nothing hardened or relaxed relative to what
+# bash already validates.
 KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex", "gemini", "cursor")
 
 # The fallback --allowedTools value this module computes when a caller doesn't supply one — the
-# Python-shaped equivalent of cli/providers/claude.sh's own fallback (`cd .../cli/lib && pwd`
-# relative to that script's own location), which exists so this lane still fails safe (readonly,
-# not open) when invoked directly, outside pantheon.cli.
+# Python-shaped equivalent of the retired bash CLI's `claude.sh` provider script's own fallback
+# (removed in #29; `cd .../lib && pwd` relative to that script's own location), which exists so
+# this lane still fails safe (readonly, not open) when invoked directly, outside pantheon.cli.
 #
 # Resolves the INSTALLED `pantheon-git-readonly` console script's own absolute path (see
 # pyproject.toml's [project.scripts] entry) — mirrors pantheon.cli's own `_wrapper_invocation()`
@@ -370,8 +379,8 @@ def default_allowed_tools(repo_root: str | None = None) -> str:
     scripts directory AND ``pip install --user``'s separate per-user one — never an ambient
     ``PATH`` lookup), falling back to the OLDER, unprotected ``python -m pantheon.execution
     wrapper`` form only when the console script genuinely isn't installed anywhere that function
-    checks (a plain dev checkout — docs/PYTHON-PORT.md's own disclosed package-layout caveat for
-    this slice), with a loud stderr warning every time that fallback fires.
+    checks (a plain dev checkout — a disclosed package-layout caveat for this slice), with a loud
+    stderr warning every time that fallback fires.
 
     ``repo_root``, when given, is baked into the returned string as a fixed ``--repo-root``
     literal — a CRITICAL fix (adversarial review), mirroring ``pantheon.cli``'s own
@@ -661,8 +670,8 @@ def _safe_path_env_value(key: str, value: str, roots: list[str]) -> str | None:
 def _provider_env(repo_root: str | None = None) -> dict[str, str]:
     """Explicitly constructed subprocess environment for every provider-CLI call — never an
     implicit ``os.environ`` passthrough, and never a blanket ``dict(os.environ)`` copy either
-    (docs/PYTHON-PORT.md §5's "constructed clean env, never inherited" rule — see this module's
-    own docstring, round 3, for the concrete exploit a blanket copy left open). ``PATH`` is the
+    (this module's own "constructed clean env, never inherited" rule — see the module docstring,
+    round 3, for the concrete exploit a blanket copy left open). ``PATH`` is the
     filtered value from :func:`_filtered_path` (``repo_root``-aware); every other key is copied
     one at a time from the explicit :data:`_PROVIDER_ENV_PASSTHROUGH_KEYS` allowlist, never in
     bulk.
@@ -713,9 +722,10 @@ def _resolve_cli(name: str, repo_root: str | None = None) -> str | None:
 
 def _terminate_group(proc: subprocess.Popen) -> None:
     """TERM the whole process GROUP first (graceful), then unconditionally KILL the whole group
-    too, after a short grace period — mirrors ``cli/review-gate``'s own ``run_with_timeout``
-    fallback (TERM, wait ~5s, KILL) so a provider CLI's own spawned tool subprocesses are
-    cleaned up too, not just the single direct child a bare ``proc.kill()`` would reach.
+    too, after a short grace period — mirrors the retired bash CLI's ``review-gate`` script's own
+    ``run_with_timeout`` fallback (removed in #29; TERM, wait ~5s, KILL) so a provider CLI's own
+    spawned tool subprocesses are cleaned up too, not just the single direct child a bare
+    ``proc.kill()`` would reach.
     Requires the process to have been started with ``start_new_session=True`` (see
     :func:`_run`), which makes its PID its own process group leader's PID too.
 
@@ -783,10 +793,11 @@ def _run(
     this module's own exception type.
 
     ``merge_stderr`` (default ``True``, preserving the ORIGINAL behavior for every EXISTING call
-    site — codex/gemini/cursor all still get one merged stdout+stderr text, mirroring bash's own
+    site — codex/gemini/cursor all still get one merged stdout+stderr text, mirroring the retired
+    bash CLI's own
     ``raw_output="$(run_with_timeout ... provider_run "$MODEL" "$prompt_file" 2>&1)"`` capture in
-    ``cli/review-gate``'s ``run_agent()``): a live Codex review finding (P2) on this PR's own
-    ``--json-schema`` fix (issue #26 item 3) — a stderr diagnostic line landing AFTER the claude
+    ``review-gate``'s ``run_agent()`` (removed in #29): a live Codex review finding (P2) on this
+    PR's own ``--json-schema`` fix (issue #26 item 3) — a stderr diagnostic line landing AFTER the claude
     lane's own clean JSON envelope on a merged stream defeats
     ``pantheon.verdict.extract_last_json``'s own trailing-JSON scan, which requires NOTHING after
     the JSON object's own closing brace; a LEADING stderr line doesn't break that scan (the
@@ -858,7 +869,8 @@ def _claude(
     neutral_cwd: str | None,
 ) -> str:
     """Provider lane: Claude Code CLI. Default lane — the only one integration-tested (mirrors
-    cli/providers/claude.sh). ``--permission-mode dontAsk`` (not "default"): Claude Code's own
+    the retired bash CLI's ``claude.sh`` provider script, removed in #29). ``--permission-mode
+    dontAsk`` (not "default"): Claude Code's own
     docs describe ``default`` mode as auto-approving reads only — everything else, including a
     tool call that DOES match ``--allowedTools``, still goes through a permission decision nothing
     can answer non-interactively outside a terminal; ``dontAsk`` is documented as the mode "for
@@ -952,8 +964,9 @@ def _codex(
     repo_root: str | None,
     neutral_cwd: str | None,
 ) -> str:
-    """Provider lane: Codex CLI. Best-effort — mirrors cli/providers/codex.sh's ``codex exec -``
-    invocation, prompt piped via stdin. No documented flag equivalent to the claude lane's
+    """Provider lane: Codex CLI. Best-effort — mirrors the retired bash CLI's ``codex.sh``
+    provider script's ``codex exec -`` invocation (removed in #29), prompt piped via stdin. No
+    documented flag equivalent to the claude lane's
     ``--bare`` exists for this CLI as of this writing (researched against Codex's own official
     docs before landing this fix, not assumed) — this lane's own repo-local config/AGENTS.md
     auto-discovery is a disclosed, honest residual exposure the neutral ``cwd`` below narrows
@@ -990,8 +1003,9 @@ def _gemini(
     repo_root: str | None,
     neutral_cwd: str | None,
 ) -> str:
-    """Provider lane: Gemini CLI. Best-effort — mirrors cli/providers/gemini.sh's ``gemini -p
-    <prompt> [-m <model>]`` invocation. No documented flag equivalent to the claude lane's
+    """Provider lane: Gemini CLI. Best-effort — mirrors the retired bash CLI's ``gemini.sh``
+    provider script's ``gemini -p <prompt> [-m <model>]`` invocation (removed in #29). No
+    documented flag equivalent to the claude lane's
     ``--bare`` exists for this CLI as of this writing (researched against Gemini CLI's own
     official docs before landing this fix, not assumed) — same disclosed residual exposure as the
     codex lane above, narrowed but not eliminated by the neutral ``cwd`` below."""
@@ -1014,9 +1028,10 @@ def _cursor(
     repo_root: str | None,
     neutral_cwd: str | None,
 ) -> str:
-    """Provider lane: Cursor CLI (``cursor-agent``). Best-effort — mirrors
-    cli/providers/cursor.sh's ``cursor-agent -p <prompt> [--model <model>]`` invocation. No
-    documented flag equivalent to the claude lane's ``--bare`` exists for this CLI as of this
+    """Provider lane: Cursor CLI (``cursor-agent``). Best-effort — mirrors the retired bash
+    CLI's ``cursor.sh`` provider script's ``cursor-agent -p <prompt> [--model <model>]``
+    invocation (removed in #29). No documented flag equivalent to the claude lane's ``--bare``
+    exists for this CLI as of this
     writing (its own official docs state it "honours the same `.cursor/rules/`, MCP servers... as
     the desktop editor" with no disclosed opt-out — researched before landing this fix, not
     assumed) — same disclosed residual exposure as the codex/gemini lanes above, narrowed but not
@@ -1046,8 +1061,9 @@ def provider_run(
 ) -> str:
     """Dispatches to the named provider lane and returns its raw stdout (merged with stderr, see
     :func:`_run`). ``provider`` must be one of :data:`KNOWN_PROVIDERS` — an unrecognized name is
-    the CALLER's validation responsibility (``pantheon.cli``, mirroring ``cli/review-gate``'s own
-    ``[[ -f "$PROVIDERS_DIR/$PROVIDER.sh" ]]`` check before ever calling this — same order as
+    the CALLER's validation responsibility (``pantheon.cli``, mirroring the retired bash CLI's
+    ``review-gate``'s own ``[[ -f "$PROVIDERS_DIR/$PROVIDER.sh" ]]`` check (removed in #29)
+    before ever calling this — same order as
     bash: validated once, fast, before any network call). ``allowed_tools`` is consumed only by
     the ``claude`` lane (readonly-tier tool scoping — see :func:`_claude`); the other three ignore
     it, matching docs/CLI.md's disclosed "no readonly-tier tool restriction at all" gap for those
@@ -1057,7 +1073,8 @@ def provider_run(
 
     ``neutral_cwd``, when given (``pantheon.cli`` always passes a scratch directory it created
     and owns), is the launched provider's own ``cwd`` — a CRITICAL fix (adversarial review): this
-    used to be ``repo_root`` (mirroring ``cli/review-gate``'s own ``cd "$REPO_ROOT"`` posture),
+    used to be ``repo_root`` (mirroring the retired bash CLI's ``review-gate``'s own
+    ``cd "$REPO_ROOT"`` posture, removed in #29),
     which let a provider's own startup-time config/MCP/hooks auto-discovery reach the PR's own
     checkout before any tool call ever ran — see this module's own docstring for the full finding
     and fix. Left ``None`` (the default), a caller gets the OLD behavior of inheriting this

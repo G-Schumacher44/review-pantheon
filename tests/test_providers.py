@@ -119,8 +119,8 @@ def test_claude_argv_shape(monkeypatch, prompt_file) -> None:
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
     assert "--model" in argv
     assert argv[argv.index("--model") + 1] == "sonnet"
-    # Every call must pass an EXPLICIT env — never an implicit ambient inherit (docs/PYTHON-PORT.md
-    # §5's "constructed clean env, never inherited" rule) — and start its own session/process
+    # Every call must pass an EXPLICIT env — never an implicit ambient inherit (this port's
+    # slice-5 "constructed clean env, never inherited" rule) — and start its own session/process
     # group (so a timeout can reach the whole group, not just this one PID).
     assert captured["kwargs"]["env"] is not None
     assert captured["kwargs"]["shell"] is False
@@ -495,7 +495,7 @@ def test_nonzero_exit_raises_provider_error_with_output(monkeypatch, prompt_file
 # Provider process cwd + repo_root/neutral_cwd threading. A Codex finding originally added
 # cwd=repo_root here (neither provider_run() nor _run() supplied any cwd, so a launched provider
 # inherited whatever directory the gate process happened to be running from instead of the repo
-# root — cli/review-gate's own cd "$REPO_ROOT" posture). A CRITICAL fix from a LATER adversarial
+# root — the retired bash CLI's own cd "$REPO_ROOT" posture (removed in #29)). A CRITICAL fix from a LATER adversarial
 # review reversed that specific choice: cwd=repo_root let a provider's own startup-time
 # config/MCP/hooks auto-discovery reach the PR's own checkout entirely outside --allowedTools's
 # reach (a fake-claude-binary PoC confirmed it would auto-load a PR-committed .mcp.json and fire a
@@ -576,8 +576,8 @@ def test_terminate_group_sends_sigterm_then_sigkill_on_the_whole_group(monkeypat
 
     assert ("killpg", 999, providers.signal.SIGTERM) in calls
     assert ("killpg", 999, providers.signal.SIGKILL) in calls
-    # SIGTERM must be sent before SIGKILL (graceful-then-forced, mirrors cli/review-gate's own
-    # run_with_timeout fallback).
+    # SIGTERM must be sent before SIGKILL (graceful-then-forced, mirrors the retired bash CLI's
+    # own run_with_timeout fallback, removed in #29).
     term_index = calls.index(("killpg", 999, providers.signal.SIGTERM))
     kill_index = calls.index(("killpg", 999, providers.signal.SIGKILL))
     assert term_index < kill_index

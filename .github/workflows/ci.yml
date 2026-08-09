@@ -247,6 +247,42 @@ jobs:
       # on ordinary present-tense prose (e.g. this file's own "before any tool call" phrasing
       # elsewhere in DESIGN.md) — these four are the actual shapes a round-by-round retelling
       # takes, verified against the narrative this check was written to keep out.
+      # Issue #31: PR #29 deleted docs/PYTHON-PORT.md, docs/HARDENING-HISTORY.md, and the whole
+      # cli/ tree, but left 23 files citing those paths as if they still existed — accuracy debt
+      # that misleads a reader into believing dead files are live. This is a FIXED-LIST deny
+      # check, not a general "does every path-shaped string in the tree resolve to a real file"
+      # scanner: a generic version would have to distinguish a real repo-relative citation like
+      # `cli/lib/foo.sh` from an unrelated path-shaped substring that happens to appear in prose
+      # or a URL (e.g. install.sh's own `github.com/.../docs/cli/custom-commands.md` link) —
+      # false positives a maintainer would have to special-case forever. A short, named list of
+      # the specific paths #29 actually deleted has none of that ambiguity: it can never flag
+      # something that was never a citation, and it fails loudly the moment one of these EXACT
+      # strings reappears — the failure mode this issue exists to prevent. Trade-off: it does not
+      # generically catch some future, different deletion; the next one gets its own line here
+      # (or a follow-up graduates this to a real existence-check, if the false-positive problem
+      # above gets solved). This file is excluded from its own scan (its deny-list literals would
+      # otherwise trip themselves).
+      - name: No citations of paths deleted in #29 (docs/PYTHON-PORT.md, docs/HARDENING-HISTORY.md, cli/)
+        run: |
+          set -euo pipefail
+          status=0
+          deny_patterns=(
+            'docs/PYTHON-PORT\.md'
+            'docs/HARDENING-HISTORY\.md'
+            'cli/lib/'
+            'cli/review-gate'
+            'cli/providers/'
+          )
+          for pattern in "${deny_patterns[@]}"; do
+            hits="$(git grep -nE "$pattern" -- ':!.github/workflows/ci.yml' || true)"
+            if [[ -n "$hits" ]]; then
+              echo "::error::found a citation of a path deleted in #29 (pattern: $pattern) — reword it as history instead of a live pointer (see issue #31)"
+              echo "$hits"
+              status=1
+            fi
+          done
+          exit "$status"
+
       - name: DESIGN.md contains no fix-round narrative markers
         run: |
           set -uo pipefail

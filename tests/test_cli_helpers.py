@@ -1,6 +1,6 @@
 """tests/test_cli_helpers.py — pytest unit layer for pantheon.cli's pure-function seams that
 neither tests/test-prompt-assembly-python.sh nor tests/test-execution-tier-python.sh already
-exercise (docs/PYTHON-PORT.md section 4's port slice 4 deliverable: "no 1:1 duplication of the
+exercise (this port's slice-4 deliverable: "no 1:1 duplication of the
 black-box exams").
 
 Scope: `_parse_conf_text` (the gate.conf key=value parser) — no black-box suite drives this

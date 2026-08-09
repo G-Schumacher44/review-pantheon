@@ -86,7 +86,7 @@ check_normalize "an absolute path is refused" "/etc/passwd" false
 check_normalize "an empty path is refused" "" false
 check_normalize "a path that fully collapses to nothing (./.) is refused" "./." false
 
-# Issue #10's trailing-slash class (docs/PYTHON-PORT.md task note): a redundant/doubled separator
+# Issue #10's trailing-slash class: a redundant/doubled separator
 # in the REQUESTED path — not just a resolved symlink target — must also collapse cleanly, since
 # base_pinned_read() normalizes the incoming path up front (see pantheon/basepin.py's own module
 # docstring for why the bash original does not do this and reads a trailing-slash path as a miss).

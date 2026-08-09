@@ -1,8 +1,8 @@
 """pantheon/execution.py — tiered tool-execution policy (readonly default, trusted opt-in) AND
-the argv-validating read-only git call construction. Replaces cli/lib/execution.sh AND
-cli/lib/pantheon-git-readonly.sh — merged into one module because in Python the tiering
-decision and the safe-call construction are the same structural concern (docs/PYTHON-PORT.md
-§5), not two files coordinating through a permission string.
+the argv-validating read-only git call construction. Replaces the retired bash CLI's
+``execution.sh`` AND ``pantheon-git-readonly.sh`` (removed in #29) — merged into one module
+because in Python the tiering decision and the safe-call construction are the same structural
+concern, not two files coordinating through a permission string.
 
 Why this exists (ported unchanged from the bash originals' own rationale): every agent runs
 against content that, on a fork PR, is 100% attacker-controlled. A blanket ``Bash`` tool set
@@ -51,8 +51,9 @@ ARGV VALIDATION (the caller's argv — build_readonly_argv()):
     `--` shifts a validated range into pathspec position" finding structurally, not by a second
     special case for ``--``).
 
-EXEC/WRITE-SURFACE MATRIX — mirrors cli/lib/pantheon-git-readonly.sh's own header table row for
-row. "PY" column names the exact mechanism in this module that closes it.
+EXEC/WRITE-SURFACE MATRIX — mirrors the retired bash CLI's ``pantheon-git-readonly.sh`` (removed
+in #29) own header table row for row. "PY" column names the exact mechanism in this module that
+closes it.
 
   VECTOR                              NEUTRALIZED BY (bash)              PY (this module)
   -----------------------------------  ----------------------------------  --------------------------------
@@ -114,16 +115,16 @@ row. "PY" column names the exact mechanism in this module that closes it.
   later, since the default posture is "absent unless this module put it there", not "present
   unless explicitly unset".
 
-NOT REACHABLE — same reasoning as the bash original (see cli/lib/pantheon-git-readonly.sh's own
-"NOT REACHABLE" section): core.sshCommand/credential.helper/protocol.*.allow (no networked
-subcommand on the allowlist), difftool.*/merge.tool (separate subcommands, not allowlisted), git
-aliases (require pre-existing local/global config write access this wrapper does not grant).
+NOT REACHABLE — same reasoning as the retired bash CLI's ``pantheon-git-readonly.sh`` (removed in
+#29; see its own "NOT REACHABLE" section): core.sshCommand/credential.helper/protocol.*.allow (no
+networked subcommand on the allowlist), difftool.*/merge.tool (separate subcommands, not
+allowlisted), git aliases (require pre-existing local/global config write access this wrapper
+does not grant).
 
 What this does NOT claim to fix: same disclosure as the bash wrapper's own header — this module
 closes every git-side vector above; it says nothing about how the CALLER (a persona-driving CLI)
-enforces that this is the only code path capable of running a subprocess at all. That is
-docs/PYTHON-PORT.md's ``--allowedTools``/``--permission-mode`` wiring, landing with ``cli.py`` at
-Slice 4.
+enforces that this is the only code path capable of running a subprocess at all. That is the
+CLI's own ``--allowedTools``/``--permission-mode`` wiring, landing in ``cli.py``.
 """
 
 from __future__ import annotations
@@ -166,7 +167,7 @@ class WrapperRefused(Exception):
 
 
 # subcommand (argv[0]) must be exactly one of these four — DESIGN.md rule 1's own set, unchanged
-# from cli/lib/pantheon-git-readonly.sh's case statement.
+# from the retired bash CLI's ``pantheon-git-readonly.sh`` case statement (removed in #29).
 READONLY_SUBCOMMANDS: tuple[str, ...] = ("diff", "show", "log", "status")
 
 # --------------------------------------------------------------------------------------------
@@ -229,8 +230,8 @@ def _is_safe_flag(subcommand: str, arg: str) -> bool:
 # from the caller's argv (which build_readonly_argv() has already rejected any '-'-prefixed
 # token from). Applied to every subcommand, not scoped to any one — fsmonitor/hooksPath/pager/
 # editor/signature-verification/maintenance are all properties of the repository scan or git's
-# own startup, not of any one subcommand. Mirrors cli/lib/pantheon-git-readonly.sh's
-# GLOBAL_OVERRIDES array line for line.
+# own startup, not of any one subcommand. Mirrors the retired bash CLI's
+# ``pantheon-git-readonly.sh`` GLOBAL_OVERRIDES array line for line (removed in #29).
 #
 # `-c diff.external=` (an empty value) was tested and REJECTED in the bash original: git
 # interprets an empty diff.external as "run a program named nothing", which errors out and
@@ -261,9 +262,8 @@ GLOBAL_OVERRIDES: tuple[str, ...] = (
 # "absolute" alone is not "trusted". Fixed by never consulting PATH (ambient or otherwise) for
 # this lookup at all: a fixed, hardcoded list of system directories a PR's own tracked content
 # can never write to, first-existing-and-executable wins. No config knob to widen this list —
-# docs/PYTHON-PORT.md does not spec one, and adding one would just relocate the same trust
-# decision to yet another attacker-reachable input (gate.conf is itself base-pinned for exactly
-# this reason elsewhere in this repo).
+# adding one would just relocate the same trust decision to yet another attacker-reachable input
+# (gate.conf is itself base-pinned for exactly this reason elsewhere in this repo).
 TRUSTED_GIT_DIRS: tuple[str, ...] = (
     "/usr/bin",
     "/bin",
@@ -384,7 +384,8 @@ def _verify_commit(side: str, cwd: str | None) -> bool:
 
 def validate_diff_range(args: Sequence[str], cwd: str | None = None) -> str:
     """Structural range verification for ``diff``'s one positional argument — mirrors
-    cli/lib/pantheon-git-readonly.sh's diff-range block line for line. Returns the validated
+    the retired bash CLI's ``pantheon-git-readonly.sh`` diff-range block line for line (removed
+    in #29). Returns the validated
     range string on success; raises WrapperRefused otherwise. Never a substring/pattern check:
     each side is independently confirmed to be a real commit via
     ``git rev-parse --verify --quiet <side>^{commit}`` before diff is ever allowed to run.
@@ -490,16 +491,17 @@ def build_readonly_argv(argv: Sequence[str], cwd: str | None = None) -> list[str
 
 
 def run_readonly_wrapper(argv: Sequence[str], cwd: str | None = None) -> subprocess.CompletedProcess:
-    """The persona-facing entry point — the Python equivalent of the bash script's whole body
-    (``cli/lib/pantheon-git-readonly.sh "$@"``). Validates argv, then runs the real git call
-    through the same hardened core basepin.py uses.
+    """The persona-facing entry point — the Python equivalent of the retired bash CLI's whole
+    ``pantheon-git-readonly.sh "$@"`` body (removed in #29). Validates argv, then runs the real
+    git call through the same hardened core basepin.py uses.
     """
     built = build_readonly_argv(argv, cwd=cwd)
     return run_git(built, cwd=cwd)
 
 
 # ---------------------------------------------------------------------------------------------
-# Tier resolution — replaces cli/lib/execution.sh's three functions. Names and semantics kept
+# Tier resolution — replaces the retired bash CLI's ``execution.sh`` three functions (removed in
+# #29). Names and semantics kept
 # identical (pantheon_allowed_tools_for -> allowed_tools_for, etc.) modulo the pantheon_ prefix,
 # which Python's module namespace already provides (``execution.allowed_tools_for``).
 # ---------------------------------------------------------------------------------------------
@@ -507,8 +509,8 @@ def run_readonly_wrapper(argv: Sequence[str], cwd: str | None = None) -> subproc
 
 def allowed_tools_for(tier: str, wrapper_path: str = "") -> str:
     """Prints (returns) the --allowedTools value for <tier>. <wrapper_path> is ignored for
-    "trusted" (full Bash needs no wrapper). Mirrors
-    cli/lib/execution.sh's pantheon_allowed_tools_for byte for byte, including its fail-safe
+    "trusted" (full Bash needs no wrapper). Mirrors the retired bash CLI's ``execution.sh``
+    pantheon_allowed_tools_for byte for byte (removed in #29), including its fail-safe
     fallback: any tier that is not literally "trusted" resolves to the readonly-shaped value —
     this function is only ever called after validate_execution() has already rejected an
     unrecognized value, so in practice this only ever sees "readonly", but a caller that skips
@@ -520,18 +522,19 @@ def allowed_tools_for(tier: str, wrapper_path: str = "") -> str:
 
 
 def validate_execution(value: str) -> bool:
-    """True if <value> is "readonly" or "trusted", False otherwise. Mirrors
-    cli/lib/execution.sh's pantheon_validate_execution exactly (case-sensitive, exact match —
-    "READONLY", "Trusted", "readonly " (trailing space), and "read-only" are all rejected).
+    """True if <value> is "readonly" or "trusted", False otherwise. Mirrors the retired bash
+    CLI's ``execution.sh`` pantheon_validate_execution exactly (removed in #29; case-sensitive,
+    exact match — "READONLY", "Trusted", "readonly " (trailing space), and "read-only" are all
+    rejected).
     """
     return value in ("readonly", "trusted")
 
 
 def execution_context_note(tier: str, wrapper_path: str) -> str:
     """Prints (returns) a run-context note telling the agent HOW to reach read-only git this run
-    (or "" for "trusted", which needs no substitute instruction). Mirrors
-    cli/lib/execution.sh's pantheon_execution_context_note's wording exactly, including the
-    trailing newline the bash heredoc produces.
+    (or "" for "trusted", which needs no substitute instruction). Mirrors the retired bash CLI's
+    ``execution.sh`` pantheon_execution_context_note's wording exactly (removed in #29), including
+    the trailing newline the bash heredoc produces.
     """
     if tier == "trusted":
         return ""
@@ -592,9 +595,9 @@ def real_home_dir() -> str | None:
 
 
 def _default_user_scripts_dir() -> str | None:
-    """Computes the DEFAULT ``pip install --user`` console-script directory (issue #21 P1,
-    docs/PYTHON-PORT.md §5's "no config knob to widen this list" posture applied to the
-    ``--user`` layout) — WITHOUT reading ``PYTHONUSERBASE``, ``HOME``, or any other environment
+    """Computes the DEFAULT ``pip install --user`` console-script directory (issue #21 P1, the
+    same "no config knob to widen this list" posture applied to the ``--user`` layout) —
+    WITHOUT reading ``PYTHONUSERBASE``, ``HOME``, or any other environment
     variable naming a filesystem location, to compute it. This is Python's own DEFAULT per-user
     base formula, replicated by hand from a value this process cannot have redirected:
     :func:`real_home_dir` (the passwd-database account home — see that function's own docstring
@@ -677,8 +680,8 @@ def resolve_console_script(name: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------------------------
-# CLI — exists purely to give tests/test-git-readonly-wrapper.sh (adapted per docs/PYTHON-PORT.md
-# §4) a black-box subprocess target with the exact same shape as the bash wrapper script:
+# CLI — exists purely to give tests/test-git-readonly-wrapper.sh a black-box subprocess target
+# with the exact same shape as the retired bash wrapper script (removed in #29):
 # ``python -m pantheon.execution wrapper <subcommand> [args...]`` behaves like
 # ``pantheon-git-readonly.sh <subcommand> [args...]`` — same "pantheon-git-readonly: <reason>"
 # refusal prefix on stderr, same exit codes, same passthrough of the real git call's stdout/

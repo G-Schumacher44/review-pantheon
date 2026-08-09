@@ -1,6 +1,6 @@
 """tests/test_execution.py — pytest unit layer for pantheon.execution.resolve_console_script
-(docs/PYTHON-PORT.md section 4's port slice 4 deliverable; issue #21 P1's fixtures land in the
-"pip install --user layout" section below, port slice 5).
+(this port's slice-4 deliverable; issue #21 P1's fixtures land in the
+"pip install --user layout" section below, slice 5).
 
 resolve_console_script is shared by pantheon.cli's _wrapper_invocation() and
 pantheon.providers' default_allowed_tools() (both covered by their own dedicated tests already —
@@ -93,7 +93,7 @@ def test_never_consults_sysconfig_get_path(monkeypatch, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------------------------
-# pip install --user layout — issue #21 P1 (docs/PYTHON-PORT.md's port slice 5): the console
+# pip install --user layout — issue #21 P1 (this port's slice-5 deliverable): the console
 # script isn't adjacent to sys.executable (pip install --user's own separate per-user scripts
 # directory, e.g. ~/.local/bin) — this must now resolve SAFELY via _default_user_scripts_dir's
 # passwd-database-derived, PYTHONUSERBASE-blind computation, not fall back to the unsafe
