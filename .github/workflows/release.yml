@@ -24,9 +24,17 @@
 #   2. build-and-publish — stages the CLI surface (explicit file list, no globs — see the step
 #                below for why), tars it as review-pantheon-<tag>.tar.gz, generates SHA256SUMS,
 #                and creates the GitHub Release with `gh release create`, notes auto-generated.
+#   3. publish-pypi — needs build-and-publish (so a GitHub Release only gets a PyPI counterpart
+#                once the tarball/SHA256SUMS release step above has actually succeeded), builds
+#                the sdist+wheel via `python -m build`, and publishes them with PyPA's official
+#                trusted-publisher action — OIDC only (id-token: write), no API token, no secret.
+#                The trusted publisher on PyPI is configured for owner G-Schumacher44, repo
+#                review-pantheon, workflow release.yml, environment pypi; `environment: pypi`
+#                below must match that configuration exactly or PyPI refuses the OIDC exchange.
 #
 # Permissions are set at the job level, not workflow level, so the `test` job (which needs
-# nothing beyond reading the checkout) doesn't inherit the write scope `build-and-publish` needs.
+# nothing beyond reading the checkout) doesn't inherit the write scope `build-and-publish` needs,
+# and `build-and-publish`'s `contents: write` doesn't leak into `publish-pypi`'s `id-token: write`.
 name: release
 
 on:
@@ -316,3 +324,30 @@ jobs:
             SHA256SUMS \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes
+
+  publish-pypi:
+    # Only runs once the GitHub Release above has actually been created — see this file's header
+    # comment for why this job needs build-and-publish rather than test directly.
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # trusted-publisher OIDC exchange — the only credential this job uses
+      contents: read # just needs to read the tagged checkout to build the sdist/wheel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4 # matches this file's other checkout pins — checks out the pushed tag by default
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install build
+        run: python -m pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Publish to PyPI (trusted publisher — OIDC, no token/secret input)
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2 — https://github.com/pypa/gh-action-pypi-publish/releases/tag/v1.14.2
