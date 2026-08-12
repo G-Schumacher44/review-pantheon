@@ -1530,7 +1530,9 @@ Exit codes (see docs/CLI.md#exit-codes--reading-a-verdict-comment for detail):
   0   green/yellow overall — also draft-PR skip, --dry-run, and "already reviewed" no-ops
   1   red/unverified overall, or a fail-closed abort (bad PR/branch state, gh/git failure,
       a post/state-write failure after the verdict was computed)
-  2   usage error — bad/missing arguments, caught by argparse before any git/gh call
+  2   usage error — unknown flags or missing required arguments, caught by argparse before
+      any git/gh call. An invalid VALUE for a known flag (--execution bogus, --provider bogus)
+      is a fail-closed abort instead: exit 1, after argparse but before any provider call
 
 Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — on the claude
 lane only, the one lane with a tool-scoping mechanism (codex/gemini/cursor run their own CLIs
@@ -1539,7 +1541,8 @@ reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-rea
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
 agents, execution. The behavior keys (execution/provider/rules_file/spec_file/agents) are read
-from the PR's BASE commit, never the working tree — a hostile PR can't rewrite its own gate
+from the PR's BASE commit — in --branch mode, from merge-base(origin/BASE, HEAD) — never the
+working tree — a hostile PR can't rewrite its own gate
 policy. Full table: docs/CLI.md#gateconf.
 
 Run `pantheon gate --help` or `pantheon counsel --help` for subcommand detail and a worked
@@ -1551,7 +1554,9 @@ Exit codes (see docs/CLI.md#exit-codes--reading-a-verdict-comment for detail):
   0   green/yellow overall — also draft-PR skip, --dry-run, and "already reviewed" no-ops
   1   red/unverified overall, or a fail-closed abort (bad PR/branch state, gh/git failure,
       a post/state-write failure after the verdict was computed)
-  2   usage error — bad/missing arguments, caught by argparse before any git/gh call
+  2   usage error — unknown flags or missing required arguments, caught by argparse before
+      any git/gh call. An invalid VALUE for a known flag (--execution bogus, --provider bogus)
+      is a fail-closed abort instead: exit 1, after argparse but before any provider call
 
 Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — on the claude
 lane only, the one lane with a tool-scoping mechanism (codex/gemini/cursor run their own CLIs
@@ -1560,7 +1565,8 @@ reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-rea
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
 agents, execution. execution/provider/rules_file/spec_file/agents are base-pinned (read from the
-PR's base commit, never the working tree) — see docs/CLI.md#gateconf for the full table.
+PR's base commit — in --branch mode, from merge-base(origin/BASE, HEAD) — never the working
+tree) — see docs/CLI.md#gateconf for the full table.
 
 Worked example — zero-token dry run (real gh/git calls, no provider, nothing posted):
   pantheon gate --pr 42 --dry-run
@@ -1575,7 +1581,8 @@ only — the other lanes have no tool-scoping; see SECURITY.md); trusted restore
 reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-readonly-vs-trusted.
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
-execution — base-pinned (read from the PR's base commit) for everything but model/base_branch.
+execution — base-pinned (the PR's base commit; merge-base(origin/BASE, HEAD) in --branch mode)
+for everything but model/base_branch.
 counsel IGNORES the agents= key: its panel is always socrates diogenes plato (use `pantheon
 gate --agents ...` for a custom panel). Full table: docs/CLI.md#gateconf.
 
