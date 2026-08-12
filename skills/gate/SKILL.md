@@ -18,18 +18,21 @@ installed location instead of the source repo.
 ## Locating `pantheon`
 
 `install.sh --claude` installs this skill and the `/gate` command — it does NOT install the CLI
-itself. `pantheon` only ends up on `PATH` via a real `pipx`/`pip install`, or via a Way-B
-(`bootstrap.sh`) install. Before assuming it's missing:
+itself. Before running `pantheon gate`:
 
-1. `command -v pantheon` — an installed package (or a Way-B install) puts it on `PATH`.
-2. Look for a sibling review-pantheon checkout with a venv (e.g.
-   `../review-pantheon` with `pip install -e .` run into its own venv) — a Way-A install still
-   runs the CLI from that checkout, not from the target repo.
-3. Check the default Way-B prefix directly: `~/.review-pantheon/venv/bin/pantheon`.
-4. None of those resolve? Tell the user the CLI surface isn't installed yet and point at
-   [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/SETUP.md)'s
-   three install ways — don't try to run a command that
-   doesn't exist and report the resulting error as if the gate itself failed.
+1. `command -v pantheon` — if that resolves, you're already set (a `pipx`/`pip install`, a
+   Homebrew tap install, or a Way-B `bootstrap.sh` install all land on `PATH`).
+2. Not on `PATH`? Install it — one line, pick whichever you have:
+   - `pipx install review-pantheon` (or `pip install review-pantheon`)
+   - `brew install g-schumacher44/tap/review-pantheon`
+   - Developing against a checkout: `pip install -e .` from inside the review-pantheon repo.
+3. Installed via `bootstrap.sh --prefix <dir>` instead? That's a deliberate zero-`PATH` install —
+   `pantheon` lands at `<prefix>/venv/bin/pantheon`. Add the `export PATH=...` line `bootstrap.sh`
+   prints to your shell rc yourself (it won't do it for you), or invoke that full path directly.
+4. Still nothing? Tell the user the CLI surface isn't installed yet and point at
+   [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/SETUP.md) —
+   don't try to run a command that doesn't exist and report the resulting error as if the gate
+   itself failed.
 
 ## 1. Dry-run first — zero tokens
 

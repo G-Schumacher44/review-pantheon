@@ -388,8 +388,10 @@ run `pantheon gate` against the PR referenced above (ask which PR if none was gi
 a `--dry-run` pass first unless the arguments explicitly request a live run.
 
 `/gate` installs the *procedure*, not the CLI itself — `install.sh --claude` never puts
-`pantheon` on `PATH`. Before running it, check `command -v pantheon`; if that fails, see the
-skill's "Locating `pantheon`" note rather than assuming the command doesn't exist.
+`pantheon` on `PATH`. Before running it, check `command -v pantheon`; if that fails, install it
+(`pipx install review-pantheon`, `brew install g-schumacher44/tap/review-pantheon`, or
+`pip install -e .` from a checkout) — see the skill's "Locating `pantheon`" note for the full
+rundown, including the `bootstrap.sh --prefix` case.
 GATE_EOF
 
   install_file "$gate_tmp" "$dest_root/.claude/commands/gate.md"
