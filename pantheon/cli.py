@@ -1541,8 +1541,9 @@ reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-rea
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
 agents, execution. The behavior keys (execution/provider/rules_file/spec_file/agents) are read
-from the PR's BASE commit — in --branch mode, from merge-base(origin/BASE, HEAD) — never the
-working tree — a hostile PR can't rewrite its own gate
+from the PR's BASE commit — in --branch mode, from the base branch's TIP (origin/BASE),
+deliberately NOT the merge-base, so the branch can't pick an older policy via its fork point —
+never the working tree — a hostile PR can't rewrite its own gate
 policy. Full table: docs/CLI.md#gateconf.
 
 Run `pantheon gate --help` or `pantheon counsel --help` for subcommand detail and a worked
@@ -1565,8 +1566,8 @@ reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-rea
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
 agents, execution. execution/provider/rules_file/spec_file/agents are base-pinned (read from the
-PR's base commit — in --branch mode, from merge-base(origin/BASE, HEAD) — never the working
-tree) — see docs/CLI.md#gateconf for the full table.
+PR's base commit — in --branch mode, from origin/BASE's TIP, deliberately not the merge-base —
+never the working tree) — see docs/CLI.md#gateconf for the full table.
 
 Worked example — zero-token dry run (real gh/git calls, no provider, nothing posted):
   pantheon gate --pr 42 --dry-run
@@ -1581,8 +1582,8 @@ only — the other lanes have no tool-scoping; see SECURITY.md); trusted restore
 reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-readonly-vs-trusted.
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
-execution — base-pinned (the PR's base commit; merge-base(origin/BASE, HEAD) in --branch mode)
-for everything but model/base_branch.
+execution — base-pinned (the PR's base commit; origin/BASE's TIP in --branch mode) for
+everything but model/base_branch.
 counsel IGNORES the agents= key: its panel is always socrates diogenes plato (use `pantheon
 gate --agents ...` for a custom panel). Full table: docs/CLI.md#gateconf.
 
