@@ -74,6 +74,34 @@ else
   pass "default install: generated review.yml's review-pantheon pin is a full commit SHA (or absent)"
 fi
 
+# WAY_A_PIN_SHA must equal the RELEASE TAG'S OWN COMMIT, not merely look like a SHA — a
+# well-formed-but-wrong 40-char hash passes every format check while pinning consumers to
+# nothing (an apollo finding on the v0.2.1 re-pin PR, where a hand-typed SHA with a fabricated
+# tail was caught only by a one-off manual check; this makes the guard durable). Skips loudly
+# when the tag isn't fetchable locally (shallow/tagless clones) — the re-pin workflow runs this
+# suite from a full checkout, which is where the guard matters.
+WAY_A_RELEASE="$(grep -oE '^WAY_A_PIN_RELEASE="v[0-9.]+"' "$INSTALL" | grep -oE 'v[0-9.]+')"
+if [[ -n "$WAY_A_SHA" && -n "$WAY_A_RELEASE" ]]; then
+  # CI checks out shallow and tagless, which made this guard skip exactly where it most needs
+  # to run (Codex finding on its own PR). Fetch just the one tag, quietly, before deciding to
+  # skip — a network failure (offline dev box, air-gapped runner) still degrades to the loud
+  # skip below rather than a false failure.
+  if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/${WAY_A_RELEASE}^{commit}" >/dev/null 2>&1; then
+    git -C "$ROOT" fetch --quiet --no-tags origin "refs/tags/${WAY_A_RELEASE}:refs/tags/${WAY_A_RELEASE}" 2>/dev/null || true
+  fi
+  if TAG_COMMIT="$(git -C "$ROOT" rev-parse -q --verify "refs/tags/${WAY_A_RELEASE}^{commit}" 2>/dev/null)"; then
+    if [[ "$TAG_COMMIT" == "$WAY_A_SHA" ]]; then
+      pass "WAY_A_PIN_SHA equals ${WAY_A_RELEASE}'s own commit ($TAG_COMMIT)"
+    else
+      fail "WAY_A_PIN_SHA ($WAY_A_SHA) does NOT equal ${WAY_A_RELEASE}'s commit ($TAG_COMMIT) — a well-formed but WRONG pin; re-derive it with git rev-parse ${WAY_A_RELEASE}^{}"
+    fi
+  else
+    echo "SKIPPED WAY_A_PIN_SHA-vs-tag equality -- tag $WAY_A_RELEASE not present locally (shallow/tagless clone); run from a full checkout to enforce"
+  fi
+else
+  fail "could not read WAY_A_PIN_SHA/WAY_A_PIN_RELEASE out of install.sh for the tag-equality guard"
+fi
+
 if python3 -c 'import yaml' 2>/dev/null; then
   if python3 -c "import yaml; yaml.safe_load(open('$T1/.github/workflows/review.yml'))" 2>/dev/null; then
     pass "default install: generated review.yml parses as valid YAML"
