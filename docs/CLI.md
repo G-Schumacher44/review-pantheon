@@ -183,8 +183,9 @@ the file will sit untracked-but-visible and can get accidentally `git add -A`'d 
 
 | Exit code | Meaning |
 |---|---|
-| `0` | Overall signal is green or yellow — usable as a CI/script gate on its own, independent of reading the posted comment. Also the draft-PR case: exit 0, nothing posted, nothing reviewed. |
-| nonzero | Overall signal is red or unverified, **or** `gh pr comment` itself failed after the verdict was computed (verdict computed but NOT posted, state not updated — see stderr). |
+| `0` | Overall signal is green or yellow — usable as a CI/script gate on its own, independent of reading the posted comment. Also the draft-PR case (exit 0, nothing posted, nothing reviewed), `--dry-run`, and the "already reviewed at this SHA" no-op. |
+| `1` | Overall signal is red or unverified, **or** any fail-closed abort: bad PR/branch state, a `gh`/`git` failure, an invalid *value* for a known flag (`--execution bogus`, `--provider bogus` — validated after argparse, before any provider call), or `gh pr comment` failing after the verdict was computed (verdict computed but NOT posted, state not updated — see stderr). |
+| `2` | Usage error from argparse itself — an unknown flag or a missing required argument, caught before any git/gh call. |
 
 The posted comment is one bold signal line (🟢 clean pass / 🟡 review notes / 🟠 NOT GATED,
 fail-closed / 🔴 blocked — worst-wins across agents), a verdict table (one row per agent — a
