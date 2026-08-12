@@ -19,6 +19,18 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    # Least privilege (issue #57): this job only reads the checkout — without an explicit block
+    # it inherits the default token scope, inconsistent with composite-action-self-check and
+    # every release.yml job, which are all explicitly scoped.
+    #
+    # Also per that review: first-party actions (actions/checkout, actions/setup-python) are
+    # deliberately pinned by major tag, not full SHA — a documented exception to this repo's
+    # SHA-pin rule, which exists for THIRD-party actions. GitHub compromising its own
+    # first-party actions is a platform-trust failure no SHA pin survives (the runner itself is
+    # theirs), so the pin buys churn, not protection, there. actionlint and the third-party
+    # pins (pypa, rhysd, anthropics) keep the full-SHA discipline.
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -335,6 +347,9 @@ jobs:
     # against a real, pinned public PR. Separate job from lint-and-test so a setup-story
     # regression doesn't get muddled with a lint/fixture failure in the CI summary.
     runs-on: ubuntu-latest
+    # Least privilege (issue #57), same rationale as lint-and-test above: read-only job.
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4

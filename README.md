@@ -2,9 +2,6 @@
 
 <img src="docs/assets/banner.png" alt="review-pantheon — Spec Driven AI Coding toolkit" width="100%"/>
 
-<!-- Badges render only for authenticated viewers while this repo is private; they'll render
-     for everyone once visibility flips to public — this is expected, not broken, and nothing
-     here needs to change when that happens. -->
 [![CI](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![fail-closed by design](https://img.shields.io/badge/fail--closed-by%20design-brightgreen)](#how-the-gate-stays-honest)
