@@ -383,6 +383,82 @@ else
   fail "pantheon.cli is NOT importable — cannot run the Part G equivalent"
 fi
 
+# ---------------------------------------------------------------------------
+# Part H (issue #26) — --help epilogs cover exit-code meanings, the execution-tier safety
+# note, and the gate.conf cross-reference. Real `python3 -m pantheon.cli ... --help`
+# invocations, not a source grep, so a formatter/argparse regression that silently drops the
+# epilog (e.g. reverting RawDescriptionHelpFormatter) is caught the same way a real user's
+# `pantheon --help` would show it.
+# ---------------------------------------------------------------------------
+section "Part H: pantheon/gate/counsel --help epilogs (issue #26)"
+
+if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
+  # NO_COLOR=1 like test-bootstrap-release-e2e.sh's help assertions: modern argparse colorizes
+  # help on a TTY-ish stdout, and ANSI escapes inside the text would break the grep -qF pins
+  # below nondeterministically across environments.
+  top_help="$(NO_COLOR=1 python3 -m pantheon.cli --help 2>&1)"
+  gate_help="$(NO_COLOR=1 python3 -m pantheon.cli gate --help 2>&1)"
+  counsel_help="$(NO_COLOR=1 python3 -m pantheon.cli counsel --help 2>&1)"
+
+  for pair in "top:$top_help" "gate:$gate_help" "counsel:$counsel_help"; do
+    name="${pair%%:*}"
+    text="${pair#*:}"
+    if grep -qF "Exit codes" <<<"$text"; then
+      pass "pantheon $name --help: has an exit-codes section"
+    else
+      fail "pantheon $name --help: missing an exit-codes section"
+    fi
+  done
+
+  if grep -qF "docs/CLI.md#exit-codes--reading-a-verdict-comment" <<<"$gate_help"; then
+    pass "pantheon gate --help: exit-code detail points to docs/CLI.md"
+  else
+    fail "pantheon gate --help: does not cross-reference docs/CLI.md's exit-code section"
+  fi
+
+  if grep -qF "readonly" <<<"$gate_help" && grep -qF "trusted" <<<"$gate_help"; then
+    pass "pantheon gate --help: states the readonly/trusted execution-tier safety note"
+  else
+    fail "pantheon gate --help: missing the execution-tier safety note"
+  fi
+
+  # The tier note must stay HONESTLY SCOPED (Codex P1 on this epilog's own PR): readonly
+  # tool-scopes the claude lane only — codex/gemini/cursor have no equivalent mechanism
+  # (SECURITY.md's scope notes). An unscoped "safe against untrusted PR content" claim here
+  # would tell a --provider codex user they have a protection they do not have.
+  # Pin DISTINCTIVE fragments of the tier paragraph itself, not the bare word "claude" — that
+  # word already appears in the --provider flag help, so a check on it alone stays green even
+  # with the whole tier paragraph deleted (Codex finding: green-by-construction). Both fragments
+  # are single-line in the rendered epilog, so the greps survive argparse's wrapping.
+  if grep -qF "tool-scoping mechanism" <<<"$gate_help" \
+     && grep -qF "no equivalent restriction" <<<"$gate_help" \
+     && ! grep -qF "safe against untrusted" <<<"$gate_help"; then
+    pass "pantheon gate --help: tier safety note is scoped to the claude lane (no blanket safety claim)"
+  else
+    fail "pantheon gate --help: tier note overclaims, or its claude-lane scoping paragraph is missing/degraded"
+  fi
+
+  if grep -qF "gate.conf" <<<"$gate_help" && grep -qF "base-pinned" <<<"$gate_help"; then
+    pass "pantheon gate --help: cross-references gate.conf and its base-pinned keys"
+  else
+    fail "pantheon gate --help: missing the gate.conf cross-reference"
+  fi
+
+  if grep -qF "pantheon gate --pr 42 --dry-run" <<<"$gate_help"; then
+    pass "pantheon gate --help: has the --dry-run worked example"
+  else
+    fail "pantheon gate --help: missing the --dry-run worked example"
+  fi
+
+  if grep -qF "pantheon counsel --pr 42" <<<"$counsel_help"; then
+    pass "pantheon counsel --help: has a worked example"
+  else
+    fail "pantheon counsel --help: missing a worked example"
+  fi
+else
+  fail "pantheon.cli is NOT importable — cannot run the Part H equivalent"
+fi
+
 echo
 echo "execution-tier-python fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

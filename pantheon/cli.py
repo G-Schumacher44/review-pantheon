@@ -1525,16 +1525,95 @@ def _add_gate_flags(parser: argparse.ArgumentParser, *, with_agents: bool) -> No
     )
 
 
+_TOP_LEVEL_EPILOG = """\
+Exit codes (see docs/CLI.md#exit-codes--reading-a-verdict-comment for detail):
+  0   green/yellow overall — also draft-PR skip, --dry-run, and "already reviewed" no-ops
+  1   red/unverified overall, or a fail-closed abort (bad PR/branch state, gh/git failure,
+      a post/state-write failure after the verdict was computed)
+  2   usage error — unknown flags or missing required arguments, caught by argparse before
+      any git/gh call. An invalid VALUE for a known flag (--execution bogus, --provider bogus)
+      is a fail-closed abort instead: exit 1, after argparse but before any provider call
+
+Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — on the claude
+lane only, the one lane with a tool-scoping mechanism (codex/gemini/cursor run their own CLIs
+with no equivalent restriction — see SECURITY.md's scope notes). trusted restores full Bash —
+reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-readonly-vs-trusted.
+
+gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
+agents, execution. The behavior keys (execution/provider/rules_file/spec_file/agents) are read
+from the PR's BASE commit — in --branch mode, from the base branch's TIP (origin/BASE),
+deliberately NOT the merge-base, so the branch can't pick an older policy via its fork point —
+never the working tree — a hostile PR can't rewrite its own gate
+policy. Full table: docs/CLI.md#gateconf.
+
+Run `pantheon gate --help` or `pantheon counsel --help` for subcommand detail and a worked
+example.
+"""
+
+_GATE_EPILOG = """\
+Exit codes (see docs/CLI.md#exit-codes--reading-a-verdict-comment for detail):
+  0   green/yellow overall — also draft-PR skip, --dry-run, and "already reviewed" no-ops
+  1   red/unverified overall, or a fail-closed abort (bad PR/branch state, gh/git failure,
+      a post/state-write failure after the verdict was computed)
+  2   usage error — unknown flags or missing required arguments, caught by argparse before
+      any git/gh call. An invalid VALUE for a known flag (--execution bogus, --provider bogus)
+      is a fail-closed abort instead: exit 1, after argparse but before any provider call
+
+Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — on the claude
+lane only, the one lane with a tool-scoping mechanism (codex/gemini/cursor run their own CLIs
+with no equivalent restriction — see SECURITY.md's scope notes). trusted restores full Bash —
+reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-readonly-vs-trusted.
+
+gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
+agents, execution. execution/provider/rules_file/spec_file/agents are base-pinned (read from the
+PR's base commit — in --branch mode, from origin/BASE's TIP, deliberately not the merge-base —
+never the working tree) — see docs/CLI.md#gateconf for the full table.
+
+Worked example — zero-token dry run (real gh/git calls, no provider, nothing posted):
+  pantheon gate --pr 42 --dry-run
+"""
+
+_COUNSEL_EPILOG = """\
+Exit codes: identical to `pantheon gate` — see docs/CLI.md#exit-codes--reading-a-verdict-comment.
+0 = green/yellow overall, 1 = red/unverified or a fail-closed abort, 2 = usage error.
+
+Execution tiers: readonly (default) restricts Bash to a read-only git wrapper (claude lane
+only — the other lanes have no tool-scoping; see SECURITY.md); trusted restores full Bash —
+reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-readonly-vs-trusted.
+
+gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
+execution — base-pinned (the PR's base commit; origin/BASE's TIP in --branch mode) for
+everything but model/base_branch.
+counsel IGNORES the agents= key: its panel is always socrates diogenes plato (use `pantheon
+gate --agents ...` for a custom panel). Full table: docs/CLI.md#gateconf.
+
+Worked example — run the counsel panel (socrates, diogenes, plato) against a PR that changes a
+design doc:
+  pantheon counsel --pr 42
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pantheon")
+    parser = argparse.ArgumentParser(
+        prog="pantheon",
+        epilog=_TOP_LEVEL_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    gate_parser = subparsers.add_parser("gate", help="Run the review gate against a PR.")
+    gate_parser = subparsers.add_parser(
+        "gate",
+        help="Run the review gate against a PR.",
+        epilog=_GATE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_gate_flags(gate_parser, with_agents=True)
 
     counsel_parser = subparsers.add_parser(
         "counsel",
         help='Run the counsel panel (sugar for "gate --agents \\"socrates diogenes plato\\"").',
+        epilog=_COUNSEL_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_gate_flags(counsel_parser, with_agents=False)
 
