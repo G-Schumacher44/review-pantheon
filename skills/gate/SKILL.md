@@ -18,18 +18,30 @@ installed location instead of the source repo.
 ## Locating `pantheon`
 
 `install.sh --claude` installs this skill and the `/gate` command — it does NOT install the CLI
-itself. `pantheon` only ends up on `PATH` via a real `pipx`/`pip install`, or via a Way-B
-(`bootstrap.sh`) install. Before assuming it's missing:
+itself. Before running `pantheon gate`:
 
-1. `command -v pantheon` — an installed package (or a Way-B install) puts it on `PATH`.
-2. Look for a sibling review-pantheon checkout with a venv (e.g.
-   `../review-pantheon` with `pip install -e .` run into its own venv) — a Way-A install still
-   runs the CLI from that checkout, not from the target repo.
-3. Check the default Way-B prefix directly: `~/.review-pantheon/venv/bin/pantheon`.
-4. None of those resolve? Tell the user the CLI surface isn't installed yet and point at
-   [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/SETUP.md)'s
-   three install ways — don't try to run a command that
-   doesn't exist and report the resulting error as if the gate itself failed.
+1. `command -v pantheon` — if that resolves, you're already set (a `pipx`/`pip install`, a
+   Homebrew tap install, or a Way-B `bootstrap.sh` install with its export line persisted all
+   land on `PATH`).
+2. Not on `PATH`? Check for an EXISTING `bootstrap.sh --prefix` install before installing a
+   second copy: the default prefix puts it at `~/.review-pantheon/venv/bin/pantheon`, but a
+   custom `--prefix <dir>` lands at `<dir>/venv/bin/pantheon` — if the default path is empty
+   and a bootstrap install is plausible, ask the user where they pointed `--prefix` rather
+   than assuming absence. Either way that's a deliberate zero-`PATH` install — add the
+   `export PATH=...` line `bootstrap.sh` printed to the shell rc (it won't do it for you), or
+   invoke the full path directly.
+3. Genuinely not installed? One line, pick whichever you have:
+   - `pipx install review-pantheon` (or `pip install review-pantheon`). If pipx's own app
+     directory isn't on `PATH` (install succeeds, `command -v` still fails), run
+     `pipx ensurepath` and open a fresh shell.. If pipx's own app
+     directory isn't on `PATH` (install succeeds, `command -v` still fails), run
+     `pipx ensurepath` and open a fresh shell.
+   - `brew install g-schumacher44/tap/review-pantheon`
+   - Developing against a checkout: `pip install -e .` from inside the review-pantheon repo.
+4. Still nothing? Tell the user the CLI surface isn't installed yet and point at
+   [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/SETUP.md) —
+   don't try to run a command that doesn't exist and report the resulting error as if the gate
+   itself failed.
 
 ## 1. Dry-run first — zero tokens
 
