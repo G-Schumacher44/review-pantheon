@@ -517,7 +517,8 @@ assert_contains "repo-root-redaction" "without PANTHEON_REPO_ROOT, the absolute 
 # repo_root (see _home_directory_redaction_targets's docstring) -- overriding both together
 # keeps that ancestor relationship true without depending on the real operator's own $HOME.
 reset_agent_env
-FAKE_HOME="$(mktemp -d)"
+FAKE_HOME="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$FAKE_HOME" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 FIXTURE_PARENT_LEAK_ROOT="$FAKE_HOME/dev/review-pantheon"
 mkdir -p "$FIXTURE_PARENT_LEAK_ROOT"
 ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST ARTEMIS_TOP="see summary"
@@ -571,7 +572,8 @@ unset PANTHEON_REPO_ROOT
 # finding text cites the REALPATH-RESOLVED spelling instead -- a textually different string
 # naming the identical directory, which a plain string-equality redaction target never matches.
 reset_agent_env
-SYMLINK_SCRATCH="$(mktemp -d)"
+SYMLINK_SCRATCH="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$SYMLINK_SCRATCH" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 REAL_REPO_DIR="$SYMLINK_SCRATCH/real-repo"
 SYMLINK_REPO_DIR="$SYMLINK_SCRATCH/repo-via-symlink"
 mkdir -p "$REAL_REPO_DIR"
@@ -688,7 +690,9 @@ rm -f "$HOSTILE_ROOT_FILE"
 # require the match to end at a real path boundary (a "/", a non-path-component character, or
 # end of string) before redacting -- proven broken pre-fix (git-stash comparison) below.
 reset_agent_env
-FAKE_HOME_SIBLING="$(mktemp -d)/alice"
+FAKE_HOME_SIBLING_BASE="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$FAKE_HOME_SIBLING_BASE" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
+FAKE_HOME_SIBLING="$FAKE_HOME_SIBLING_BASE/alice"
 mkdir -p "$FAKE_HOME_SIBLING"
 FAKE_HOME_PARENT="$(dirname "$FAKE_HOME_SIBLING")"
 FIXTURE_SIBLING_REPO_ROOT="$FAKE_HOME_SIBLING/dev/review-pantheon"

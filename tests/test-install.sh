@@ -48,7 +48,8 @@ SKILLS=(gate counsel spec-driven design-contract)
 #    thin caller of the published action (issue #36 — no vendored pantheon/ package or
 #    action/review.yml copy any more), no editor/CLI dirs appear.
 # ---------------------------------------------------------------------------
-T1="$(mktemp -d)"
+T1="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$T1" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 "$INSTALL" "$T1" >/dev/null
 
 assert_file "default install: personas copied to .github/review-agents" "$T1/.github/review-agents/artemis.md"
@@ -103,7 +104,8 @@ rm -rf "$T1"
 # ---------------------------------------------------------------------------
 # 2. All four flags together against a fresh target — expected files land.
 # ---------------------------------------------------------------------------
-T2="$(mktemp -d)"
+T2="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$T2" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 "$INSTALL" "$T2" --claude --cursor --codex --gemini >/dev/null
 
 for p in "${PERSONAS[@]}"; do
@@ -328,7 +330,8 @@ rm -rf "$T2"
 # ---------------------------------------------------------------------------
 # 5. Individual flags don't require each other — --gemini alone doesn't touch .claude/.cursor.
 # ---------------------------------------------------------------------------
-T3="$(mktemp -d)"
+T3="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$T3" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 "$INSTALL" "$T3" --gemini >/dev/null
 assert_file "gemini alone: socrates.toml generated" "$T3/.gemini/commands/socrates.toml"
 if [[ ! -e "$T3/.claude" && ! -e "$T3/.cursor" && ! -e "$T3/.agents" ]]; then
@@ -355,7 +358,8 @@ rm -rf "$T3"
 #    sibling "repo" — a copy of install.sh next to an agents/ dir holding the
 #    five real personas plus the fixture — and runs that copy.
 # ---------------------------------------------------------------------------
-FIXTURE_ROOT="$(mktemp -d)"
+FIXTURE_ROOT="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$FIXTURE_ROOT" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 mkdir -p "$FIXTURE_ROOT/agents"
 cp "$INSTALL" "$FIXTURE_ROOT/install.sh"
 ln -s "$ROOT/skills" "$FIXTURE_ROOT/skills"
@@ -376,7 +380,8 @@ A line with a quote: she said "hi" to him.
 A raw triple-quote marker: """ should not break the wrapping string.
 EOF
 
-T6="$(mktemp -d)"
+T6="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$T6" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 "$FIXTURE_ROOT/install.sh" "$T6" --gemini --cursor --codex >/dev/null 2>&1
 
 assert_file "fixture: gemini toml generated" "$T6/.gemini/commands/fixture-escape.toml"
@@ -485,7 +490,8 @@ else
 fi
 
 # 7b. A target-repo argument alongside --user — error, exits nonzero.
-T7="$(mktemp -d)"
+T7="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$T7" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 TARGET_ARG_OUT="$("$INSTALL" "$T7" --user --claude 2>&1)"; TARGET_ARG_STATUS=$?
 if [[ "$TARGET_ARG_STATUS" -ne 0 ]] && grep -qi "not a target repo\|unexpected argument" <<<"$TARGET_ARG_OUT"; then
   pass "--user with a target-repo argument: exits nonzero with a clear message"
@@ -497,7 +503,8 @@ rm -rf "$T7"
 # 7c. Real install, HOME overridden to a scratch dir — expected files land per tool,
 #     matching the SAME per-tool destinations as the repo-level install (Section 2),
 #     just rooted at $HOME instead of a target repo.
-T8="$(mktemp -d)"
+T8="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$T8" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 HOME="$T8" "$INSTALL" --user --claude --cursor --codex --gemini >/dev/null
 
 for p in "${PERSONAS[@]}"; do

@@ -27,7 +27,8 @@ fail() { echo "FAIL $1"; FAIL=$((FAIL + 1)); }
 
 section() { echo; echo "== $1 =="; }
 
-WORKDIR="$(mktemp -d)"
+WORKDIR="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$WORKDIR" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 trap 'rm -rf "$WORKDIR"' EXIT
 
 TAG="v8.8.8"
