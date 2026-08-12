@@ -335,6 +335,42 @@ def test_loads_rejects_a_129_level_object_nesting_that_the_pre_fix_flat_scanner_
         jqjson.loads(_nested_object_json(129))
 
 
+# Shared live-jq bisection helpers — one copy, used by BOTH live-bisection cross-checks below (the
+# pure object:array ratio test and issue #30's mixed-nesting additivity test). Factored out rather
+# than duplicated per test so a future change to the jq invocation (the timeout below was added
+# exactly this way) lands in one place instead of silently diverging between two copies.
+def _require_jq() -> str:
+    """The jq binary path, or a loud skip when jq is absent — the shared front door every live
+    cross-check against a real jq binary goes through."""
+    import shutil
+
+    jq_bin = shutil.which("jq")
+    if jq_bin is None:
+        pytest.skip("jq not installed in this environment — cannot cross-check live")
+    return jq_bin
+
+
+def _jq_accepts(jq_bin: str, doc: str) -> bool:
+    import subprocess
+
+    # timeout bounds a hung/misbehaving jq so a live-bisection test can never block the suite
+    # indefinitely — generous (30s) since a single parse of even a 20000-deep document is instant.
+    result = subprocess.run([jq_bin, "-c", "."], input=doc, capture_output=True, text=True, timeout=30)
+    return result.returncode == 0
+
+
+def _bisect_last_ok(jq_bin: str, builder, lo_ok: int, hi_fail: int) -> int:
+    # Largest N in (lo_ok, hi_fail) real jq still accepts builder(N) for — assumes builder is
+    # monotonic (accepted below the boundary, refused at/above it), which every nesting builder is.
+    while hi_fail - lo_ok > 1:
+        mid = (lo_ok + hi_fail) // 2
+        if _jq_accepts(jq_bin, builder(mid)):
+            lo_ok = mid
+        else:
+            hi_fail = mid
+    return lo_ok
+
+
 def test_depth_cost_ratio_matches_real_jq_live_bisected() -> None:
     # Live, bisected cross-check against the actual jq binary — deliberately does NOT assume any
     # one absolute cap (jq-1.7 vs. a newer jq build can differ there; confirmed live: jq-1.7 in
@@ -342,31 +378,13 @@ def test_depth_cost_ratio_matches_real_jq_live_bisected() -> None:
     # and pure object nesting at exactly 128 — a 2:1 ratio; a local jq-1.8.2 build caps them at
     # 10000/5000 respectively — same 2:1 ratio, different absolute budget). What this module's
     # own cost weighting must match is the RATIO, not any one jq version's own absolute number.
-    import shutil
-    import subprocess
-
-    jq_bin = shutil.which("jq")
-    if jq_bin is None:
-        pytest.skip("jq not installed in this environment — cannot cross-check live")
-
-    def _jq_accepts(doc: str) -> bool:
-        result = subprocess.run([jq_bin, "-c", "."], input=doc, capture_output=True, text=True)
-        return result.returncode == 0
-
-    def _bisect_last_ok(builder, lo_ok: int, hi_fail: int) -> int:
-        while hi_fail - lo_ok > 1:
-            mid = (lo_ok + hi_fail) // 2
-            if _jq_accepts(builder(mid)):
-                lo_ok = mid
-            else:
-                hi_fail = mid
-        return lo_ok
+    jq_bin = _require_jq()
 
     # Upper bisection bound large enough for a generous real-world jq build (verified live up to
     # 20000 against jq-1.8.2 during this fix's own investigation) without being so large the
     # bisection itself becomes slow.
-    array_cap = _bisect_last_ok(_nested_array_json, 1, 20000)
-    object_cap = _bisect_last_ok(_nested_object_json, 1, 20000)
+    array_cap = _bisect_last_ok(jq_bin, _nested_array_json, 1, 20000)
+    object_cap = _bisect_last_ok(jq_bin, _nested_object_json, 1, 20000)
 
     assert array_cap >= 2, f"suspiciously shallow real-jq array cap ({array_cap}) — is jq actually installed correctly?"
     # The 2:1 ratio itself is what this module's _JQ_OBJECT_DEPTH_COST/_JQ_ARRAY_DEPTH_COST encode
@@ -392,6 +410,117 @@ def test_depth_cost_ratio_matches_real_jq_live_bisected() -> None:
         jqjson.loads(_nested_object_json(object_cap))
         with pytest.raises(jqjson.JqParseError, match="depth limit"):
             jqjson.loads(_nested_object_json(object_cap + 1))
+
+
+# ---------------------------------------------------------------------------------------------
+# MIXED object/array depth-cost parity (issue #30) — the pure-case work above (issue #26 P1)
+# pinned jq's 2:1 object:array per-level cost live-bisected ONLY for pure-object and pure-array
+# nesting; it left the ADDITIVITY of that model across MIXED documents (`{"a":[{"b":[...]}]}`
+# shapes) asserted-by-construction in _check_depth_limit's own running-sum scanner but never
+# pinned against a real jq binary. This section closes that coverage hole. Live-bisected against
+# a real jq binary during this fix (jq-1.8.2, budget 10000/5000; the additive prediction matched
+# jq's actual mixed boundary EXACTLY on every pattern):
+#
+#     pattern         repeating unit          unit cost (2·objs + 1·arrs)   jq cap      predicted
+#     alt obj-outer   {"a":[ ... ]}           2+1 = 3                       3333        10000//3
+#     alt arr-outer   [{"a": ... }]           2+1 = 3                       3333        10000//3
+#     object-heavy    {"a":{"b":[ ... ]}}     2+2+1 = 5                     2000        10000//5
+#     array-heavy     [[{"a": ... }]]         2+1+1 = 4                     2500        10000//4
+#
+# So jq charges mixed nesting the SAME additive per-level cost as pure nesting: the parse-depth
+# budget consumed at the deepest point is exactly the sum of each enclosing bracket's own weight
+# along that path — NO cross-type interaction, no different accounting when the types alternate.
+# The model in pantheon.jqjson already matches; these fixtures pin it so the additivity claim
+# fails loudly if _check_depth_limit ever drifts (verified as a genuine failure via a negative
+# control — an off-by-one in either per-bracket cost breaks the exact-boundary assertions below).
+# ---------------------------------------------------------------------------------------------
+
+
+def _mixed_alt_obj_outer(units: int) -> str:
+    # Alternating object-then-array, object outermost: `{"a":[{"a":[ ... ]}]}`. Each unit is one
+    # object level (cost 2) wrapping one array level (cost 1) — additive cost 3 per unit.
+    return '{"a":[' * units + "1" + "]}" * units
+
+
+def _mixed_alt_arr_outer(units: int) -> str:
+    # Same alternation, array outermost: `[{"a":[{"a": ... }]}]`. Additive cost 3 per unit — the
+    # outer/inner ordering must not change the total, since additivity has no cross-type term.
+    return '[{"a":' * units + "1" + "}]" * units
+
+
+def _mixed_object_heavy(units: int) -> str:
+    # Two object levels per one array level: `{"a":{"b":[ ... ]}}`. Additive cost 2+2+1 = 5.
+    return '{"a":{"b":[' * units + "1" + "]}}" * units
+
+
+def _mixed_array_heavy(units: int) -> str:
+    # Two array levels per one object level: `[[{"a": ... }]]`. Additive cost 1+1+2 = 4.
+    return '[[{"a":' * units + "1" + "}]]" * units
+
+
+# (builder, additive unit cost in jq budget units) — the cost each repeating unit spends, derived
+# purely from this module's own _JQ_OBJECT_DEPTH_COST/_JQ_ARRAY_DEPTH_COST weights, NOT hardcoded.
+def _mixed_patterns() -> list:
+    from pantheon.jqjson import _JQ_ARRAY_DEPTH_COST as A
+    from pantheon.jqjson import _JQ_OBJECT_DEPTH_COST as O
+
+    return [
+        ("alt_obj_outer", _mixed_alt_obj_outer, O + A),
+        ("alt_arr_outer", _mixed_alt_arr_outer, O + A),
+        ("object_heavy", _mixed_object_heavy, 2 * O + A),
+        ("array_heavy", _mixed_array_heavy, O + 2 * A),
+    ]
+
+
+def test_mixed_nesting_depth_cost_is_additive_in_process() -> None:
+    # Version-INDEPENDENT: pins _check_depth_limit's own boundary for each mixed pattern against
+    # the additive prediction (budget // unit_cost), at this module's own fixed _JQ_MAX_PARSE_DEPTH
+    # (256). This is the fixture the issue asked for: it fails if the running-sum scanner ever
+    # stops treating mixed nesting as the plain sum of per-bracket costs along the deepest path.
+    from pantheon.jqjson import _JQ_MAX_PARSE_DEPTH as CAP
+
+    for _name, builder, unit_cost in _mixed_patterns():
+        predicted_cap = CAP // unit_cost
+        # Deepest document still accepted: exactly predicted_cap units.
+        jqjson.loads(builder(predicted_cap))  # must not raise
+        # One unit past the additive boundary must be refused — same rc=5 class as pure nesting.
+        with pytest.raises(jqjson.JqParseError, match="depth limit"):
+            jqjson.loads(builder(predicted_cap + 1))
+
+
+def test_mixed_nesting_depth_cost_matches_real_jq_live_bisected() -> None:
+    # Live, bisected cross-check against the actual jq binary — the empirical half of issue #30's
+    # deliverable. Mirrors test_depth_cost_ratio_matches_real_jq_live_bisected exactly: bisect real
+    # jq's own boundary for each mixed pattern, and assert it matches the ADDITIVE prediction
+    # derived from real jq's OWN pure-array budget (never a hardcoded absolute, so it holds across
+    # jq builds — jq-1.7 caps array nesting at 256, a local jq-1.8.2 at 10000, both additive).
+    jq_bin = _require_jq()
+
+    # Real jq's own per-level budget in ARRAY units (1 unit per array level), bisected live — the
+    # denominator the additive prediction divides by. Upper bound generous for a large jq build
+    # (verified live to 20000 on jq-1.8.2) without making the bisection slow.
+    budget = _bisect_last_ok(jq_bin, _nested_array_json, 1, 20000)
+    assert budget >= 6, f"suspiciously shallow real-jq array budget ({budget}) — is jq actually installed correctly?"
+
+    for name, builder, unit_cost in _mixed_patterns():
+        jq_cap = _bisect_last_ok(jq_bin, builder, 1, budget + 1)
+        predicted = budget // unit_cost
+        assert jq_cap == predicted, (
+            f"real jq's mixed-nesting cap for {name} ({jq_cap}) does not match the additive "
+            f"prediction (budget {budget} // unit_cost {unit_cost} = {predicted}) — jq charges "
+            "mixed nesting DIFFERENTLY from the sum of its pure per-bracket costs on this jq build"
+        )
+
+    # When the live jq's own budget happens to match this module's pinned constant (jq-1.7 in CI),
+    # also cross-check this module's OWN boundary directly against the live one — the same
+    # conditional the pure-case bisection test uses (a newer dev-box jq legitimately disagrees on
+    # the ABSOLUTE number while agreeing on the additive algorithm).
+    if budget == jqjson._JQ_MAX_PARSE_DEPTH:
+        for _name, builder, unit_cost in _mixed_patterns():
+            cap = budget // unit_cost
+            jqjson.loads(builder(cap))
+            with pytest.raises(jqjson.JqParseError, match="depth limit"):
+                jqjson.loads(builder(cap + 1))
 
 
 # ---------------------------------------------------------------------------------------------

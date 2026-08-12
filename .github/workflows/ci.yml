@@ -57,6 +57,34 @@ jobs:
           done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
           exit "$status"
 
+      # Issue #43: a sandbox-denied `mktemp -d` (e.g. "Operation not permitted") leaves its
+      # target variable empty when the assignment's exit status goes unchecked. A subsequent
+      # `git -C "$VAR"`/`cd "$VAR"`/`rm -rf "$VAR"` then silently targets the CURRENT directory
+      # instead of the isolated scratch dir it was meant to be — the exact failure this repo hit
+      # live (tests/test-state-persistence-python.sh's ANCESTRY_REPO: an agent's sandbox denied
+      # `mktemp -d`, and `git -C "" checkout --orphan orphan-branch` ran against this repo
+      # itself). No shellcheck rule covers this pattern, hence a dedicated grep guard, in the
+      # style of the deleted-path guard below. Every `mktemp -d` assignment repo-wide must fail
+      # closed (`|| { ...; exit 1; }` on the SAME line as the assignment).
+      - name: No unchecked "mktemp -d" assignments (issue #43)
+        run: |
+          set -euo pipefail
+          status=0
+          # Three review findings hardened this guard on its own PR: (1) `mktemp -d` takes
+          # options/templates (`-d -p /tmp`, `-d /tmp/foo.XXXXXX`), so the match can't require
+          # a bare `-d)`; (2) "contains ||" is not "fails closed" — `|| true` and `|| echo warn`
+          # swallow the failure exactly like no guard at all; (3) nor is "contains the WORD
+          # exit" — `|| echo "please exit"` has the word in prose and terminates nothing. The
+          # exemption therefore requires exit/die in COMMAND position: immediately after `||`,
+          # `{`, or `;` on the same line.
+          hits="$(git grep -nE '="?\$\(mktemp -d[^)]*\)"?' -- '*.sh' ':!.github/workflows/ci.yml' | grep -vE '(\|\|[[:space:]]*\{?[[:space:]]*|;[[:space:]]*)(exit|die)\b' || true)"
+          if [[ -n "$hits" ]]; then
+            echo "::error::found a 'mktemp -d' assignment whose same-line '||' handler does not exit/die (or has no handler at all) — see issue #43 (a sandbox-denied mktemp leaves the variable empty, and an unguarded git -C/cd/rm -rf on it then targets the CURRENT directory instead of the isolated scratch dir; '|| true' swallows the failure just as badly as no check)"
+            echo "$hits"
+            status=1
+          fi
+          exit "$status"
+
       - name: py_compile every Python file
         run: |
           set -euo pipefail

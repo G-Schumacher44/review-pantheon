@@ -184,7 +184,8 @@ refuse "git show --output=/tmp/pantheon-wrapper-test-pwned3 (still refused)" sho
 
 # Range-based fixtures (`HEAD~1...HEAD`) run against a dedicated two-commit scratch repo, not
 # $ROOT — see accept_in()'s own comment for why $ROOT's checkout depth can't be relied on here.
-SCRATCH_REPO="$(mktemp -d)"
+SCRATCH_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$SCRATCH_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$SCRATCH_REPO" init -q
 git -C "$SCRATCH_REPO" config user.email "test@example.com"
 git -C "$SCRATCH_REPO" config user.name "test"
@@ -257,7 +258,8 @@ rm -rf "$SCRATCH_REPO"
 # ---------------------------------------------------------------------------
 section "Configured external-diff-driver bypass (attributes + config, no --ext-diff flag)"
 
-DRIVER_REPO="$(mktemp -d)"
+DRIVER_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$DRIVER_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$DRIVER_REPO" init -q
 git -C "$DRIVER_REPO" config user.email "test@example.com"
 git -C "$DRIVER_REPO" config user.name "test"
@@ -315,7 +317,8 @@ rm -rf "$DRIVER_REPO"
 # ---------------------------------------------------------------------------
 section "Configured textconv bypass via 'log -U<n>' (Codex P1, PR #28)"
 
-TEXTCONV_REPO="$(mktemp -d)"
+TEXTCONV_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$TEXTCONV_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$TEXTCONV_REPO" init -q
 git -C "$TEXTCONV_REPO" config user.email "test@example.com"
 git -C "$TEXTCONV_REPO" config user.name "test"
@@ -367,7 +370,8 @@ rm -rf "$TEXTCONV_REPO"
 # ---------------------------------------------------------------------------
 section "Index-write hygiene (status must not touch .git/index)"
 
-LOCKS_REPO="$(mktemp -d)"
+LOCKS_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$LOCKS_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$LOCKS_REPO" init -q
 git -C "$LOCKS_REPO" config user.email "test@example.com"
 git -C "$LOCKS_REPO" config user.name "test"
@@ -409,7 +413,8 @@ rm -rf "$LOCKS_REPO"
 # ---------------------------------------------------------------------------
 section "Configured fsmonitor-hook bypass (core.fsmonitor, no model-supplied flag)"
 
-FSMON_REPO="$(mktemp -d)"
+FSMON_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$FSMON_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$FSMON_REPO" init -q
 git -C "$FSMON_REPO" config user.email "test@example.com"
 git -C "$FSMON_REPO" config user.name "test"
@@ -472,7 +477,8 @@ rm -rf "$FSMON_REPO"
 # ---------------------------------------------------------------------------
 section "Configured clean/smudge filter bypass (working-tree-touching diff forms vs. a proper range)"
 
-FILTER_REPO="$(mktemp -d)"
+FILTER_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$FILTER_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$FILTER_REPO" init -q
 git -C "$FILTER_REPO" config user.email "test@example.com"
 git -C "$FILTER_REPO" config user.name "test"
@@ -540,7 +546,8 @@ rm -rf "$FILTER_REPO"
 # ---------------------------------------------------------------------------
 section "Trace-output-sink env vars (GIT_TRACE and siblings must not write to a tracked file)"
 
-TRACE_REPO="$(mktemp -d)"
+TRACE_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$TRACE_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$TRACE_REPO" init -q
 git -C "$TRACE_REPO" config user.email "test@example.com"
 git -C "$TRACE_REPO" config user.name "test"
@@ -565,7 +572,8 @@ rm -rf "$TRACE_REPO"
 # inside it) is a distinct code path from GIT_TRACE's plain-file form above — worth its own
 # fixture, with a negative control (raw git DOES create a file there) proving this one is live
 # too, matching the pattern the config-driven fixtures above use.
-TRACE2_REPO="$(mktemp -d)"
+TRACE2_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$TRACE2_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$TRACE2_REPO" init -q
 git -C "$TRACE2_REPO" config user.email "test@example.com"
 git -C "$TRACE2_REPO" config user.name "test"
@@ -573,7 +581,8 @@ echo "a" > "$TRACE2_REPO/f.txt"
 git -C "$TRACE2_REPO" add f.txt
 git -C "$TRACE2_REPO" commit -q -m "first"
 
-TRACE2_MARKER_DIR_RAW="$(mktemp -d)"
+TRACE2_MARKER_DIR_RAW="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$TRACE2_MARKER_DIR_RAW" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 ( cd "$TRACE2_REPO" && GIT_TRACE2_EVENT="$TRACE2_MARKER_DIR_RAW" git status >/dev/null 2>&1 )
 if [[ -n "$(ls -A "$TRACE2_MARKER_DIR_RAW" 2>/dev/null)" ]]; then
   pass "negative control: RAW git (no wrapper) DOES populate a GIT_TRACE2_EVENT-pointed directory — fixture is live"
@@ -581,7 +590,8 @@ else
   fail "negative control FAILED: raw git did not populate the GIT_TRACE2_EVENT directory at all — this fixture is not exercising anything"
 fi
 
-TRACE2_MARKER_DIR_WRAPPED="$(mktemp -d)"
+TRACE2_MARKER_DIR_WRAPPED="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$TRACE2_MARKER_DIR_WRAPPED" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 ( cd "$TRACE2_REPO" && GIT_TRACE2_EVENT="$TRACE2_MARKER_DIR_WRAPPED" "${WRAPPER_CMD[@]}" status >/dev/null 2>&1 )
 if [[ -n "$(ls -A "$TRACE2_MARKER_DIR_WRAPPED" 2>/dev/null)" ]]; then
   fail "GIT_TRACE2_EVENT populated a directory via the wrapper — trace-sink regression"
@@ -605,7 +615,8 @@ rm -rf "$TRACE2_REPO" "$TRACE2_MARKER_DIR_RAW" "$TRACE2_MARKER_DIR_WRAPPED"
 # ---------------------------------------------------------------------------
 section "'..'-substring range spoofed by a same-named path (foo..bar as a tracked file + clean filter)"
 
-SPOOF_REPO="$(mktemp -d)"
+SPOOF_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$SPOOF_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$SPOOF_REPO" init -q
 git -C "$SPOOF_REPO" config user.email "test@example.com"
 git -C "$SPOOF_REPO" config user.name "test"
@@ -669,7 +680,8 @@ rm -rf "$SPOOF_REPO"
 # ---------------------------------------------------------------------------
 section "Caller-supplied '--' shifts a validated range into pathspec position (Codex round 2)"
 
-BOUNDARY_REPO="$(mktemp -d)"
+BOUNDARY_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$BOUNDARY_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$BOUNDARY_REPO" init -q
 git -C "$BOUNDARY_REPO" config user.email "test@example.com"
 git -C "$BOUNDARY_REPO" config user.name "test"
@@ -770,7 +782,8 @@ else
   pass "pantheon/execution.py never sets GIT_REDIRECT_STDOUT/GIT_REDIRECT_STDERR (neutralized by omission — _forced_env() builds a fresh dict, not a copy of os.environ)"
 fi
 
-REDIRECT_REPO="$(mktemp -d)"
+REDIRECT_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$REDIRECT_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$REDIRECT_REPO" init -q
 git -C "$REDIRECT_REPO" config user.email "test@example.com"
 git -C "$REDIRECT_REPO" config user.name "test"
@@ -804,7 +817,8 @@ section "GIT_NO_LAZY_FETCH (partial-clone lazy fetch forced off, no object write
 
 count_objects() { find "$1" -type f 2>/dev/null | wc -l | tr -d ' '; }
 
-LAZY_ORIGIN="$(mktemp -d)"
+LAZY_ORIGIN="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$LAZY_ORIGIN" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$LAZY_ORIGIN" init -q
 git -C "$LAZY_ORIGIN" config user.email "test@example.com"
 git -C "$LAZY_ORIGIN" config user.name "test"
@@ -814,7 +828,8 @@ printf 'big content\n' > "$LAZY_ORIGIN/big.txt"
 git -C "$LAZY_ORIGIN" add big.txt
 git -C "$LAZY_ORIGIN" commit -q -m first
 
-LAZY_CLONE_RAW="$(mktemp -d)"
+LAZY_CLONE_RAW="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$LAZY_CLONE_RAW" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 rm -rf "$LAZY_CLONE_RAW"
 git clone -q --bare --filter=blob:none "file://$LAZY_ORIGIN" "$LAZY_CLONE_RAW" 2>/dev/null
 
@@ -827,7 +842,8 @@ else
   fail "negative control FAILED: raw git did not grow .git/objects at all ($before_raw -> $after_raw) — this fixture is not exercising anything, the assertion below is meaningless"
 fi
 
-LAZY_CLONE_WRAP="$(mktemp -d)"
+LAZY_CLONE_WRAP="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$LAZY_CLONE_WRAP" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 rm -rf "$LAZY_CLONE_WRAP"
 git clone -q --bare --filter=blob:none "file://$LAZY_ORIGIN" "$LAZY_CLONE_WRAP" 2>/dev/null
 
@@ -861,7 +877,8 @@ rm -rf "$LAZY_ORIGIN" "$LAZY_CLONE_RAW" "$LAZY_CLONE_WRAP"
 # ---------------------------------------------------------------------------
 section "Untrusted-checkout PATH-injection (Codex P1 round 2 — an absolute-but-untrusted PATH entry)"
 
-PATHINJ_REPO="$(mktemp -d)"
+PATHINJ_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$PATHINJ_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 mkdir -p "$PATHINJ_REPO/bin"
 git -C "$PATHINJ_REPO" init -q
 git -C "$PATHINJ_REPO" config user.email "test@example.com"

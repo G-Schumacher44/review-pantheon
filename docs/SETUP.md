@@ -62,9 +62,10 @@ Code that's the counsel agents, the four canonical skills (`gate`, `counsel`, `s
 tools get their own best-effort per-tool projections (see DESIGN.md). Idempotent — see
 `install.sh`'s own header comment and the README's [Quick start](../README.md#quick-start).
 
-You still run the CLI surface (`pantheon gate`) from the review-pantheon checkout itself
-(`pip install -e .` into a venv), not from the target repo — Way A's `install.sh` doesn't touch
-the CLI at all, only the Action.
+Way A's `install.sh` doesn't touch the CLI at all — only the Action. You still install the CLI
+surface (`pantheon gate`) separately: `pipx install review-pantheon` or
+`brew install g-schumacher44/tap/review-pantheon` (both above) cover it in one line; a
+`pip install -e .` checkout is for developing against this repo, not the default path.
 
 **Post-install checklist:**
 

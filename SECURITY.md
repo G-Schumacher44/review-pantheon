@@ -182,7 +182,7 @@ surfaces this repo directly controls, independent of every layer above:
   `pull-requests: write` block — widening it defeats this layer.
 - **The reviewer itself is pinned, not a moving target.** The published action pins
   `anthropics/claude-code-action` to a full commit SHA
-  (`be7b93b1907a4abad570368f3c74b6fe3807510b`, v1.0.183 — read directly from that release's own
+  (`239e3a730883eeb5c53db12b0fc9573b3024b126`, v1.0.191 — read directly from that release's own
   `action.yml`, not assumed or copied from older docs), not a moving tag — every consumer
   inherits that pin, since there is only the one implementation now (issue #36). Way A adds a
   second pin on top: the generated stub itself references `G-Schumacher44/review-pantheon` by a

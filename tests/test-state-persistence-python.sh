@@ -35,7 +35,8 @@ else
   echo; echo "state-persistence (python) fixtures: $PASS passed, $FAIL failed"; exit 1
 fi
 
-WORKDIR="$(mktemp -d)"
+WORKDIR="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$WORKDIR" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 trap 'rm -rf "$WORKDIR"' EXIT
 
 py_update() {
@@ -201,7 +202,8 @@ fi
 # force-push-detection ancestry check (git merge-base --is-ancestor), the actual invariant an
 # incremental follow-up review
 # needs (an EXISTENCE check alone isn't enough post-force-push).
-ANCESTRY_REPO="$(mktemp -d)"
+ANCESTRY_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$ANCESTRY_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git -C "$ANCESTRY_REPO" init -q
 git -C "$ANCESTRY_REPO" config user.email "test@example.com"
 git -C "$ANCESTRY_REPO" config user.name "test"
@@ -246,7 +248,8 @@ section "State-write failure fails closed (python -m pantheon.state update must 
 if [[ "$(id -u)" -eq 0 ]]; then
   echo "SKIP: running as root — POSIX permission checks are bypassed, precondition unmet"
 else
-  FAILCLOSED_DIR="$(mktemp -d)"
+  FAILCLOSED_DIR="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+  [ -n "$FAILCLOSED_DIR" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
   FAILCLOSED_STATE="$FAILCLOSED_DIR/state.json"
   echo '{}' > "$FAILCLOSED_STATE"
   chmod 555 "$FAILCLOSED_DIR"
