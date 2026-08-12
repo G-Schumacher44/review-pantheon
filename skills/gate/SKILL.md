@@ -31,7 +31,11 @@ itself. Before running `pantheon gate`:
    `export PATH=...` line `bootstrap.sh` printed to the shell rc (it won't do it for you), or
    invoke the full path directly.
 3. Genuinely not installed? One line, pick whichever you have:
-   - `pipx install review-pantheon` (or `pip install review-pantheon`)
+   - `pipx install review-pantheon` (or `pip install review-pantheon`). If pipx's own app
+     directory isn't on `PATH` (install succeeds, `command -v` still fails), run
+     `pipx ensurepath` and open a fresh shell.. If pipx's own app
+     directory isn't on `PATH` (install succeeds, `command -v` still fails), run
+     `pipx ensurepath` and open a fresh shell.
    - `brew install g-schumacher44/tap/review-pantheon`
    - Developing against a checkout: `pip install -e .` from inside the review-pantheon repo.
 4. Still nothing? Tell the user the CLI surface isn't installed yet and point at

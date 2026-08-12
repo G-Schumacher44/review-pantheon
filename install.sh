@@ -393,7 +393,7 @@ an existing `bootstrap.sh --prefix` install FIRST (default: `~/.review-pantheon/
 a custom `--prefix <dir>` lands at `<dir>/venv/bin/pantheon` — ask the user where they pointed it
 rather than assuming absence — use that path directly, or persist its printed `export PATH=...`
 line) before installing a second copy; only if it's genuinely absent, install it
-(`pipx install review-pantheon`,
+(`pipx install review-pantheon` — run `pipx ensurepath` if it installs but stays off `PATH` —,
 `brew install g-schumacher44/tap/review-pantheon`, or `pip install -e .` from a checkout) — the
 skill's "Locating `pantheon`" note has the full ordered rundown.
 GATE_EOF
