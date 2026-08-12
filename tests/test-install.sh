@@ -82,6 +82,13 @@ fi
 # suite from a full checkout, which is where the guard matters.
 WAY_A_RELEASE="$(grep -oE '^WAY_A_PIN_RELEASE="v[0-9.]+"' "$INSTALL" | grep -oE 'v[0-9.]+')"
 if [[ -n "$WAY_A_SHA" && -n "$WAY_A_RELEASE" ]]; then
+  # CI checks out shallow and tagless, which made this guard skip exactly where it most needs
+  # to run (Codex finding on its own PR). Fetch just the one tag, quietly, before deciding to
+  # skip — a network failure (offline dev box, air-gapped runner) still degrades to the loud
+  # skip below rather than a false failure.
+  if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/${WAY_A_RELEASE}^{commit}" >/dev/null 2>&1; then
+    git -C "$ROOT" fetch --quiet --no-tags origin "refs/tags/${WAY_A_RELEASE}:refs/tags/${WAY_A_RELEASE}" 2>/dev/null || true
+  fi
   if TAG_COMMIT="$(git -C "$ROOT" rev-parse -q --verify "refs/tags/${WAY_A_RELEASE}^{commit}" 2>/dev/null)"; then
     if [[ "$TAG_COMMIT" == "$WAY_A_SHA" ]]; then
       pass "WAY_A_PIN_SHA equals ${WAY_A_RELEASE}'s own commit ($TAG_COMMIT)"
