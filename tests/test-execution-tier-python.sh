@@ -383,6 +383,63 @@ else
   fail "pantheon.cli is NOT importable — cannot run the Part G equivalent"
 fi
 
+# ---------------------------------------------------------------------------
+# Part H (issue #26) — --help epilogs cover exit-code meanings, the execution-tier safety
+# note, and the gate.conf cross-reference. Real `python3 -m pantheon.cli ... --help`
+# invocations, not a source grep, so a formatter/argparse regression that silently drops the
+# epilog (e.g. reverting RawDescriptionHelpFormatter) is caught the same way a real user's
+# `pantheon --help` would show it.
+# ---------------------------------------------------------------------------
+section "Part H: pantheon/gate/counsel --help epilogs (issue #26)"
+
+if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
+  top_help="$(python3 -m pantheon.cli --help 2>&1)"
+  gate_help="$(python3 -m pantheon.cli gate --help 2>&1)"
+  counsel_help="$(python3 -m pantheon.cli counsel --help 2>&1)"
+
+  for pair in "top:$top_help" "gate:$gate_help" "counsel:$counsel_help"; do
+    name="${pair%%:*}"
+    text="${pair#*:}"
+    if grep -qF "Exit codes" <<<"$text"; then
+      pass "pantheon $name --help: has an exit-codes section"
+    else
+      fail "pantheon $name --help: missing an exit-codes section"
+    fi
+  done
+
+  if grep -qF "docs/CLI.md#exit-codes--reading-a-verdict-comment" <<<"$gate_help"; then
+    pass "pantheon gate --help: exit-code detail points to docs/CLI.md"
+  else
+    fail "pantheon gate --help: does not cross-reference docs/CLI.md's exit-code section"
+  fi
+
+  if grep -qF "readonly" <<<"$gate_help" && grep -qF "trusted" <<<"$gate_help"; then
+    pass "pantheon gate --help: states the readonly/trusted execution-tier safety note"
+  else
+    fail "pantheon gate --help: missing the execution-tier safety note"
+  fi
+
+  if grep -qF "gate.conf" <<<"$gate_help" && grep -qF "base-pinned" <<<"$gate_help"; then
+    pass "pantheon gate --help: cross-references gate.conf and its base-pinned keys"
+  else
+    fail "pantheon gate --help: missing the gate.conf cross-reference"
+  fi
+
+  if grep -qF "pantheon gate --pr 42 --dry-run" <<<"$gate_help"; then
+    pass "pantheon gate --help: has the --dry-run worked example"
+  else
+    fail "pantheon gate --help: missing the --dry-run worked example"
+  fi
+
+  if grep -qF "pantheon counsel --pr 42" <<<"$counsel_help"; then
+    pass "pantheon counsel --help: has a worked example"
+  else
+    fail "pantheon counsel --help: missing a worked example"
+  fi
+else
+  fail "pantheon.cli is NOT importable — cannot run the Part H equivalent"
+fi
+
 echo
 echo "execution-tier-python fixtures: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

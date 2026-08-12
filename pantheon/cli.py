@@ -1525,16 +1525,84 @@ def _add_gate_flags(parser: argparse.ArgumentParser, *, with_agents: bool) -> No
     )
 
 
+_TOP_LEVEL_EPILOG = """\
+Exit codes (see docs/CLI.md#exit-codes--reading-a-verdict-comment for detail):
+  0   green/yellow overall — also draft-PR skip, --dry-run, and "already reviewed" no-ops
+  1   red/unverified overall, or a fail-closed abort (bad PR/branch state, gh/git failure,
+      a post/state-write failure after the verdict was computed)
+  2   usage error — bad/missing arguments, caught by argparse before any git/gh call
+
+Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — safe against
+untrusted PR content. trusted restores full Bash — reserve it for your own repo's own PRs only.
+See docs/CLI.md#execution-tiers-readonly-vs-trusted.
+
+gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
+agents, execution. The behavior keys (execution/provider/rules_file/spec_file/agents) are read
+from the PR's BASE commit, never the working tree — a hostile PR can't rewrite its own gate
+policy. Full table: docs/CLI.md#gateconf.
+
+Run `pantheon gate --help` or `pantheon counsel --help` for subcommand detail and a worked
+example.
+"""
+
+_GATE_EPILOG = """\
+Exit codes (see docs/CLI.md#exit-codes--reading-a-verdict-comment for detail):
+  0   green/yellow overall — also draft-PR skip, --dry-run, and "already reviewed" no-ops
+  1   red/unverified overall, or a fail-closed abort (bad PR/branch state, gh/git failure,
+      a post/state-write failure after the verdict was computed)
+  2   usage error — bad/missing arguments, caught by argparse before any git/gh call
+
+Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — safe against
+untrusted PR content. trusted restores full Bash — reserve it for your own repo's own PRs only.
+See docs/CLI.md#execution-tiers-readonly-vs-trusted.
+
+gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
+agents, execution. execution/provider/rules_file/spec_file/agents are base-pinned (read from the
+PR's base commit, never the working tree) — see docs/CLI.md#gateconf for the full table.
+
+Worked example — zero-token dry run (real gh/git calls, no provider, nothing posted):
+  pantheon gate --pr 42 --dry-run
+"""
+
+_COUNSEL_EPILOG = """\
+Exit codes: identical to `pantheon gate` — see docs/CLI.md#exit-codes--reading-a-verdict-comment.
+0 = green/yellow overall, 1 = red/unverified or a fail-closed abort, 2 = usage error.
+
+Execution tiers: readonly (default) restricts Bash to a read-only git wrapper; trusted restores
+full Bash — reserve it for your own repo's own PRs only. See
+docs/CLI.md#execution-tiers-readonly-vs-trusted.
+
+gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
+agents, execution — base-pinned (read from the PR's base commit) for everything but model/
+base_branch. Full table: docs/CLI.md#gateconf.
+
+Worked example — run the counsel panel (socrates, diogenes, plato) against a PR that changes a
+design doc:
+  pantheon counsel --pr 42
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pantheon")
+    parser = argparse.ArgumentParser(
+        prog="pantheon",
+        epilog=_TOP_LEVEL_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    gate_parser = subparsers.add_parser("gate", help="Run the review gate against a PR.")
+    gate_parser = subparsers.add_parser(
+        "gate",
+        help="Run the review gate against a PR.",
+        epilog=_GATE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_gate_flags(gate_parser, with_agents=True)
 
     counsel_parser = subparsers.add_parser(
         "counsel",
         help='Run the counsel panel (sugar for "gate --agents \\"socrates diogenes plato\\"").',
+        epilog=_COUNSEL_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_gate_flags(counsel_parser, with_agents=False)
 
