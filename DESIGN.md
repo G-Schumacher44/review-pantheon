@@ -388,7 +388,7 @@ history, not here — a contract describes what's true now, not how it got that 
   Tracked as a known, accepted gap rather than silently unswept.
 - The GitHub Action checks out with `persist-credentials: false` and fails loud (not skip)
   when its token secret is absent. It pins `anthropics/claude-code-action` to a full commit
-  SHA — `be7b93b1907a4abad570368f3c74b6fe3807510b` (v1.0.183) — read directly from that
+  SHA — `239e3a730883eeb5c53db12b0fc9573b3024b126` (v1.0.191) — read directly from that
   release's own `action.yml`, not assumed or copied from an older version's docs (a moving
   tag, or an unpinned `uses:`, is the thing to avoid here). If you re-pin to a newer release
   yourself, that's step one of the install checklist (`install.sh`'s printed output and the
