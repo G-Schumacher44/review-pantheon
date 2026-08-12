@@ -509,13 +509,20 @@ runs:
         # SECOND copy of the vocab->color rule alongside `pantheon.verdict`, the one place that
         # rule lives). One schema shared by every agent, computed once — DERIVED at runtime from
         # `pantheon.providers.VERDICT_JSON_SCHEMA` (issue #32) rather than hand-copied here as a
-        # second string literal. PYTHONPATH supplies $ACTION_PATH the same way
-        # pantheon_base_pinned_read (above) does, so `pantheon.providers` resolves against this
-        # action's own trusted checkout. There is now exactly ONE copy of the schema text in this
-        # repo — that module constant — so the two surfaces cannot drift apart; the byte-identity
-        # test #28 added now asserts this derivation actually runs and matches, instead of
-        # comparing two hand-maintained copies (tests/test_providers.py).
-        JSON_SCHEMA="$(PYTHONPATH="$ACTION_PATH" python3 -c 'from pantheon.providers import VERDICT_JSON_SCHEMA; print(VERDICT_JSON_SCHEMA)')" || {
+        # second string literal. There is now exactly ONE copy of the schema text in this repo —
+        # that module constant — so the two surfaces cannot drift apart; the byte-identity test
+        # #28 added now asserts this derivation actually runs and matches, instead of comparing
+        # two hand-maintained copies (tests/test_providers.py).
+        #
+        # The subshell `cd "$ACTION_PATH"` is load-bearing, not style (Codex P1 on this fix's own
+        # PR): `python3 -c` puts the CURRENT WORKING DIRECTORY at sys.path[0], AHEAD of anything
+        # PYTHONPATH supplies — and this step's cwd is the CONSUMING repo's checkout, so a PR
+        # committing a top-level `pantheon/providers.py` would have its copy imported instead of
+        # the trusted one: the same cwd-shadow class this file's header documents closing for the
+        # decider (which dodges it by absolute-script-path invocation). Pinning cwd to the
+        # action's own checkout makes sys.path[0] resolve against trusted content by
+        # construction; the cd is scoped to the command substitution and does not move the step.
+        JSON_SCHEMA="$(cd "$ACTION_PATH" && PYTHONPATH="$ACTION_PATH" python3 -c 'from pantheon.providers import VERDICT_JSON_SCHEMA; print(VERDICT_JSON_SCHEMA)')" || {
           echo "::error::review-pantheon: failed to derive the verdict JSON schema from pantheon.providers.VERDICT_JSON_SCHEMA at $ACTION_PATH"
           exit 1
         }

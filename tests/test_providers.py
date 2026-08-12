@@ -1231,7 +1231,7 @@ def test_action_yml_derives_verdict_schema_at_runtime_from_providers() -> None:
        print something else if `providers.py` stopped exporting a plain JSON string.
     """
     derivation = (
-        'PYTHONPATH="$ACTION_PATH" python3 -c '
+        'cd "$ACTION_PATH" && PYTHONPATH="$ACTION_PATH" python3 -c '
         "'from pantheon.providers import VERDICT_JSON_SCHEMA; print(VERDICT_JSON_SCHEMA)'"
     )
     action_yml_text = (REPO_ROOT / "action.yml").read_text(encoding="utf-8")
@@ -1268,6 +1268,45 @@ def test_action_yml_derives_verdict_schema_at_runtime_from_providers() -> None:
         "the derivation command action.yml runs does not print output byte-identical to "
         "pantheon.providers.VERDICT_JSON_SCHEMA -- action.yml and the decider would enforce "
         "different verdict shapes at review time."
+    )
+
+
+def test_verdict_schema_derivation_resists_a_hostile_consumer_checkout(tmp_path) -> None:
+    """Codex P1 on this fix's own PR: `python3 -c` puts the CWD at sys.path[0], ahead of
+    PYTHONPATH -- and in a real gate run the step's cwd is the CONSUMING repo's checkout. A PR
+    committing a top-level pantheon/providers.py would therefore have ITS schema imported
+    instead of the trusted one (arbitrary Python, attacker-controlled schema, review-job
+    credentials in scope): the same cwd-shadow class action.yml's header documents for the
+    decider. The fix pins the derivation's cwd to $ACTION_PATH via a scoped subshell cd.
+
+    Negative control BOTH ways, per this repo's greens-by-construction rule:
+    1. The vulnerability is real: the OLD shape (cwd = hostile checkout) imports the planted
+       poison -- proving this test can detect the class at all.
+    2. The fix works: the NEW shape (cwd pinned to the trusted checkout, PYTHONPATH unchanged)
+       ignores the same planted poison and derives the real schema.
+    """
+    hostile = tmp_path / "consumer-checkout"
+    pkg = hostile / "pantheon"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "providers.py").write_text("VERDICT_JSON_SCHEMA = '{\"poisoned\":true}'\n")
+
+    code = "from pantheon.providers import VERDICT_JSON_SCHEMA; print(VERDICT_JSON_SCHEMA)"
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+
+    # (1) the un-pinned shape MUST fall for the poison, or this test proves nothing.
+    vulnerable = subprocess.run([sys.executable, "-c", code], cwd=hostile, capture_output=True, text=True, env=env)
+    assert vulnerable.stdout.strip() == '{"poisoned":true}', (
+        "expected the un-pinned derivation (cwd = hostile checkout) to import the planted "
+        "pantheon/providers.py -- it did not, so this negative control cannot vouch for the fix "
+        f"(stdout: {vulnerable.stdout!r}, stderr: {vulnerable.stderr!r})"
+    )
+
+    # (2) the shipped shape -- cwd pinned to the trusted checkout -- must resist it.
+    pinned = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+    assert pinned.returncode == 0, f"pinned derivation failed: {pinned.stderr}"
+    assert pinned.stdout.strip() == providers.VERDICT_JSON_SCHEMA, (
+        "the cwd-pinned derivation did not produce the trusted schema -- the cwd-shadow fix is not doing its job."
     )
 
 
