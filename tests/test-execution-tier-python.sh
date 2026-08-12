@@ -223,7 +223,8 @@ done
 section "Part C equivalent: pantheon gate --execution bogus-tier --pr 1 (real invocation)"
 
 if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
-  SCRATCH="$(mktemp -d)"
+  SCRATCH="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+  [ -n "$SCRATCH" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
   git init -q "$SCRATCH"
 
   bogus_out="$(cd "$SCRATCH" && python3 -m pantheon.cli gate --execution bogus-tier --pr 1 2>&1)"
@@ -297,7 +298,8 @@ print(getattr(cfg, '$3'), end='')
   # G1 — base has execution=readonly/provider=claude/agents="artemis apollo" committed; a fork
   # PR's head EDITS gate.conf to weaken ALL FOUR base-pinned keys at once. The base-pinned read
   # must see the BASE commit's values for every one of them, never the working tree's edits.
-  FIXTURE_G1="$(mktemp -d)"
+  FIXTURE_G1="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+  [ -n "$FIXTURE_G1" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
   {
     echo "execution=readonly"
     echo "provider=claude"
@@ -330,7 +332,8 @@ print(getattr(cfg, '$3'), end='')
   # G2 — a fork PR INTRODUCES gate.conf for the first time (absent at base entirely) with
   # every key set to a hostile value. Must fall back to each field's own DEFAULT, never read the
   # PR-introduced file.
-  FIXTURE_G2="$(mktemp -d)"
+  FIXTURE_G2="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+  [ -n "$FIXTURE_G2" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
   echo "unrelated" > "$FIXTURE_G2/README.md"
   FIXTURE_G2_BASE_SHA="$(git_fixture_repo_exec "$FIXTURE_G2")"
   {
@@ -356,7 +359,8 @@ print(getattr(cfg, '$3'), end='')
   # G3 — a LEGITIMATE, already-merged gate.conf at base with non-default values must still be
   # honored — base-pinning isn't "always the default," it's "trust the base commit, not the PR's
   # own edits."
-  FIXTURE_G3="$(mktemp -d)"
+  FIXTURE_G3="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+  [ -n "$FIXTURE_G3" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
   {
     echo "execution=trusted"
     echo "provider=gemini"

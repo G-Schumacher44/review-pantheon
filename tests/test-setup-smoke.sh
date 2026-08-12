@@ -98,7 +98,9 @@ section "Stage 2b: pantheon Python package — pip install + ruff/mypy/pytest qu
 if ! command -v python3 >/dev/null 2>&1; then
   skip "pantheon package quality gates" "python3 not on PATH"
 else
-  VENV_DIR="$(mktemp -d)/venv"
+  VENV_DIR_BASE="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+  [ -n "$VENV_DIR_BASE" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
+  VENV_DIR="$VENV_DIR_BASE/venv"
   if python3 -m venv "$VENV_DIR" >/dev/null 2>&1; then
     pass "created an isolated venv for the pantheon package install"
 
@@ -148,7 +150,8 @@ fi
 # repo's own checkout — a clean-machine install has no relationship to review-pantheon's tree).
 # ---------------------------------------------------------------------------
 section "Stage 3: install.sh --claude --cursor --codex --gemini against a fresh scratch repo"
-SCRATCH_REPO="$(mktemp -d)"
+SCRATCH_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$SCRATCH_REPO" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 git init --quiet "$SCRATCH_REPO"
 
 if "$ROOT/install.sh" "$SCRATCH_REPO" --claude --cursor --codex --gemini >/dev/null; then
@@ -193,7 +196,9 @@ rm -rf "$SCRATCH_REPO"
 # local-checkout install path.
 # ---------------------------------------------------------------------------
 section "Stage 4: bootstrap.sh into a fresh scratch prefix"
-SCRATCH_PREFIX="$(mktemp -d)/.review-pantheon"
+SCRATCH_PREFIX_BASE="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$SCRATCH_PREFIX_BASE" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
+SCRATCH_PREFIX="$SCRATCH_PREFIX_BASE/.review-pantheon"
 
 if "$ROOT/bootstrap.sh" --prefix "$SCRATCH_PREFIX" >/dev/null; then
   pass "bootstrap.sh exits 0 against a fresh scratch prefix"
@@ -215,7 +220,8 @@ done
 
 # Run it from an unrelated directory, via its absolute prefix path — proves the installed venv
 # resolves correctly from a prefix install, not just from an in-repo checkout.
-NEUTRAL_DIR="$(mktemp -d)"
+NEUTRAL_DIR="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$NEUTRAL_DIR" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 # NO_COLOR: Python 3.14's argparse colorizes --help, and it honors FORCE_COLOR even when
 # stdout is a pipe. A contributor with FORCE_COLOR set in their shell would otherwise get
 # ANSI escapes wrapped around "usage:" and this anchored grep would fail on a perfectly
@@ -258,7 +264,8 @@ elif ! GH_TOKEN="$SMOKE_TOKEN" gh api rate_limit >/dev/null 2>&1; then
 elif ! PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "import pantheon.cli" >/dev/null 2>&1; then
   skip "tokened live dry-run (pantheon gate)" "pantheon.cli is not importable"
 else
-  CLONE_DIR_PY="$(mktemp -d)"
+  CLONE_DIR_PY="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+  [ -n "$CLONE_DIR_PY" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
   if GH_TOKEN="$SMOKE_TOKEN" git clone --quiet "https://github.com/${PINNED_REPO}.git" "$CLONE_DIR_PY" 2>/tmp/smoke-clone-err-py.$$; then
     pass "stage 5: cloned $PINNED_REPO"
 
