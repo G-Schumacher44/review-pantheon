@@ -162,7 +162,7 @@ assert_contains "claude: /gate tells the user to pipx install if pantheon is mis
 assert_contains "claude: /gate tells the user to brew install if pantheon is missing" \
   "$T2/.claude/commands/gate.md" "brew install g-schumacher44/tap/review-pantheon"
 
-assert_contains "claude: gate skill's locator leads with pipx install" \
+assert_contains "claude: gate skill locator names the pipx install channel" \
   "$T2/.claude/skills/gate/SKILL.md" "pipx install review-pantheon"
 assert_contains "claude: gate skill's locator leads with brew install" \
   "$T2/.claude/skills/gate/SKILL.md" "brew install g-schumacher44/tap/review-pantheon"
@@ -170,6 +170,21 @@ assert_contains "claude: gate skill's locator still covers a checkout dev instal
   "$T2/.claude/skills/gate/SKILL.md" "pip install -e ."
 assert_contains "claude: gate skill's locator still covers bootstrap.sh --prefix" \
   "$T2/.claude/skills/gate/SKILL.md" "bootstrap.sh --prefix"
+
+# Discovery ORDER, not just presence (review finding on the ordering fix's own PR): the
+# existing-prefix check must come BEFORE the fresh-install recommendation in BOTH generated
+# surfaces, or a bootstrap-prefix user with an unpersisted export gets told to install a second
+# copy. Compare first-occurrence line numbers.
+for surface in ".claude/skills/gate/SKILL.md" ".claude/commands/gate.md"; do
+  f="$T2/$surface"
+  prefix_line="$(grep -nF 'bootstrap.sh --prefix' "$f" | head -1 | cut -d: -f1)"
+  install_line="$(grep -nF 'pipx install review-pantheon' "$f" | head -1 | cut -d: -f1)"
+  if [[ -n "$prefix_line" && -n "$install_line" && "$prefix_line" -lt "$install_line" ]]; then
+    pass "claude: $surface checks the existing bootstrap prefix BEFORE recommending a fresh install ($prefix_line < $install_line)"
+  else
+    fail "claude: $surface recommends a fresh install before (or without) the existing-prefix check (prefix@${prefix_line:-none}, install@${install_line:-none})"
+  fi
+done
 
 # Frontmatter must parse under a STRICT YAML parser — not just "install.sh didn't crash." A Codex
 # finding on this PR proved a hand-written value can look fine and still break YAML: an unquoted
