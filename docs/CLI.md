@@ -221,10 +221,12 @@ is why it is a separate mode rather than a flag:
 | Dedupe state | records `reviewed_sha` | none — every run is deliberate |
 
 **Everything security-critical is shared, not reimplemented.** Personas, the verdict decider,
-house rules, the spec and `gate.conf` are still read from the **base commit**, never your working
-tree — `pantheon.basepin` takes a SHA and does not care whether it came from `gh pr view` or a
-local merge-base. Only three things differ: base resolution, the prompt header, and where the
-verdict goes.
+house rules, the spec and `gate.conf` are still read from a **base-anchored commit**, never your
+working tree — `pantheon.basepin` takes a SHA and does not care where it came from. In PR mode
+that SHA is the PR's base commit; in branch mode it is `origin/BASE`'s **tip** — deliberately
+not the merge-base, so the branch under review can't select an older policy by choosing its
+fork point (the merge-base anchors only the *diff range*). Only three things differ between the
+modes: base resolution, the prompt header, and where the verdict goes.
 
 Two refusals worth knowing, both fail-closed:
 

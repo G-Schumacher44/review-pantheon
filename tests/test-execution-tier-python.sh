@@ -426,10 +426,16 @@ if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
   # tool-scopes the claude lane only — codex/gemini/cursor have no equivalent mechanism
   # (SECURITY.md's scope notes). An unscoped "safe against untrusted PR content" claim here
   # would tell a --provider codex user they have a protection they do not have.
-  if grep -qF "claude" <<<"$gate_help" && ! grep -qF "safe against untrusted" <<<"$gate_help"; then
+  # Pin DISTINCTIVE fragments of the tier paragraph itself, not the bare word "claude" — that
+  # word already appears in the --provider flag help, so a check on it alone stays green even
+  # with the whole tier paragraph deleted (Codex finding: green-by-construction). Both fragments
+  # are single-line in the rendered epilog, so the greps survive argparse's wrapping.
+  if grep -qF "tool-scoping mechanism" <<<"$gate_help" \
+     && grep -qF "no equivalent restriction" <<<"$gate_help" \
+     && ! grep -qF "safe against untrusted" <<<"$gate_help"; then
     pass "pantheon gate --help: tier safety note is scoped to the claude lane (no blanket safety claim)"
   else
-    fail "pantheon gate --help: tier note overclaims — blanket safety wording or missing claude-lane scoping"
+    fail "pantheon gate --help: tier note overclaims, or its claude-lane scoping paragraph is missing/degraded"
   fi
 
   if grep -qF "gate.conf" <<<"$gate_help" && grep -qF "base-pinned" <<<"$gate_help"; then
