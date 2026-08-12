@@ -32,7 +32,8 @@ else
   echo; echo "PASS: $PASS, FAIL: $FAIL"; exit 1
 fi
 
-WORKDIR="$(mktemp -d)"
+WORKDIR="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$WORKDIR" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 trap 'rm -rf "$WORKDIR"' EXIT
 
 git_fixture_repo() {

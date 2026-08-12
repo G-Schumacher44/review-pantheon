@@ -49,7 +49,8 @@ fi
 # ---------------------------------------------------------------------------
 section "cwd-shadow-import resistance (the vector the -c -> absolute-path fix closes)"
 
-HOSTILE_CWD="$(mktemp -d)"
+HOSTILE_CWD="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$HOSTILE_CWD" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 mkdir -p "$HOSTILE_CWD/pantheon"
 : > "$HOSTILE_CWD/pantheon/__init__.py"
 cat > "$HOSTILE_CWD/pantheon/execution.py" <<'EOF'
@@ -92,7 +93,8 @@ rm -rf "$HOSTILE_CWD"
 # ---------------------------------------------------------------------------
 section "build_prompt.sh — full integration run"
 
-WORKDIR="$(mktemp -d)"
+WORKDIR="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
+[ -n "$WORKDIR" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
 trap 'rm -rf "$WORKDIR"' EXIT
 
 : > "$WORKDIR/rules.txt"

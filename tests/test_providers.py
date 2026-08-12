@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1203,40 +1202,112 @@ def test_readonly_tier_end_to_end_produces_a_parseable_verdict(tmp_path, monkeyp
     assert "f.txt" in decision["verdict_json"]["summary"]
 
 
-def test_verdict_json_schema_stays_byte_identical_across_BOTH_surfaces() -> None:
-    """VERDICT_JSON_SCHEMA promises byte-identity with every surface that enforces a schema.
-    Nothing enforced it until this test (a live self-hosted-gate finding, artemis @ PR #28).
+def test_action_yml_derives_verdict_schema_at_runtime_from_providers() -> None:
+    """Issue #32: collapse the last hand-maintained copy by making action.yml DERIVE the schema
+    at run time instead of hard-copying it.
 
-    TWO copies, not three: `pantheon.providers.VERDICT_JSON_SCHEMA` (this module) and
-    `action.yml`'s `JSON_SCHEMA='...'` assignment. A third copy used to live inline in the
-    vendored `action/review.yml` as `--json-schema '...'`, with no variable name at all -- that
-    was exactly how it once drifted a full revision behind (Codex, PR #28) before this test
-    existed, and exactly why this test enumerates its own targets by regex instead of grepping
-    for a variable name. Issue #36 deleted that vendored duplicate (install.sh's Way A now
-    generates a thin caller of action.yml instead), so there are only two copies left to compare
-    -- see DESIGN.md's "Validation surface" section for the current count.
+    Before this, `action.yml` assigned `JSON_SCHEMA='{"type":"object",...}'` -- a second, hand-typed
+    copy of `VERDICT_JSON_SCHEMA` (this module), policed only by a byte-identity text comparison
+    (a live self-hosted-gate finding, artemis @ PR #28; re-scoped after #36/#48 deleted the third,
+    vendored copy in `action/review.yml`, down to this one pair -- see the "🤖 Koa" comment on
+    issue #32). A comparison test can only ever catch drift that ALREADY happened; it can't stop
+    a second copy from existing to drift in the first place.
 
-    Compares raw TEXT, not parsed-and-re-serialized JSON: the claim is byte-identity, and a parsed
-    comparison would pass while the surfaces disagreed on key order -- the drift a reader diffing
-    them by eye is being promised is absent.
+    action.yml's "Resolve gate configuration" step now computes `JSON_SCHEMA` by running
+    `python3 -c 'from pantheon.providers import VERDICT_JSON_SCHEMA; print(VERDICT_JSON_SCHEMA)'`
+    against its own checkout (`PYTHONPATH=$ACTION_PATH`, the same pattern every other python3
+    invocation in that step already uses for `pantheon_base_pinned_read`). There is now exactly
+    ONE copy of the schema text in this repo -- this module's constant -- so the drift class is
+    gone by construction, not merely detected after the fact.
+
+    Proven two ways, both required:
+    1. Structural -- the exact derivation command action.yml runs is present verbatim. Anchored to
+       the literal invocation (not a loose substring) so a refactor that stops actually importing
+       `pantheon.providers` would fail this, not just a comment claiming it still does.
+    2. Behavioral -- that command, run for real with `PYTHONPATH` pointed at this checkout (mirrors
+       $ACTION_PATH when the action reviews its own repo, exactly ci.yml's composite-action-self-check
+       case), prints output byte-identical to `providers.VERDICT_JSON_SCHEMA`. This is the part a
+       structural-only check could never catch: the command could name the right module and still
+       print something else if `providers.py` stopped exporting a plain JSON string.
     """
-    surfaces = {
-        "action.yml": r"JSON_SCHEMA='([^']*)'",
-    }
+    derivation = (
+        'cd "$ACTION_PATH" && PYTHONPATH="$ACTION_PATH" python3 -c '
+        "'from pantheon.providers import VERDICT_JSON_SCHEMA; print(VERDICT_JSON_SCHEMA)'"
+    )
+    action_yml_text = (REPO_ROOT / "action.yml").read_text(encoding="utf-8")
+    assert derivation in action_yml_text, (
+        "action.yml no longer contains the expected runtime-derivation command for JSON_SCHEMA -- "
+        "either the command changed shape (update this test's expected string to match) or a "
+        "hand-copied schema literal crept back in (issue #32 removed the last one; do not "
+        "reintroduce it)."
+    )
+    # No hardcoded schema literal should remain anywhere in the file -- a `"type":"object"` blob
+    # reappearing would mean a second, un-derived copy snuck back in alongside the runtime
+    # derivation above, exactly the drift class this issue closed.
+    assert '"type":"object"' not in action_yml_text, (
+        "action.yml contains a hardcoded JSON schema literal again -- issue #32 replaced the "
+        "static JSON_SCHEMA='...' copy with a runtime derivation from pantheon.providers; a "
+        "literal schema blob here means that drift class has reopened."
+    )
 
-    for relpath, pattern in surfaces.items():
-        text = (REPO_ROOT / relpath).read_text(encoding="utf-8")
-        matches = re.findall(pattern, text)
-        # Fail loudly if the extraction anchor drifts, rather than vacuously passing on zero found.
-        assert len(matches) == 1, (
-            f"expected exactly one schema occurrence in {relpath}, found {len(matches)} -- the "
-            "extraction anchor drifted; fix this test's regex, do not delete the check"
-        )
-        assert matches[0] == providers.VERDICT_JSON_SCHEMA, (
-            f"{relpath} has DRIFTED from pantheon.providers.VERDICT_JSON_SCHEMA -- that surface "
-            "would enforce a different verdict shape than the others. Update every copy together, "
-            "or drop the byte-identity claim."
-        )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pantheon.providers import VERDICT_JSON_SCHEMA; print(VERDICT_JSON_SCHEMA)",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+    )
+    assert result.returncode == 0, (
+        f"the derivation command action.yml runs failed against this checkout: {result.stderr}"
+    )
+    assert result.stdout.strip() == providers.VERDICT_JSON_SCHEMA, (
+        "the derivation command action.yml runs does not print output byte-identical to "
+        "pantheon.providers.VERDICT_JSON_SCHEMA -- action.yml and the decider would enforce "
+        "different verdict shapes at review time."
+    )
+
+
+def test_verdict_schema_derivation_resists_a_hostile_consumer_checkout(tmp_path) -> None:
+    """Codex P1 on this fix's own PR: `python3 -c` puts the CWD at sys.path[0], ahead of
+    PYTHONPATH -- and in a real gate run the step's cwd is the CONSUMING repo's checkout. A PR
+    committing a top-level pantheon/providers.py would therefore have ITS schema imported
+    instead of the trusted one (arbitrary Python, attacker-controlled schema, review-job
+    credentials in scope): the same cwd-shadow class action.yml's header documents for the
+    decider. The fix pins the derivation's cwd to $ACTION_PATH via a scoped subshell cd.
+
+    Negative control BOTH ways, per this repo's greens-by-construction rule:
+    1. The vulnerability is real: the OLD shape (cwd = hostile checkout) imports the planted
+       poison -- proving this test can detect the class at all.
+    2. The fix works: the NEW shape (cwd pinned to the trusted checkout, PYTHONPATH unchanged)
+       ignores the same planted poison and derives the real schema.
+    """
+    hostile = tmp_path / "consumer-checkout"
+    pkg = hostile / "pantheon"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "providers.py").write_text("VERDICT_JSON_SCHEMA = '{\"poisoned\":true}'\n")
+
+    code = "from pantheon.providers import VERDICT_JSON_SCHEMA; print(VERDICT_JSON_SCHEMA)"
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+
+    # (1) the un-pinned shape MUST fall for the poison, or this test proves nothing.
+    vulnerable = subprocess.run([sys.executable, "-c", code], cwd=hostile, capture_output=True, text=True, env=env)
+    assert vulnerable.stdout.strip() == '{"poisoned":true}', (
+        "expected the un-pinned derivation (cwd = hostile checkout) to import the planted "
+        "pantheon/providers.py -- it did not, so this negative control cannot vouch for the fix "
+        f"(stdout: {vulnerable.stdout!r}, stderr: {vulnerable.stderr!r})"
+    )
+
+    # (2) the shipped shape -- cwd pinned to the trusted checkout -- must resist it.
+    pinned = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+    assert pinned.returncode == 0, f"pinned derivation failed: {pinned.stderr}"
+    assert pinned.stdout.strip() == providers.VERDICT_JSON_SCHEMA, (
+        "the cwd-pinned derivation did not produce the trusted schema -- the cwd-shadow fix is not doing its job."
+    )
 
 
 def test_verdict_schema_is_never_stricter_than_the_decider() -> None:
