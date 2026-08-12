@@ -21,14 +21,17 @@ installed location instead of the source repo.
 itself. Before running `pantheon gate`:
 
 1. `command -v pantheon` — if that resolves, you're already set (a `pipx`/`pip install`, a
-   Homebrew tap install, or a Way-B `bootstrap.sh` install all land on `PATH`).
-2. Not on `PATH`? Install it — one line, pick whichever you have:
+   Homebrew tap install, or a Way-B `bootstrap.sh` install with its export line persisted all
+   land on `PATH`).
+2. Not on `PATH`? Check for an EXISTING `bootstrap.sh --prefix` install before installing a
+   second copy: the default prefix puts it at `~/.review-pantheon/venv/bin/pantheon`. If it's
+   there, that's a deliberate zero-`PATH` install — add the `export PATH=...` line
+   `bootstrap.sh` printed to your shell rc (it won't do it for you), or invoke that full path
+   directly.
+3. Genuinely not installed? One line, pick whichever you have:
    - `pipx install review-pantheon` (or `pip install review-pantheon`)
    - `brew install g-schumacher44/tap/review-pantheon`
    - Developing against a checkout: `pip install -e .` from inside the review-pantheon repo.
-3. Installed via `bootstrap.sh --prefix <dir>` instead? That's a deliberate zero-`PATH` install —
-   `pantheon` lands at `<prefix>/venv/bin/pantheon`. Add the `export PATH=...` line `bootstrap.sh`
-   prints to your shell rc yourself (it won't do it for you), or invoke that full path directly.
 4. Still nothing? Tell the user the CLI surface isn't installed yet and point at
    [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/main/docs/SETUP.md) —
    don't try to run a command that doesn't exist and report the resulting error as if the gate
