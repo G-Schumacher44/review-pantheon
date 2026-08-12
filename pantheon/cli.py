@@ -1532,9 +1532,10 @@ Exit codes (see docs/CLI.md#exit-codes--reading-a-verdict-comment for detail):
       a post/state-write failure after the verdict was computed)
   2   usage error — bad/missing arguments, caught by argparse before any git/gh call
 
-Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — safe against
-untrusted PR content. trusted restores full Bash — reserve it for your own repo's own PRs only.
-See docs/CLI.md#execution-tiers-readonly-vs-trusted.
+Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — on the claude
+lane only, the one lane with a tool-scoping mechanism (codex/gemini/cursor run their own CLIs
+with no equivalent restriction — see SECURITY.md's scope notes). trusted restores full Bash —
+reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-readonly-vs-trusted.
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
 agents, execution. The behavior keys (execution/provider/rules_file/spec_file/agents) are read
@@ -1552,9 +1553,10 @@ Exit codes (see docs/CLI.md#exit-codes--reading-a-verdict-comment for detail):
       a post/state-write failure after the verdict was computed)
   2   usage error — bad/missing arguments, caught by argparse before any git/gh call
 
-Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — safe against
-untrusted PR content. trusted restores full Bash — reserve it for your own repo's own PRs only.
-See docs/CLI.md#execution-tiers-readonly-vs-trusted.
+Execution tiers: readonly (default) restricts Bash to a read-only git wrapper — on the claude
+lane only, the one lane with a tool-scoping mechanism (codex/gemini/cursor run their own CLIs
+with no equivalent restriction — see SECURITY.md's scope notes). trusted restores full Bash —
+reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-readonly-vs-trusted.
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
 agents, execution. execution/provider/rules_file/spec_file/agents are base-pinned (read from the
@@ -1568,9 +1570,9 @@ _COUNSEL_EPILOG = """\
 Exit codes: identical to `pantheon gate` — see docs/CLI.md#exit-codes--reading-a-verdict-comment.
 0 = green/yellow overall, 1 = red/unverified or a fail-closed abort, 2 = usage error.
 
-Execution tiers: readonly (default) restricts Bash to a read-only git wrapper; trusted restores
-full Bash — reserve it for your own repo's own PRs only. See
-docs/CLI.md#execution-tiers-readonly-vs-trusted.
+Execution tiers: readonly (default) restricts Bash to a read-only git wrapper (claude lane
+only — the other lanes have no tool-scoping; see SECURITY.md); trusted restores full Bash —
+reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-readonly-vs-trusted.
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
 agents, execution — base-pinned (read from the PR's base commit) for everything but model/

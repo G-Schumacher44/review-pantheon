@@ -419,6 +419,16 @@ if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
     fail "pantheon gate --help: missing the execution-tier safety note"
   fi
 
+  # The tier note must stay HONESTLY SCOPED (Codex P1 on this epilog's own PR): readonly
+  # tool-scopes the claude lane only — codex/gemini/cursor have no equivalent mechanism
+  # (SECURITY.md's scope notes). An unscoped "safe against untrusted PR content" claim here
+  # would tell a --provider codex user they have a protection they do not have.
+  if grep -qF "claude" <<<"$gate_help" && ! grep -qF "safe against untrusted" <<<"$gate_help"; then
+    pass "pantheon gate --help: tier safety note is scoped to the claude lane (no blanket safety claim)"
+  else
+    fail "pantheon gate --help: tier note overclaims — blanket safety wording or missing claude-lane scoping"
+  fi
+
   if grep -qF "gate.conf" <<<"$gate_help" && grep -qF "base-pinned" <<<"$gate_help"; then
     pass "pantheon gate --help: cross-references gate.conf and its base-pinned keys"
   else
