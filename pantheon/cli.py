@@ -1575,8 +1575,9 @@ only — the other lanes have no tool-scoping; see SECURITY.md); trusted restore
 reserve it for your own repo's own PRs only. See docs/CLI.md#execution-tiers-readonly-vs-trusted.
 
 gate.conf (repo root, optional key=value): provider, model, base_branch, rules_file, spec_file,
-agents, execution — base-pinned (read from the PR's base commit) for everything but model/
-base_branch. Full table: docs/CLI.md#gateconf.
+execution — base-pinned (read from the PR's base commit) for everything but model/base_branch.
+counsel IGNORES the agents= key: its panel is always socrates diogenes plato (use `pantheon
+gate --agents ...` for a custom panel). Full table: docs/CLI.md#gateconf.
 
 Worked example — run the counsel panel (socrates, diogenes, plato) against a PR that changes a
 design doc:

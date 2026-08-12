@@ -393,9 +393,12 @@ fi
 section "Part H: pantheon/gate/counsel --help epilogs (issue #26)"
 
 if python3 -c "import pantheon.cli" >/dev/null 2>&1; then
-  top_help="$(python3 -m pantheon.cli --help 2>&1)"
-  gate_help="$(python3 -m pantheon.cli gate --help 2>&1)"
-  counsel_help="$(python3 -m pantheon.cli counsel --help 2>&1)"
+  # NO_COLOR=1 like test-bootstrap-release-e2e.sh's help assertions: modern argparse colorizes
+  # help on a TTY-ish stdout, and ANSI escapes inside the text would break the grep -qF pins
+  # below nondeterministically across environments.
+  top_help="$(NO_COLOR=1 python3 -m pantheon.cli --help 2>&1)"
+  gate_help="$(NO_COLOR=1 python3 -m pantheon.cli gate --help 2>&1)"
+  counsel_help="$(NO_COLOR=1 python3 -m pantheon.cli counsel --help 2>&1)"
 
   for pair in "top:$top_help" "gate:$gate_help" "counsel:$counsel_help"; do
     name="${pair%%:*}"
