@@ -33,14 +33,14 @@
 # from the calling repo's checked-out working tree, for the same fork-PR-injection reason
 # REVIEW_RULES.md/DESIGN.md are (DESIGN.md's "Security posture").
 #
-# anthropics/claude-code-action is pinned below to a real, verified commit SHA — v1.0.183,
-# tag `v1.0.183` (the `v1` tag also currently resolves to this same commit; pin the full SHA,
+# anthropics/claude-code-action is pinned below to a real, verified commit SHA — v1.0.191,
+# tag `v1.0.191` (the `v1` tag also currently resolves to this same commit; pin the full SHA,
 # not a tag, since tags on that repo move):
-#   https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
-#   SHA: be7b93b1907a4abad570368f3c74b6fe3807510b
+#   https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
+#   SHA: 239e3a730883eeb5c53db12b0fc9573b3024b126
 # Verified by reading that release's actual action.yml directly (not assumed from memory or an
 # older version's docs):
-#   https://raw.githubusercontent.com/anthropics/claude-code-action/be7b93b1907a4abad570368f3c74b6fe3807510b/action.yml
+#   https://raw.githubusercontent.com/anthropics/claude-code-action/239e3a730883eeb5c53db12b0fc9573b3024b126/action.yml
 # against that repo's own migration guide for what changed in its v1.0 rewrite:
 #   https://github.com/anthropics/claude-code-action/blob/main/docs/migration-guide.md
 # Confirmed real names (all four of our prior guesses needed correcting — see git history for
@@ -54,7 +54,7 @@
 #     model is gone). v1's outputs are `execution_file`, `branch_name`, `github_token`,
 #     `structured_output`, `session_id`. This action uses `structured_output`, populated by
 #     passing `--json-schema '<schema>'` in `claude_args` — see
-#     https://github.com/anthropics/claude-code-action/blob/be7b93b1907a4abad570368f3c74b6fe3807510b/docs/usage.md#structured-outputs.
+#     https://github.com/anthropics/claude-code-action/blob/239e3a730883eeb5c53db12b0fc9573b3024b126/docs/usage.md#structured-outputs.
 #     This is a materially better mechanism than the old "extract trailing JSON from raw text"
 #     approach the now-deleted vendored action/review.yml used to rely on (issue #36) — the
 #     schema is enforced by the upstream action itself, not just hoped for in a persona's
@@ -230,9 +230,11 @@ runs:
     #      promise. A P2 finding, correctly flagged as more serious than its badge.
     #
     # Round 9's fix: REMOVED the scrub step entirely — investigating `anthropics/claude-code-
-    # action`'s own source at this file's EXACT pinned SHA (be7b93b1907a4abad570368f3c74b6fe
-    # 3807510b) found it already has an UNCONDITIONAL, NATIVE mitigation for this identical
-    # vector: `src/entrypoints/run.ts` (that SHA), inside its own `Phase 3: Run Claude` block,
+    # action`'s own source at this file's pinned SHA (originally verified at v1.0.183's
+    # be7b93b19..., RE-VERIFIED verbatim at v1.0.191's 239e3a730... when the pin was refreshed —
+    # a pin bump must re-check this, since the scrub's removal is only safe while upstream
+    # mitigates natively) found it already has an UNCONDITIONAL, NATIVE mitigation for this
+    # identical vector: `src/entrypoints/run.ts` (that SHA), inside its own `Phase 3: Run Claude` block,
     # gated only on `isEntityContext(context) && context.isPR` (true for every PR-triggered run,
     # not behind any input/config this workflow controls) —
     #
@@ -634,7 +636,7 @@ runs:
       id: run-agent-artemis
       if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
@@ -704,7 +706,7 @@ runs:
       id: run-agent-apollo
       if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
@@ -768,7 +770,7 @@ runs:
       id: run-agent-socrates
       if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
@@ -827,7 +829,7 @@ runs:
       id: run-agent-diogenes
       if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
@@ -886,7 +888,7 @@ runs:
       id: run-agent-plato
       if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.183
+      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
