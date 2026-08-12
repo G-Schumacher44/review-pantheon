@@ -164,11 +164,19 @@ reasons, and only one of them is schema-checked:
   other.
 
   This binds the `--json-schema` text the provider lanes hand to the model too. It lives in
-  **two** places — `pantheon.providers.VERDICT_JSON_SCHEMA` and `action.yml`'s `JSON_SCHEMA` —
-  kept byte-identical, enforced by a test that searches for the schema's *content* rather than a
-  variable name (a third copy used to live inline in the vendored `action/review.yml`, with no
-  variable name at all — a name-based search reported it absent, which is how it once drifted a
-  revision behind the other two; issue #36 deleted that copy).
+  exactly **one** place — `pantheon.providers.VERDICT_JSON_SCHEMA`. `action.yml` no longer
+  carries a copy at all: it DERIVES `JSON_SCHEMA` at run time from that constant, imported
+  against the action's own checkout with the subshell's cwd pinned to `$ACTION_PATH` (`python3
+  -c` puts the cwd at `sys.path[0]` ahead of `PYTHONPATH`, so an unpinned cwd — the consuming
+  repo's checkout — would let a PR's own top-level `pantheon/` shadow the trusted schema, the
+  same cwd-shadow class closed for the decider). The drift class is gone by construction, not
+  policed after the fact; the test that replaced #28's byte-identity comparison asserts the
+  derivation command's exact shape, its byte-identical output, and — negative-controlled both
+  ways — that a planted hostile `pantheon/providers.py` in a consumer-checkout cwd is imported
+  by the UNpinned shape and ignored by the shipped one (tests/test_providers.py). History: this
+  was once three copies — the third lived inline in the vendored `action/review.yml`, drifted a
+  revision behind because a name-based search couldn't see it, and was deleted with that whole
+  file in issue #36; issue #32 then collapsed the remaining pair to this single constant.
 
   **That schema may never be stricter than the decider.** A schema that rejects a verdict
   `decide()` would have accepted fails closed in the wrong direction: the run surfaces as
