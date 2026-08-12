@@ -266,7 +266,11 @@ elif ! PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "import pantheon
 else
   CLONE_DIR_PY="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 1; }
   [ -n "$CLONE_DIR_PY" ] || { echo "FATAL: empty scratch dir" >&2; exit 1; }
-  if GH_TOKEN="$SMOKE_TOKEN" git clone --quiet "https://github.com/${PINNED_REPO}.git" "$CLONE_DIR_PY" 2>/tmp/smoke-clone-err-py.$$; then
+  # mktemp, not a PID-predictable /tmp path: $$ is guessable, and a pre-created symlink at a
+  # predictable path would let the redirect below clobber whatever the symlink points at.
+  CLONE_ERR_PY="$(mktemp)" || { echo "FATAL: mktemp failed" >&2; exit 1; }
+  [ -n "$CLONE_ERR_PY" ] || { echo "FATAL: empty error-file path" >&2; exit 1; }
+  if GH_TOKEN="$SMOKE_TOKEN" git clone --quiet "https://github.com/${PINNED_REPO}.git" "$CLONE_DIR_PY" 2>"$CLONE_ERR_PY"; then
     pass "stage 5: cloned $PINNED_REPO"
 
     DRYRUN_OUT_PY="$(cd "$CLONE_DIR_PY" && GH_TOKEN="$SMOKE_TOKEN" PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m pantheon.cli gate --pr "$PINNED_PR" --dry-run 2>&1)"
@@ -297,9 +301,10 @@ else
       fail "stage 5: dry-run output missing the comment preview"
     fi
   else
-    fail "stage 5: could not clone $PINNED_REPO (see /tmp/smoke-clone-err-py.$$)"
+    fail "stage 5: could not clone $PINNED_REPO — clone stderr follows"
+    sed 's/^/    /' "$CLONE_ERR_PY" 2>/dev/null || true
   fi
-  rm -rf "$CLONE_DIR_PY"
+  rm -rf "$CLONE_DIR_PY" "$CLONE_ERR_PY"
 fi
 
 # ---------------------------------------------------------------------------

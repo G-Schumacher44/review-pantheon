@@ -70,9 +70,14 @@ jobs:
         run: |
           set -euo pipefail
           status=0
-          hits="$(git grep -nE '="?\$\(mktemp -d\)"?' -- '*.sh' ':!.github/workflows/ci.yml' | grep -v '||' || true)"
+          # Two review findings hardened this guard on its own PR: (1) `mktemp -d` takes
+          # options/templates (`-d -p /tmp`, `-d /tmp/foo.XXXXXX`), so the match can't require
+          # a bare `-d)`; (2) "contains ||" is not "fails closed" — `|| true` and `|| echo warn`
+          # swallow the failure exactly like no guard at all, so the exemption requires the
+          # actual die idiom (an `exit`/`die` reachable on the same line).
+          hits="$(git grep -nE '="?\$\(mktemp -d[^)]*\)"?' -- '*.sh' ':!.github/workflows/ci.yml' | grep -vE '\|\|.*\b(exit|die)\b' || true)"
           if [[ -n "$hits" ]]; then
-            echo "::error::found a 'mktemp -d' assignment with no '|| { ...; exit 1; }' fail-closed check on the same line — see issue #43 (a sandbox-denied mktemp leaves the variable empty, and an unguarded git -C/cd/rm -rf on it then targets the CURRENT directory instead of the isolated scratch dir)"
+            echo "::error::found a 'mktemp -d' assignment whose same-line '||' handler does not exit/die (or has no handler at all) — see issue #43 (a sandbox-denied mktemp leaves the variable empty, and an unguarded git -C/cd/rm -rf on it then targets the CURRENT directory instead of the isolated scratch dir; '|| true' swallows the failure just as badly as no check)"
             echo "$hits"
             status=1
           fi
