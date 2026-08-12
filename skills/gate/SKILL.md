@@ -24,10 +24,12 @@ itself. Before running `pantheon gate`:
    Homebrew tap install, or a Way-B `bootstrap.sh` install with its export line persisted all
    land on `PATH`).
 2. Not on `PATH`? Check for an EXISTING `bootstrap.sh --prefix` install before installing a
-   second copy: the default prefix puts it at `~/.review-pantheon/venv/bin/pantheon`. If it's
-   there, that's a deliberate zero-`PATH` install — add the `export PATH=...` line
-   `bootstrap.sh` printed to your shell rc (it won't do it for you), or invoke that full path
-   directly.
+   second copy: the default prefix puts it at `~/.review-pantheon/venv/bin/pantheon`, but a
+   custom `--prefix <dir>` lands at `<dir>/venv/bin/pantheon` — if the default path is empty
+   and a bootstrap install is plausible, ask the user where they pointed `--prefix` rather
+   than assuming absence. Either way that's a deliberate zero-`PATH` install — add the
+   `export PATH=...` line `bootstrap.sh` printed to the shell rc (it won't do it for you), or
+   invoke the full path directly.
 3. Genuinely not installed? One line, pick whichever you have:
    - `pipx install review-pantheon` (or `pip install review-pantheon`)
    - `brew install g-schumacher44/tap/review-pantheon`
