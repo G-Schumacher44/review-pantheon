@@ -691,7 +691,10 @@ pass `bash -n` and shellcheck.
 - No fleet/multi-repo sweep — the gate runs on one repo, from that repo. Loop it yourself.
 - No third-party reviewer integration (e.g. bot-review aggregation) — extension point, not core.
 - No auto-merge, ever. The gate posts a verdict; a human merges.
-- No write access needed beyond posting one PR comment.
+- No write access needed beyond posting one PR comment — true of the gate/action itself. This
+  repo's own maintenance CI is the one deliberate exception: the `publish-wiki` job pushes to the
+  wiki repo under `contents: write` on every push to dev (see the `sync-wiki.py` Layout entry
+  below) — that's this repo's docs-publishing job, not the shipped gate.
 - No review of draft PRs, on either surface — see "Surface differences" above for how each
   surface enforces that.
 
@@ -754,6 +757,10 @@ bootstrap.sh                user-level, repo-independent CLI install (Way B) —
                            remote-fetch path to a tagged, checksum-verified GitHub Release
                            instead of dev's current HEAD (see RELEASING.md and
                            .github/workflows/release.yml below)
+sync-wiki.py                regenerates the GitHub wiki as a read-only projection of the gated
+                           docs (PAGE_MAP); ci.yml's publish-wiki job (push-to-dev only,
+                           `contents: write`) re-renders it after every push to dev — hand edits
+                           to the wiki are overwritten on the next sync
 .github/workflows/release.yml  tag-push (`v*.*.*`, strict-semver-validated) release gate: re-
                            runs ci.yml's lint-and-test suite pinned at the tag, builds the
                            versioned surface tarball + SHA256SUMS and publishes both as a

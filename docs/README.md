@@ -22,3 +22,5 @@
 | [docs/README.md](README.md) | This index. |
 
 See the root [README.md](../README.md) for the quickstart, the panel, and how the gate stays honest.
+
+These docs are mirrored to the [GitHub wiki](https://github.com/G-Schumacher44/review-pantheon/wiki) by `sync-wiki.py`; the wiki is generated only and never hand-edited.
