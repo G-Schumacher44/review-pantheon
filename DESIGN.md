@@ -691,7 +691,10 @@ pass `bash -n` and shellcheck.
 - No fleet/multi-repo sweep — the gate runs on one repo, from that repo. Loop it yourself.
 - No third-party reviewer integration (e.g. bot-review aggregation) — extension point, not core.
 - No auto-merge, ever. The gate posts a verdict; a human merges.
-- No write access needed beyond posting one PR comment.
+- No write access needed beyond posting one PR comment — true of the gate/action itself. This
+  repo's own maintenance CI is the one deliberate exception: the `publish-wiki` job pushes to the
+  wiki repo under `contents: write` on every push to dev (see the `sync-wiki.py` Layout entry
+  below) — that's this repo's docs-publishing job, not the shipped gate.
 - No review of draft PRs, on either surface — see "Surface differences" above for how each
   surface enforces that.
 

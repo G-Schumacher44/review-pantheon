@@ -502,6 +502,12 @@ jobs:
   # Auth: the same-repo wiki accepts the job's own GITHUB_TOKEN under contents: write. If GitHub
   # ever regresses to the old wiki-needs-a-PAT limitation this push will 403 loudly — the
   # fallback is a WIKI_PUSH_TOKEN secret swapped into the clone URL, not a silent skip.
+  #
+  # Bootstrap: GitHub does not provision a wiki's underlying git repo until its first page is
+  # created (via the UI or API) — this job's clone fails on a wiki that has never had one. This
+  # repo's wiki was bootstrapped 2026-08-15 (one page created via the UI, then this job's first
+  # run pushed every page). If the wiki is ever deleted and recreated, create any page once via
+  # the UI before the next dev push, or this job fails loudly at the clone.
   publish-wiki:
     if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
