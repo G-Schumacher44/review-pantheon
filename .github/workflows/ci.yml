@@ -218,16 +218,30 @@ jobs:
         run: pantheon --help
 
       - name: ruff check pantheon/ (lint)
-        run: ruff check pantheon/ tests/test_*.py
+        run: ruff check pantheon/ tests/test_*.py sync-wiki.py
 
       - name: ruff format --check pantheon/ (format)
-        run: ruff format --check pantheon/ tests/test_*.py
+        run: ruff format --check pantheon/ tests/test_*.py sync-wiki.py
 
       - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config)
         run: mypy
 
       - name: pytest (jqjson matrix + pure-function seams)
         run: pytest -q
+
+      # Runs in the PR lane so a doc rename that breaks the wiki projection (PAGE_MAP points at a
+      # file that no longer exists) fails BEFORE merge — publish-wiki only fires after a dev push,
+      # which would be too late to gate.
+      - name: sync-wiki.py generates cleanly from the tracked docs
+        run: |
+          set -euo pipefail
+          smoke="$RUNNER_TEMP/wiki-smoke"
+          mkdir -p "$smoke"
+          git -C "$smoke" init -q
+          python3 sync-wiki.py "$smoke"
+          for page in Home Setup CLI Design Security Contributing Releasing _Sidebar _Footer; do
+            test -s "$smoke/$page.md" || { echo "::error::sync-wiki.py did not write $page.md"; exit 1; }
+          done
 
       - name: Assert CONTRIBUTING.md's canonical test tables + prose counts match tests/* exactly
         run: |
@@ -426,3 +440,41 @@ jobs:
           # stays the default for every OTHER consumer of this action (reviewing someone else's
           # fork PR), which this input does not change; it only affects this one self-test
           # invocation, against this one repo's own PRs.
+
+  # The GitHub wiki is a generated, read-only projection of the gated docs (sync-wiki.py's
+  # module docstring is the design note). This job re-renders it after every push to dev — the
+  # only ref docs are served from — so the wiki can never drift from what the review gate
+  # approved. Hand edits to the wiki are overwritten here by construction.
+  #
+  # Push-to-dev only: PRs must never publish (their doc changes aren't approved yet), and the
+  # PR lane already smoke-tests the generator (lint-and-test's sync-wiki.py step).
+  #
+  # Auth: the same-repo wiki accepts the job's own GITHUB_TOKEN under contents: write. If GitHub
+  # ever regresses to the old wiki-needs-a-PAT limitation this push will 403 loudly — the
+  # fallback is a WIKI_PUSH_TOKEN secret swapped into the clone URL, not a silent skip.
+  publish-wiki:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # wiki pushes ride the contents scope; nothing here touches the code repo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 — resolved via gh api repos/actions/checkout/git/ref/tags/v4
+
+      - name: Regenerate the wiki and push if it changed
+        env:
+          WIKI_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          wiki="$RUNNER_TEMP/wiki"
+          git clone --quiet "https://x-access-token:${WIKI_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" "$wiki"
+          python3 sync-wiki.py "$wiki"
+          if [ -z "$(git -C "$wiki" status --porcelain)" ]; then
+            echo "wiki already matches the docs — nothing to push"
+            exit 0
+          fi
+          git -C "$wiki" config user.name "github-actions[bot]"
+          git -C "$wiki" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$wiki" add -A
+          git -C "$wiki" commit --quiet -m "sync: regenerate from docs @ ${GITHUB_SHA}"
+          git -C "$wiki" push --quiet
