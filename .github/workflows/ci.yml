@@ -240,10 +240,17 @@ jobs:
           smoke="$RUNNER_TEMP/wiki-smoke"
           mkdir -p "$smoke"
           git -C "$smoke" init -q
+          # Negative control for the full-ownership stray sweep (generate()'s iterdir loop):
+          # hand-add a non-.md page format and a subdirectory before the sync, then assert
+          # below that both are gone — proving the sweep owns every format and depth, not just
+          # *.md at the top level.
+          touch "$smoke/Rogue.creole"
+          mkdir -p "$smoke/rogue-dir" && touch "$smoke/rogue-dir/x"
           python3 sync-wiki.py "$smoke"
           for page in Home Setup CLI Design Security Contributing Releasing _Sidebar _Footer; do
             test -s "$smoke/$page.md" || { echo "::error::sync-wiki.py did not write $page.md"; exit 1; }
           done
+          test ! -e "$smoke/Rogue.creole" && test ! -e "$smoke/rogue-dir" || { echo "::error::stray-page sweep left hand-added content live"; exit 1; }
           # Non-empty pages alone would pass even if rewrite_links resolved a relative link
           # against the repo root instead of the linking file's own directory (the regression
           # the script's docstring records). docs/README.md links to DESIGN.template.md
@@ -482,6 +489,15 @@ jobs:
           WIKI_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # concurrency (above) stops two runs pushing SIMULTANEOUSLY; it does NOT guarantee they
+          # run in commit order — GitHub explicitly does not promise FIFO within a group. Without
+          # this check, an older queued SHA that starts after a newer one finishes would still
+          # publish and leave the wiki stale. Only the run whose SHA is still the dev tip proceeds.
+          tip="$(git ls-remote --quiet "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "dev has moved on to $tip — the newer run publishes; skipping"
+            exit 0
+          fi
           wiki="$RUNNER_TEMP/wiki"
           git clone --quiet "https://x-access-token:${WIKI_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" "$wiki"
           python3 sync-wiki.py "$wiki"

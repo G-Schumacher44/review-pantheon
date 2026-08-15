@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -98,22 +99,32 @@ def rewrite_links(text: str, src: str) -> str:
 def generate(wiki_dir: Path) -> list[str]:
     """Write every page; return the list of page filenames written."""
     written: list[str] = []
+    keep: set[str] = {"_Sidebar.md", "_Footer.md"}
     for src, page in PAGE_MAP.items():
         body = (REPO_ROOT / src).read_text(encoding="utf-8")
         out = rewrite_links(body, src) + FOOTER
         (wiki_dir / f"{page}.md").write_text(out, encoding="utf-8")
         written.append(f"{page}.md")
+        keep.add(f"{page}.md")
     (wiki_dir / "_Sidebar.md").write_text(SIDEBAR, encoding="utf-8")
     (wiki_dir / "_Footer.md").write_text(FOOTER.strip("\n") + "\n", encoding="utf-8")
     written += ["_Sidebar.md", "_Footer.md"]
 
-    # This script owns the whole wiki: any other page is a hand edit or a stale projection,
-    # and leaving it live would be exactly the ungated-surface drift the projection design
-    # exists to prevent.
-    for stray in wiki_dir.glob("*.md"):
-        if stray.name not in written:
-            stray.unlink()
-            written.append(f"(removed stray {stray.name})")
+    # This script owns the WHOLE wiki, not just the *.md namespace: GitHub wikis can serve
+    # pages in other markups (.mediawiki, .creole, .textile, .rst, .asciidoc, ...) and can hold
+    # subdirectories. Any entry outside the generated set (and .git) is a hand edit or a stale
+    # projection — of any format, at any depth — and leaving it live would be exactly the
+    # ungated-surface drift the projection design exists to prevent. `keep` is the generated
+    # filename set only; `written`'s stray-removal markers must never be checked against
+    # themselves.
+    for entry in wiki_dir.iterdir():
+        if entry.name == ".git" or entry.name in keep:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+        written.append(f"(removed stray {entry.name})")
     return written
 
 
