@@ -96,6 +96,22 @@ def rewrite_links(text: str, src: str) -> str:
     return re.sub(r"\[([^\]]*)\]\(([^)\s]+)\)", repl, text)
 
 
+def _clear_destination(dest: Path) -> None:
+    """Clear a hostile occupant of a generated page's path before write_text() touches it.
+
+    write_text() follows symlinks, so a reserved page name (e.g. "Home.md") planted as a
+    symlink would silently redirect the write to whatever it points at — possibly outside the
+    wiki tree entirely, while staying tracked as an ordinary wiki file. And write_text() raises
+    IsADirectoryError on a directory, wedging every publication. Checking is_symlink() first
+    (mirrors the stray-sweep below) means a symlink is always removed as a link, never
+    dereferenced into is_dir()/rmtree.
+    """
+    if dest.is_symlink():
+        dest.unlink()
+    elif dest.is_dir():
+        shutil.rmtree(dest)
+
+
 def generate(wiki_dir: Path) -> list[str]:
     """Write every page; return the list of page filenames written."""
     written: list[str] = []
@@ -103,11 +119,17 @@ def generate(wiki_dir: Path) -> list[str]:
     for src, page in PAGE_MAP.items():
         body = (REPO_ROOT / src).read_text(encoding="utf-8")
         out = rewrite_links(body, src) + FOOTER
-        (wiki_dir / f"{page}.md").write_text(out, encoding="utf-8")
+        dest = wiki_dir / f"{page}.md"
+        _clear_destination(dest)
+        dest.write_text(out, encoding="utf-8")
         written.append(f"{page}.md")
         keep.add(f"{page}.md")
-    (wiki_dir / "_Sidebar.md").write_text(SIDEBAR, encoding="utf-8")
-    (wiki_dir / "_Footer.md").write_text(FOOTER.strip("\n") + "\n", encoding="utf-8")
+    sidebar_dest = wiki_dir / "_Sidebar.md"
+    _clear_destination(sidebar_dest)
+    sidebar_dest.write_text(SIDEBAR, encoding="utf-8")
+    footer_dest = wiki_dir / "_Footer.md"
+    _clear_destination(footer_dest)
+    footer_dest.write_text(FOOTER.strip("\n") + "\n", encoding="utf-8")
     written += ["_Sidebar.md", "_Footer.md"]
 
     # This script owns the WHOLE wiki, not just the *.md namespace: GitHub wikis can serve
