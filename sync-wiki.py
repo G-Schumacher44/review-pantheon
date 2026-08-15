@@ -5,7 +5,8 @@ The wiki is NEVER hand-edited: every page here is generated from the tracked, PR
 set (DESIGN.md rule 5's "docs match code" applies to the sources; this script makes the wiki
 incapable of independent drift by owning every page it publishes). CI runs this on every push
 to dev (the publish-wiki job in .github/workflows/ci.yml); hand edits to the wiki are
-overwritten on the next sync, and every generated page's footer says so.
+overwritten on the next sync, and the shared `_Footer.md` (which GitHub renders beneath every
+wiki page) says so.
 
 Usage:
     python3 sync-wiki.py /path/to/wiki-clone          # regenerate pages into the clone
@@ -118,7 +119,7 @@ def generate(wiki_dir: Path) -> list[str]:
     keep: set[str] = {"_Sidebar.md", "_Footer.md"}
     for src, page in PAGE_MAP.items():
         body = (REPO_ROOT / src).read_text(encoding="utf-8")
-        out = rewrite_links(body, src) + FOOTER
+        out = rewrite_links(body, src)
         dest = wiki_dir / f"{page}.md"
         _clear_destination(dest)
         dest.write_text(out, encoding="utf-8")
