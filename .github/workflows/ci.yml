@@ -272,13 +272,20 @@ jobs:
           for page in Home Setup CLI Design Security Contributing Releasing _Sidebar _Footer; do
             test -s "$smoke/$page.md" || { echo "::error::sync-wiki.py did not write $page.md"; exit 1; }
           done
-          test ! -e "$smoke/Rogue.creole" && test ! -e "$smoke/rogue-dir" || { echo "::error::stray-page sweep left hand-added content live"; exit 1; }
-          test ! -e "$smoke/rogue-link" && test ! -L "$smoke/rogue-link" || { echo "::error::stray-page sweep left a directory symlink live (rmtree-on-symlink regression)"; exit 1; }
-          test -f "$smoke/Home.md" && test ! -L "$smoke/Home.md" && test -s "$smoke/Home.md" || { echo "::error::a reserved-name directory (Home.md) was not cleared before publication"; exit 1; }
-          test -f "$smoke/Setup.md" && test ! -L "$smoke/Setup.md" && test -s "$smoke/Setup.md" || { echo "::error::a reserved-name symlink (Setup.md) was not cleared before publication"; exit 1; }
+          test ! -e "$smoke/Rogue.creole" || { echo "::error::stray-page sweep left Rogue.creole live"; exit 1; }
+          test ! -e "$smoke/rogue-dir" || { echo "::error::stray-page sweep left rogue-dir live"; exit 1; }
+          test ! -e "$smoke/rogue-link" || { echo "::error::stray-page sweep left rogue-link live (rmtree-on-symlink regression)"; exit 1; }
+          test ! -L "$smoke/rogue-link" || { echo "::error::stray-page sweep left rogue-link as a dangling symlink (rmtree-on-symlink regression)"; exit 1; }
+          test -f "$smoke/Home.md" || { echo "::error::Home.md is not a regular file — reserved-name directory (Home.md) was not cleared before publication"; exit 1; }
+          test ! -L "$smoke/Home.md" || { echo "::error::Home.md is a symlink — reserved-name directory (Home.md) was not cleared before publication"; exit 1; }
+          test -s "$smoke/Home.md" || { echo "::error::Home.md is empty — reserved-name directory (Home.md) was not cleared before publication"; exit 1; }
+          test -f "$smoke/Setup.md" || { echo "::error::Setup.md is not a regular file — reserved-name symlink (Setup.md) was not cleared before publication"; exit 1; }
+          test ! -L "$smoke/Setup.md" || { echo "::error::Setup.md is still a symlink — reserved-name symlink (Setup.md) was not cleared before publication"; exit 1; }
+          test -s "$smoke/Setup.md" || { echo "::error::Setup.md is empty — reserved-name symlink (Setup.md) was not cleared before publication"; exit 1; }
           outside_after_sum="$(sha256sum "$outside_target" | cut -d' ' -f1)"
           outside_after_mtime="$(stat -c %Y "$outside_target")"
-          [ "$outside_before_sum" = "$outside_after_sum" ] && [ "$outside_before_mtime" = "$outside_after_mtime" ] || { echo "::error::the reserved-name symlink's outside target was modified — write_text followed the link out of the wiki tree"; exit 1; }
+          [ "$outside_before_sum" = "$outside_after_sum" ] || { echo "::error::the reserved-name symlink's outside target content was modified — write_text followed the link out of the wiki tree"; exit 1; }
+          [ "$outside_before_mtime" = "$outside_after_mtime" ] || { echo "::error::the reserved-name symlink's outside target mtime changed — write_text followed the link out of the wiki tree"; exit 1; }
           # Non-empty pages alone would pass even if rewrite_links resolved a relative link
           # against the repo root instead of the linking file's own directory (the regression
           # the script's docstring records). docs/README.md links to DESIGN.template.md
