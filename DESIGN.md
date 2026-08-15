@@ -754,6 +754,10 @@ bootstrap.sh                user-level, repo-independent CLI install (Way B) —
                            remote-fetch path to a tagged, checksum-verified GitHub Release
                            instead of dev's current HEAD (see RELEASING.md and
                            .github/workflows/release.yml below)
+sync-wiki.py                regenerates the GitHub wiki as a read-only projection of the gated
+                           docs (PAGE_MAP); ci.yml's publish-wiki job (push-to-dev only,
+                           `contents: write`) re-renders it after every push to dev — hand edits
+                           to the wiki are overwritten on the next sync
 .github/workflows/release.yml  tag-push (`v*.*.*`, strict-semver-validated) release gate: re-
                            runs ci.yml's lint-and-test suite pinned at the tag, builds the
                            versioned surface tarball + SHA256SUMS and publishes both as a

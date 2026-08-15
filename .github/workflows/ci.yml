@@ -223,8 +223,10 @@ jobs:
       - name: ruff format --check pantheon/ (format)
         run: ruff format --check pantheon/ tests/test_*.py sync-wiki.py
 
-      - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config)
-        run: mypy
+      - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config) + sync-wiki.py
+        run: |
+          mypy
+          mypy sync-wiki.py
 
       - name: pytest (jqjson matrix + pure-function seams)
         run: pytest -q
@@ -242,6 +244,12 @@ jobs:
           for page in Home Setup CLI Design Security Contributing Releasing _Sidebar _Footer; do
             test -s "$smoke/$page.md" || { echo "::error::sync-wiki.py did not write $page.md"; exit 1; }
           done
+          # Non-empty pages alone would pass even if rewrite_links resolved a relative link
+          # against the repo root instead of the linking file's own directory (the regression
+          # the script's docstring records). docs/README.md links to DESIGN.template.md
+          # bare-relative ("DESIGN.template.md"); the correct resolution is
+          # docs/DESIGN.template.md, so the rewritten blob URL must carry the docs/ segment.
+          grep -qF '(https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/DESIGN.template.md' "$smoke/Home.md" || { echo "::error::rewrite_links resolved a docs-relative link against the wrong base"; exit 1; }
 
       - name: Assert CONTRIBUTING.md's canonical test tables + prose counts match tests/* exactly
         run: |
@@ -455,6 +463,14 @@ jobs:
   publish-wiki:
     if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
+    # Two quick dev pushes queue two runs of this job; without a shared group both clone the
+    # wiki, and whichever pushes second finds its clone already behind (non-fast-forward). A
+    # single group serializes them so the second run's clone reflects the first's push; don't
+    # cancel-in-progress — that would drop the earlier push's regeneration instead of just
+    # ordering it before the later one.
+    concurrency:
+      group: publish-wiki
+      cancel-in-progress: false
     permissions:
       contents: write # wiki pushes ride the contents scope; nothing here touches the code repo
     steps:
