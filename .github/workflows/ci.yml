@@ -246,11 +246,21 @@ jobs:
           # *.md at the top level.
           touch "$smoke/Rogue.creole"
           mkdir -p "$smoke/rogue-dir" && touch "$smoke/rogue-dir/x"
+          # Also plant a directory symlink: entry.is_dir() follows symlinks, so a naive sweep
+          # would hand a symlink to shutil.rmtree() (which refuses to operate on one and raises)
+          # — the sweep must remove it as a link via is_symlink(), never dereference it. The
+          # link target lives OUTSIDE $smoke (not itself a swept entry) so it's never removed
+          # ahead of the link: iterdir() order is unspecified, and a link left dangling by an
+          # earlier removal would make is_dir() return False, masking the bug it's meant to
+          # catch (the rogue-dir sibling gets rmtree'd on its own turn regardless of order).
+          mkdir -p "$RUNNER_TEMP/wiki-smoke-link-target"
+          ln -s "$RUNNER_TEMP/wiki-smoke-link-target" "$smoke/rogue-link"
           python3 sync-wiki.py "$smoke"
           for page in Home Setup CLI Design Security Contributing Releasing _Sidebar _Footer; do
             test -s "$smoke/$page.md" || { echo "::error::sync-wiki.py did not write $page.md"; exit 1; }
           done
           test ! -e "$smoke/Rogue.creole" && test ! -e "$smoke/rogue-dir" || { echo "::error::stray-page sweep left hand-added content live"; exit 1; }
+          test ! -e "$smoke/rogue-link" && test ! -L "$smoke/rogue-link" || { echo "::error::stray-page sweep left a directory symlink live (rmtree-on-symlink regression)"; exit 1; }
           # Non-empty pages alone would pass even if rewrite_links resolved a relative link
           # against the repo root instead of the linking file's own directory (the regression
           # the script's docstring records). docs/README.md links to DESIGN.template.md

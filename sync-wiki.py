@@ -120,7 +120,14 @@ def generate(wiki_dir: Path) -> list[str]:
     for entry in wiki_dir.iterdir():
         if entry.name == ".git" or entry.name in keep:
             continue
-        if entry.is_dir():
+        # Check is_symlink() first: entry.is_dir() follows symlinks, so a tracked symlink to a
+        # directory would otherwise hit shutil.rmtree() — which refuses to operate on a symlink
+        # and raises, breaking every publication until the wiki is hand-repaired. A symlink is
+        # always removed as a link (never dereferenced into rmtree), so following one out of the
+        # wiki tree can never happen here.
+        if entry.is_symlink():
+            entry.unlink()
+        elif entry.is_dir():
             shutil.rmtree(entry)
         else:
             entry.unlink()
