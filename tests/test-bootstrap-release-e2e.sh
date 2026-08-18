@@ -157,13 +157,10 @@ else
   fail "--version $TAG: missing checksum-verified message: $happy_out"
 fi
 
-if [[ -f "$PREFIX_OK/agents/artemis.md" ]]; then
-  pass "--version $TAG: agents/artemis.md landed in prefix"
-else
-  fail "--version $TAG: agents/artemis.md MISSING from prefix"
-fi
-
-# Prove the venv install is actually usable from the prefix, same shape as
+# bootstrap.sh no longer copies a bare agents/*.md tree into $PREFIX -- pantheon.cli._agents_dir()
+# resolves personas from the installed package's own package data (proved below), so a second,
+# unused on-disk copy was dead weight. Prove the venv install is actually usable from the prefix,
+# same shape as
 # test-setup-smoke.sh's Stage 4 check.
 NEUTRAL_DIR="$WORKDIR/neutral"
 mkdir -p "$NEUTRAL_DIR"

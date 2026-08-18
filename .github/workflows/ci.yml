@@ -19,12 +19,24 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    # Least privilege (issue #57): this job only reads the checkout — without an explicit block
+    # it inherits the default token scope, inconsistent with composite-action-self-check and
+    # every release.yml job, which are all explicitly scoped.
+    #
+    # Also per that review (and a CodeRabbit follow-up on this PR): first-party actions are now
+    # SHA-pinned like everything else — an earlier draft documented a tag-pin exception for
+    # them, but one uniform rule beats a defended exception, and the SHAs age on the same
+    # maintenance rhythm as the claude-code-action pin. These pin the SAME releases the v4/v5
+    # major tags served at pin time (behavior-identical); upgrading to the current v7 lines is
+    # a separate, deliberate change.
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 — resolved via gh api repos/actions/checkout/git/ref/tags/v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 — resolved via gh api repos/actions/setup-python/git/ref/tags/v5
         with:
           python-version: "3.x"
 
@@ -206,16 +218,80 @@ jobs:
         run: pantheon --help
 
       - name: ruff check pantheon/ (lint)
-        run: ruff check pantheon/ tests/test_*.py
+        run: ruff check pantheon/ tests/test_*.py sync-wiki.py
 
       - name: ruff format --check pantheon/ (format)
-        run: ruff format --check pantheon/ tests/test_*.py
+        run: ruff format --check pantheon/ tests/test_*.py sync-wiki.py
 
-      - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config)
-        run: mypy
+      - name: mypy pantheon/ (pyproject.toml's [tool.mypy] config) + sync-wiki.py
+        run: |
+          mypy
+          mypy sync-wiki.py
 
       - name: pytest (jqjson matrix + pure-function seams)
         run: pytest -q
+
+      # Runs in the PR lane so a doc rename that breaks the wiki projection (PAGE_MAP points at a
+      # file that no longer exists) fails BEFORE merge — publish-wiki only fires after a dev push,
+      # which would be too late to gate.
+      - name: sync-wiki.py generates cleanly from the tracked docs
+        run: |
+          set -euo pipefail
+          smoke="$RUNNER_TEMP/wiki-smoke"
+          mkdir -p "$smoke"
+          git -C "$smoke" init -q
+          # Negative control for the full-ownership stray sweep (generate()'s iterdir loop):
+          # hand-add a non-.md page format and a subdirectory before the sync, then assert
+          # below that both are gone — proving the sweep owns every format and depth, not just
+          # *.md at the top level.
+          touch "$smoke/Rogue.creole"
+          mkdir -p "$smoke/rogue-dir" && touch "$smoke/rogue-dir/x"
+          # Also plant a directory symlink: entry.is_dir() follows symlinks, so a naive sweep
+          # would hand a symlink to shutil.rmtree() (which refuses to operate on one and raises)
+          # — the sweep must remove it as a link via is_symlink(), never dereference it. The
+          # link target lives OUTSIDE $smoke (not itself a swept entry) so it's never removed
+          # ahead of the link: iterdir() order is unspecified, and a link left dangling by an
+          # earlier removal would make is_dir() return False, masking the bug it's meant to
+          # catch (the rogue-dir sibling gets rmtree'd on its own turn regardless of order).
+          mkdir -p "$RUNNER_TEMP/wiki-smoke-link-target"
+          ln -s "$RUNNER_TEMP/wiki-smoke-link-target" "$smoke/rogue-link"
+          # Reserved-name hostiles, distinct from the stray sweep above: these occupy a page
+          # name that IS in the keep set, so only the pre-write _clear_destination() call (not
+          # the post-write stray sweep) can save the publication. A DIRECTORY at "Home.md"
+          # makes write_text() raise IsADirectoryError, wedging every page. A SYMLINK at
+          # "Setup.md" is followed by write_text(), so the generated content lands at whatever
+          # it points at — proven here by pointing it at a file OUTSIDE $smoke and asserting
+          # that file is untouched after the sync.
+          mkdir -p "$smoke/Home.md"
+          outside_target="$RUNNER_TEMP/wiki-smoke-setup-outside-target"
+          echo "pre-existing content, must survive the sync untouched" > "$outside_target"
+          outside_before_sum="$(sha256sum "$outside_target" | cut -d' ' -f1)"
+          outside_before_mtime="$(stat -c %Y "$outside_target")"
+          ln -s "$outside_target" "$smoke/Setup.md"
+          python3 sync-wiki.py "$smoke"
+          for page in Home Setup CLI Design Security Contributing Releasing _Sidebar _Footer; do
+            test -s "$smoke/$page.md" || { echo "::error::sync-wiki.py did not write $page.md"; exit 1; }
+          done
+          test ! -e "$smoke/Rogue.creole" || { echo "::error::stray-page sweep left Rogue.creole live"; exit 1; }
+          test ! -e "$smoke/rogue-dir" || { echo "::error::stray-page sweep left rogue-dir live"; exit 1; }
+          test ! -e "$smoke/rogue-link" || { echo "::error::stray-page sweep left rogue-link live (rmtree-on-symlink regression)"; exit 1; }
+          test ! -L "$smoke/rogue-link" || { echo "::error::stray-page sweep left rogue-link as a dangling symlink (rmtree-on-symlink regression)"; exit 1; }
+          test -f "$smoke/Home.md" || { echo "::error::Home.md is not a regular file — reserved-name directory (Home.md) was not cleared before publication"; exit 1; }
+          test ! -L "$smoke/Home.md" || { echo "::error::Home.md is a symlink — reserved-name directory (Home.md) was not cleared before publication"; exit 1; }
+          test -s "$smoke/Home.md" || { echo "::error::Home.md is empty — reserved-name directory (Home.md) was not cleared before publication"; exit 1; }
+          test -f "$smoke/Setup.md" || { echo "::error::Setup.md is not a regular file — reserved-name symlink (Setup.md) was not cleared before publication"; exit 1; }
+          test ! -L "$smoke/Setup.md" || { echo "::error::Setup.md is still a symlink — reserved-name symlink (Setup.md) was not cleared before publication"; exit 1; }
+          test -s "$smoke/Setup.md" || { echo "::error::Setup.md is empty — reserved-name symlink (Setup.md) was not cleared before publication"; exit 1; }
+          outside_after_sum="$(sha256sum "$outside_target" | cut -d' ' -f1)"
+          outside_after_mtime="$(stat -c %Y "$outside_target")"
+          [ "$outside_before_sum" = "$outside_after_sum" ] || { echo "::error::the reserved-name symlink's outside target content was modified — write_text followed the link out of the wiki tree"; exit 1; }
+          [ "$outside_before_mtime" = "$outside_after_mtime" ] || { echo "::error::the reserved-name symlink's outside target mtime changed — write_text followed the link out of the wiki tree"; exit 1; }
+          # Non-empty pages alone would pass even if rewrite_links resolved a relative link
+          # against the repo root instead of the linking file's own directory (the regression
+          # the script's docstring records). docs/README.md links to DESIGN.template.md
+          # bare-relative ("DESIGN.template.md"); the correct resolution is
+          # docs/DESIGN.template.md, so the rewritten blob URL must carry the docs/ segment.
+          grep -qF '(https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/DESIGN.template.md' "$smoke/Home.md" || { echo "::error::rewrite_links resolved a docs-relative link against the wrong base"; exit 1; }
 
       - name: Assert CONTRIBUTING.md's canonical test tables + prose counts match tests/* exactly
         run: |
@@ -335,9 +411,12 @@ jobs:
     # against a real, pinned public PR. Separate job from lint-and-test so a setup-story
     # regression doesn't get muddled with a lint/fixture failure in the CI summary.
     runs-on: ubuntu-latest
+    # Least privilege (issue #57), same rationale as lint-and-test above: read-only job.
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 — resolved via gh api repos/actions/checkout/git/ref/tags/v4
 
       - name: Build Dockerfile.smoke
         run: docker build -f Dockerfile.smoke -t review-pantheon-smoke .
@@ -360,12 +439,12 @@ jobs:
       HAS_CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 — resolved via gh api repos/actions/checkout/git/ref/tags/v4
         with:
           fetch-depth: 0 # action.yml needs base...head to compute the diff, same as review.yml
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 — resolved via gh api repos/actions/setup-python/git/ref/tags/v5
         with:
           python-version: "3.x"
 
@@ -411,3 +490,64 @@ jobs:
           # stays the default for every OTHER consumer of this action (reviewing someone else's
           # fork PR), which this input does not change; it only affects this one self-test
           # invocation, against this one repo's own PRs.
+
+  # The GitHub wiki is a generated, read-only projection of the gated docs (sync-wiki.py's
+  # module docstring is the design note). This job re-renders it after every push to dev — the
+  # only ref docs are served from — so the wiki can never drift from what the review gate
+  # approved. Hand edits to the wiki are overwritten here by construction.
+  #
+  # Push-to-dev only: PRs must never publish (their doc changes aren't approved yet), and the
+  # PR lane already smoke-tests the generator (lint-and-test's sync-wiki.py step).
+  #
+  # Auth: the same-repo wiki accepts the job's own GITHUB_TOKEN under contents: write. If GitHub
+  # ever regresses to the old wiki-needs-a-PAT limitation this push will 403 loudly — the
+  # fallback is a WIKI_PUSH_TOKEN secret swapped into the clone URL, not a silent skip.
+  #
+  # Bootstrap: GitHub does not provision a wiki's underlying git repo until its first page is
+  # created (via the UI or API) — this job's clone fails on a wiki that has never had one. This
+  # repo's wiki was bootstrapped 2026-08-15 (one page created via the UI, then this job's first
+  # run pushed every page). If the wiki is ever deleted and recreated, create any page once via
+  # the UI before the next dev push, or this job fails loudly at the clone.
+  publish-wiki:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    # Two quick dev pushes queue two runs of this job; without a shared group both clone the
+    # wiki, and whichever pushes second finds its clone already behind (non-fast-forward). A
+    # single group serializes them so the second run's clone reflects the first's push; don't
+    # cancel-in-progress — that would drop the earlier push's regeneration instead of just
+    # ordering it before the later one.
+    concurrency:
+      group: publish-wiki
+      cancel-in-progress: false
+    permissions:
+      contents: write # wiki pushes ride the contents scope; nothing here touches the code repo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 — resolved via gh api repos/actions/checkout/git/ref/tags/v4
+
+      - name: Regenerate the wiki and push if it changed
+        env:
+          WIKI_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # concurrency (above) stops two runs pushing SIMULTANEOUSLY; it does NOT guarantee they
+          # run in commit order — GitHub explicitly does not promise FIFO within a group. Without
+          # this check, an older queued SHA that starts after a newer one finishes would still
+          # publish and leave the wiki stale. Only the run whose SHA is still the dev tip proceeds.
+          tip="$(git ls-remote --quiet "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "dev has moved on to $tip — the newer run publishes; skipping"
+            exit 0
+          fi
+          wiki="$RUNNER_TEMP/wiki"
+          git clone --quiet "https://x-access-token:${WIKI_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" "$wiki"
+          python3 sync-wiki.py "$wiki"
+          if [ -z "$(git -C "$wiki" status --porcelain)" ]; then
+            echo "wiki already matches the docs — nothing to push"
+            exit 0
+          fi
+          git -C "$wiki" config user.name "github-actions[bot]"
+          git -C "$wiki" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$wiki" add -A
+          git -C "$wiki" commit --quiet -m "sync: regenerate from docs @ ${GITHUB_SHA}"
+          git -C "$wiki" push --quiet

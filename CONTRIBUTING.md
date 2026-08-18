@@ -39,7 +39,7 @@ git clone https://github.com/G-Schumacher44/review-pantheon.git
 cd review-pantheon
 ```
 
-Prerequisites (bash, git, jq, gh, python3, one provider CLI): see
+Prerequisites (bash, git, gh, python3, one provider CLI): see
 [docs/SETUP.md](docs/SETUP.md#prerequisites) for the full table and what each one gates.
 
 Run the suites — each is a standalone fixture test, no runner needed. **This table is the

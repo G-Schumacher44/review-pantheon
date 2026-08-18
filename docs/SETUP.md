@@ -45,7 +45,7 @@ git clone <this repo> review-pantheon
 
 Copies the five personas and a `REVIEW_RULES.md` house-rules template into your target repo
 (`.github/review-agents/`, `REVIEW_RULES.md`), and GENERATES a thin-caller
-`.github/workflows/review.yml` (~25 lines) that calls this repo's own published composite
+`.github/workflows/review.yml` that calls this repo's own published composite
 action, pinned to a full commit SHA rather than a moving tag — see that generated file's own
 header comment for the pin and how to re-pin it. **Honest tradeoff (issue #36):** unlike the
 pre-v0.1.0 version of Way A, this now depends on review-pantheon existing as a public GitHub
@@ -134,8 +134,9 @@ export PATH="$HOME/.review-pantheon/venv/bin:$PATH"
 ```
 
 Installs the `pantheon` package into a venv under the prefix — `pantheon`/`pantheon-git-readonly`
-land in `$PREFIX/venv/bin` — plus the five personas into `$PREFIX/agents`. Nothing is written
-into any target repo either way. Add the printed `export PATH=...` line to your shell rc
+land in `$PREFIX/venv/bin`, and the five personas install as that package's own package data
+(resolved via `importlib.resources`, not a separate on-disk copy). Nothing is written into any
+target repo either way. Add the printed `export PATH=...` line to your shell rc
 yourself (`bootstrap.sh` won't edit it for you). From then on, `pantheon gate --pr <n>` works
 from inside any repo with a `gh`-authenticated remote, same as running it from an in-repo
 checkout. This is the CLI surface only — it doesn't install the GitHub Action; pair it with Way A
@@ -152,15 +153,10 @@ via GitHub's codeload endpoint instead. That endpoint 404s against a private rep
 repo is public, the curl path fails with an explicit message and a `git clone` fallback command,
 rather than silently doing nothing. Clone-and-run (the first form above) works today regardless.
 
-Idempotent, same cmp-and-skip contract as `install.sh` for the vendored bash files: re-running
-only touches files that changed; a file you've hand-edited in the prefix is left alone and
-reported skipped. Be aware this contract can't tell "hand-edited" from "stale": a file left over
-from an older `bootstrap.sh` run that simply differs from the currently-shipped source is
-skipped the exact same way, so it won't pick up upstream fixes on its own — upgrading an
-existing prefix means removing the file (or the whole prefix) first, then re-running. The
-`pantheon` package venv is idempotent by a different mechanism — `python3 -m venv`/`pip install`
-are themselves safe to re-run and pick up a changed source tree automatically, no stale-file
-caveat there.
+Idempotent: the prefix holds only the `pantheon` package venv (the agent personas ship inside
+it as package data — nothing is vendored as loose files anymore), and `python3 -m venv`/`pip
+install` are themselves safe to re-run — a re-run picks up a changed source tree automatically,
+with no stale-file caveat. Upgrading an existing prefix is just re-running the script.
 
 Want to pin to a specific tagged release instead of tracking `dev`'s current HEAD? Add
 `--version vX.Y.Z` to the remote-fetch (`curl | bash`) form above — it fetches that release's
