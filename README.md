@@ -1,9 +1,9 @@
 <div align="center">
 
-<img src="docs/assets/banner.png" alt="review-pantheon — Spec Driven AI Coding toolkit" width="100%"/>
+<img src="https://raw.githubusercontent.com/G-Schumacher44/review-pantheon/dev/docs/assets/banner.png" alt="review-pantheon — Spec Driven AI Coding toolkit" width="100%"/>
 
 [![CI](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/G-Schumacher44/review-pantheon/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/G-Schumacher44/review-pantheon/blob/dev/LICENSE)
 [![fail-closed by design](https://img.shields.io/badge/fail--closed-by%20design-brightgreen)](#how-the-gate-stays-honest)
 
 </div>
@@ -25,17 +25,48 @@ once and forgotten: `DESIGN.md` in this repo is itself that contract.
 review has become the bottleneck, who want a second opinion that can't be talked out of a red
 verdict by a confident-sounding PR description.
 
+**Why this instead of CodeRabbit/Copilot code review:** a missing or malformed verdict can never
+render green — the fail-closed rule below is mechanical, not a review-quality promise. Two
+independent agents (Artemis, Apollo) split "does the diff look right" from "did the PR actually
+do what it claims," instead of one reviewer doing both jobs. `DESIGN.md` is a spec-as-contract —
+Apollo gates against what YOU wrote down, not a generic checklist. And it's bring-your-own Claude
+subscription (`claude_code_oauth_token`), not a per-seat SaaS.
+
+**Stability.** Within v1, the action's input names, `gate.conf` keys, and CLI flags are a stable
+contract — renames only ride a major version bump, with a deprecation note.
+
 ## Quick start
 
-Zero footprint — drop this into a workflow file (plus a PR trigger and `pull-requests: write`):
+Zero footprint — drop this into `.github/workflows/review-gate.yml` (this is the whole install;
+gated on a repo variable so adding the file never silently starts gating PRs):
 
 ```yaml
-- uses: G-Schumacher44/review-pantheon@v1
-  with: { claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} }
+name: review-pantheon
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  review:
+    if: ${{ vars.REVIEW_GATE_ENABLED == 'true' && github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: G-Schumacher44/review-pantheon@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
+Set the `REVIEW_GATE_ENABLED` repo variable to `true` once the token secret is in place. Full
+recipe with comments explaining every line: [examples/review-gate.yml](https://github.com/G-Schumacher44/review-pantheon/blob/dev/examples/review-gate.yml).
+
 *(`@v1` tracks the latest release — it moves when a new one is cut (see
-[RELEASING.md](RELEASING.md)). Prefer updates on your own schedule? Pin a full commit SHA
+[RELEASING.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/RELEASING.md)). Prefer updates on your own schedule? Pin a full commit SHA
 instead — that's exactly what `install.sh`'s generated workflow does.)*
 
 Nothing else lands in your repo. The CLI installs from PyPI or Homebrew:
@@ -54,7 +85,7 @@ pantheon gate --pr <number> --dry-run
 
 runs the real thing — real diff, real prompts — right up to calling a provider, then prints
 exactly what it *would* post. `pantheon` is the CLI (docs/CLI.md). Prefer a vendored install, or
-the CLI only? Full walkthrough for every path: [docs/SETUP.md](docs/SETUP.md).
+the CLI only? Full walkthrough for every path: [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/SETUP.md).
 
 ## The panel
 
@@ -70,21 +101,21 @@ gate, whatever they're pointed at (spec, design doc, proposal, code, or a diff).
 | **Diogenes** | Counsel | Simplicity — is this more than it needs to be? |
 | **Plato** | Counsel | Coherence — one consistent shape, or drifting sprawl? |
 
-Full persona definitions, verdict vocabulary, and the gate-flow diagram: [DESIGN.md](DESIGN.md).
+Full persona definitions, verdict vocabulary, and the gate-flow diagram: [DESIGN.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/DESIGN.md).
 
 ## Where to go
 
 | I want to... | Go to |
 |---|---|
 | Decide whether to adopt this | This page, plus the security TL;DR below |
-| Install it | [docs/SETUP.md](docs/SETUP.md) — three ways, zero-token demo |
-| Use the CLI | [docs/CLI.md](docs/CLI.md) — every flag, `gate.conf`, worked examples |
-| Use it inside Claude Code | [skills/](skills) — `/gate` and `/counsel` commands plus the `gate`/`counsel`/`spec-driven`/`design-contract` skills, installed via `install.sh --claude` |
-| Understand the design contract | [DESIGN.md](DESIGN.md) — the binding spec |
-| Review security | [SECURITY.md](SECURITY.md) — scope, reporting, honest limits |
-| Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) — ground rules, dev setup |
-| Cut a release (operator) | [RELEASING.md](RELEASING.md) |
-| See the full doc index | [docs/README.md](docs/README.md) |
+| Install it | [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/SETUP.md) — three ways, zero-token demo |
+| Use the CLI | [docs/CLI.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/CLI.md) — every flag, `gate.conf`, worked examples |
+| Use it inside Claude Code | [skills/](https://github.com/G-Schumacher44/review-pantheon/tree/dev/skills) — `/gate` and `/counsel` commands plus the `gate`/`counsel`/`spec-driven`/`design-contract` skills, installed via `install.sh --claude` |
+| Understand the design contract | [DESIGN.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/DESIGN.md) — the binding spec |
+| Review security | [SECURITY.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/SECURITY.md) — scope, reporting, honest limits |
+| Contribute | [CONTRIBUTING.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/CONTRIBUTING.md) — ground rules, dev setup |
+| Cut a release (operator) | [RELEASING.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/RELEASING.md) |
+| See the full doc index | [docs/README.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/README.md) |
 
 ## How the gate stays honest
 
@@ -94,8 +125,8 @@ Full persona definitions, verdict vocabulary, and the gate-flow diagram: [DESIGN
 - Nothing here eliminates a fully-compromised agent handing back a deceptive-but-schema-valid
   verdict — cross-review by a second agent is the real backstop, not a guarantee.
 
-Full technical detail, honestly scoped: [SECURITY.md](SECURITY.md) and DESIGN.md's ["Security
-posture"](DESIGN.md#security-posture).
+Full technical detail, honestly scoped: [SECURITY.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/SECURITY.md) and DESIGN.md's ["Security
+posture"](https://github.com/G-Schumacher44/review-pantheon/blob/dev/DESIGN.md#security-posture).
 
 ## Works with Conductor
 
@@ -113,13 +144,16 @@ rebuild work, with the author directing as coordinator — where a commit messag
 coordinator", that's the human in the loop. The gate could not review this repo until it existed: of the first 44 commits, 23
 went straight to `dev` with no pull request, and 14 of those touch code — including the original
 CLI, the Action, the installer, and `bootstrap.sh`. Since branch protection landed (2026-07-31),
-every change has gone through the gate: Artemis and Apollo on a pull request, fail-closed, no
-direct pushes. The history shows which is which.
+almost every change has gone through the gate: Artemis and Apollo on a pull request, fail-closed.
+One admin-bypass direct push has landed since (`1148e19`, a `.gitignore` hardening commit — its
+content was re-landed through the gate in #63/#64) — CONTRIBUTING.md's "Ground rules" section
+discloses the emergency-hatch bypass this used. The history shows which is which.
 
-`88e0b01`, one of those 14, is the commit that introduced a shell-injection defect in the
-vendored workflow — found and fixed later by this repo's own twin gate, once there was a gate to
-find it. Human-directed, spec-driven, self-gated, and late to gate itself.
+The vulnerable `${{ }}`-interpolation pattern that let PR content reach a shell string directly
+has been present since `action/review.yml` was first added (`a94821c`), carried forward through
+`88e0b01`'s restructure — found and fixed by this repo's own twin gate in `4b35500`, once there
+was a gate to find it. Human-directed, spec-driven, self-gated, and late to gate itself.
 
 ## License
 
-MIT — © 2026 Garrett Schumacher. See [LICENSE](LICENSE).
+MIT — © 2026 Garrett Schumacher. See [LICENSE](https://github.com/G-Schumacher44/review-pantheon/blob/dev/LICENSE).

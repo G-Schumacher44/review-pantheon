@@ -386,8 +386,14 @@ history, not here — a contract describes what's true now, not how it got that 
   human-operated incremental mode (not the fail-closed-by-default CI gate), and base-pinning it
   would need to special-case follow-up mode's whole "what changed since I last looked" premise.
   Tracked as a known, accepted gap rather than silently unswept.
-- The GitHub Action checks out with `persist-credentials: false` and fails loud (not skip)
-  when its token secret is absent. It pins `anthropics/claude-code-action` to a full commit
+- The consumer's own checkout step (`examples/review-gate.yml`'s `actions/checkout@v4` — the
+  Action itself has no checkout step of its own to configure this on) is expected to set
+  `persist-credentials: false`. The Action fails loud (not skip) when its token secret is absent
+  on same-repo runs — the one documented exception is a fork PR: GitHub withholds `secrets.*`
+  from a fork-originated `pull_request` run, so the Action detects that case specifically and
+  exits 0 with a NOT-GATED notice instead of failing (`action.yml`'s "Assert exactly one auth
+  input is set" step; disclosed in SECURITY.md/SETUP.md, not a silent skip of the general rule).
+  It pins `anthropics/claude-code-action` to a full commit
   SHA — `239e3a730883eeb5c53db12b0fc9573b3024b126` (v1.0.191) — read directly from that
   release's own `action.yml`, not assumed or copied from an older version's docs (a moving
   tag, or an unpinned `uses:`, is the thing to avoid here). If you re-pin to a newer release
@@ -458,15 +464,16 @@ history, not here — a contract describes what's true now, not how it got that 
      repo root via a fixed `--repo-root` literal baked into its own Bash-tool permission prefix
      — see `pantheon.cli._wrapper_invocation`) and explicit `Read`/`Grep`/`Glob` calls against
      the repo root's own advertised absolute path (the prompt's Run-context block).
-  2. The claude lane also passes `--bare` (conditional on an explicit
-     `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` credential being present, since the CLI
-     lane's documented primary auth path is a LOCAL interactive `claude auth login` keychain
-     session with no token env var at all — an unconditional `--bare` would silently break
-     that) — documented to skip auto-discovery of hooks, skills, plugins, MCP servers, auto
-     memory, and CLAUDE.md, in one flag, layered on top of (not instead of) the neutral cwd.
-     Codex/Gemini/Cursor have no documented equivalent flag as of this writing — a disclosed,
-     honest residual exposure for those three best-effort lanes, narrowed (nothing repo-local in
-     a neutral cwd) but not eliminated, not silently treated as closed.
+  2. **`--bare` is DROPPED on every credential path, not passed at all** — an earlier version of
+     this lane passed it conditionally (present only when an explicit
+     `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` credential was set), but it broke
+     `--json-schema`-driven structured output (issue #26 item 3), so it was removed entirely; see
+     `pantheon.providers._claude`'s own docstring for the full history and evidence. The neutral
+     `cwd` above was always the PRIMARY, unconditional control this whole vector relies on — see
+     that docstring for why dropping `--bare` doesn't reopen it. Codex/Gemini/Cursor have no
+     documented equivalent flag as of this writing — a disclosed, honest residual exposure for
+     those three best-effort lanes, narrowed (nothing repo-local in a neutral cwd) but not
+     eliminated, not silently treated as closed.
   3. `pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS` (the explicit env allowlist every
      provider subprocess receives) classifies every allowlisted key as PATH-SHAPED or not.
      `HOME` is never read from ambient env at all — resolved via
@@ -478,16 +485,15 @@ history, not here — a contract describes what's true now, not how it got that 
      being forwarded — a value that resolves inside either is dropped (never forwarded, loudly),
      regardless of how it got set; the CLI's own default takes over instead. A genuinely
      legitimate override (an operator's real, non-repo `CLAUDE_CONFIG_DIR` for a second account)
-     still passes the check and is forwarded unchanged. Fixture proof, both directions, both the
-     `--bare` and no-`--bare` (stored-keychain) paths: `tests/test_providers.py`'s
-     `test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root_with_bare`/
-     `..._without_bare`/`test_claude_env_still_forwards_a_legitimate_claude_config_dir_without_bare`.
+     still passes the check and is forwarded unchanged. Fixture proof: `tests/test_providers.py`'s
+     `test_claude_env_never_forwards_a_claude_config_dir_pointed_inside_the_repo_root`/
+     `test_claude_env_still_forwards_a_legitimate_claude_config_dir`.
   - `execution=trusted` roots the provider's cwd at the real repo root (`ctx.repo_root`) instead
     of the neutral scratch dir — trusted mode is an explicit opt-in for content the operator
     already trusts, never a fork PR, and already grants unrestricted Bash, so neutral-cwd
     protects nothing additional there, and the bare `git diff`/`git show`/`git log` commands
     trusted-mode instructions rely on need a real cwd to work from. Verified in both directions:
-    `tests/test_providers.py`'s `test_claude_cwd_stays_neutral_regardless_of_bare_flag_presence`
+    `tests/test_providers.py`'s `test_claude_cwd_stays_neutral_regardless_of_credential_presence`
     and `tests/test_cli_helpers.py`'s paired
     `test_run_agent_uses_neutral_cwd_under_readonly_execution`/
     `test_run_agent_uses_repo_root_as_cwd_under_trusted_execution` both prove the readonly
@@ -632,7 +638,7 @@ identical tools. Differences are intentional, not oversights:
 | Draft handling | Detects `isDraft` via `gh pr view`; exits 0, prints `DRAFT — not reviewed, nothing posted` to stdout, posts nothing. | Job-level `if: github.event.pull_request.draft == false` skips the run entirely; nothing posted. Same outcome (no review, no comment), different mechanism. |
 | Rules/spec file provenance | Base-SHA-pinned (`git show <base-sha>:<path>`) — see "Security posture" above. | Base-SHA-pinned into `$RUNNER_TEMP` — the "Build prompt" step (`action/lib/build_prompt.sh`) resolves rules/spec CONTENT the same way the "Resolve gate scripts (base-pinned)" step resolves the persona/pantheon-verdict trio. |
 | Persona / verdict-decider provenance | N/A — always this repo's own installed `agents/` and `pantheon` package; the target repo never supplies these on the CLI surface. | The published `action.yml` reads `$ACTION_PATH/agents` and `$ACTION_PATH/pantheon/verdict.py` by default (this repo's own trusted checkout), base-pinned into `$RUNNER_TEMP` when `personas_path` opts into reading from the target repo instead. |
-| Provider startup config-discovery protection | Neutral cwd (a scratch directory `pantheon.cli` owns, never the checkout) — three layers, see "Security posture" above. `--bare` is CONDITIONAL (an explicit `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` env credential is present), since the CLI lane's documented primary auth path is a LOCAL interactive `claude auth login` keychain session with no token env var at all — an unconditional `--bare` would silently break that. | No cwd relocation available (a `uses:` step can't take a working-directory override), and NO `--bare` either (empirically breaks `--json-schema`/`structured_output` on this Action lane). Closes the vector with ZERO workspace mutation of this repo's own instead: `anthropics/claude-code-action`'s own pinned source (`src/entrypoints/run.ts`, the exact SHA this surface trusts) already restores `.claude`/`.mcp.json`/`CLAUDE.md`/etc. from the PR's base branch, unconditionally, before the CLI's own startup ever reads them — confirmed firing live in this repo's own self-check log. See "Security posture" above, "The Action surface closes the identical vector too", for the full writeup. |
+| Provider startup config-discovery protection | Neutral cwd (a scratch directory `pantheon.cli` owns, never the checkout) — three layers, see "Security posture" above. `--bare` is DROPPED entirely, on every credential path — it broke `--json-schema`-driven structured output, so the neutral cwd is the sole, unconditional control (see `pantheon.providers._claude`'s own docstring). | No cwd relocation available (a `uses:` step can't take a working-directory override), and NO `--bare` either (empirically breaks `--json-schema`/`structured_output` on this Action lane). Closes the vector with ZERO workspace mutation of this repo's own instead: `anthropics/claude-code-action`'s own pinned source (`src/entrypoints/run.ts`, the exact SHA this surface trusts) already restores `.claude`/`.mcp.json`/`CLAUDE.md`/etc. from the PR's base branch, unconditionally, before the CLI's own startup ever reads them — confirmed firing live in this repo's own self-check log. See "Security posture" above, "The Action surface closes the identical vector too", for the full writeup. |
 
 ## Published action
 
@@ -738,7 +744,7 @@ action.yml                 the published composite action (see "Published action
                            the whole install for a target repo via Way C is
                            examples/review-gate.yml; install.sh's Way A generates a
                            comparably thin SHA-pinned caller of this same file
-examples/review-gate.yml   the ~20-line consumer stub for action.yml; the entire footprint of
+examples/review-gate.yml   the consumer stub for action.yml; the entire footprint of
                            the published-action surface in a target repo
 tests/                     15 bash fixture-test scripts (black-box against the CLI, or unit
                            tests for install.sh/bootstrap.sh/release.yml's own logic) plus 9
