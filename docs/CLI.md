@@ -17,9 +17,15 @@ venv — see [SETUP.md](SETUP.md).
 ## Command reference
 
 ```
+pantheon --version
 pantheon gate (--pr <number> | --branch [BASE]) [--provider <lane>]
               [--agents "artemis apollo"] [--execution readonly|trusted] [--dry-run]
+pantheon counsel (--pr <number> | --branch [BASE]) [--provider <lane>] [--dry-run]
 ```
+
+`pantheon --version` prints the installed `review-pantheon` version and exits 0 — the value is
+single-sourced from package metadata; a source checkout with no installed dist reports
+`X.Y.Z+local` so it can never masquerade as a release.
 
 Exactly one of `--pr` / `--branch` is required — they select the two things this gate can
 review. `--pr` reviews a pull request and posts the verdict as a comment. `--branch` reviews the
@@ -107,9 +113,11 @@ as a write).
   names. Anything else is refused outright.
 - Flags are default-deny with a curated per-subcommand allowlist (issue #26/PR #28,
   `pantheon.execution.SAFE_FLAGS_FOR_SUBCOMMAND`), not "no flag at all": `--stat`, `--numstat`,
-  `--name-only`, `--name-status` on `diff`/`show`/`log`; `--oneline` additionally on `log`;
-  `--short`/`-s`/`--porcelain` on `status`; and `-U<n>`/`--unified=<n>` (diff-context count) on
-  `diff`/`show`/`log`. Anything not on that subcommand's own allowlist is refused, including a
+  `--name-only`, `--name-status`, `--no-color`, `--find-renames` on `diff`/`show`/`log`;
+  `--oneline` additionally on `log`; `--short`/`-s`/`--porcelain` on `status`; and
+  `-U<n>`/`--unified=<n>` (diff-context count) on `diff`/`show`/`log`. That list mirrors
+  `_DIFFSTAT_FLAGS` + the per-subcommand extras in `execution.py` — the code is canonical;
+  if they ever disagree, the code wins and this doc is the bug. Anything not on that subcommand's own allowlist is refused, including a
   bare `--`. `diff` additionally requires exactly one positional argument that is a real,
   independently-resolved revision range (`A..B`/`A...B`), not just a string containing `..`.
 - Forced on every call: `--no-ext-diff --no-textconv` (closes configured diff/textconv drivers),
