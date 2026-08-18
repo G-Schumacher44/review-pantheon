@@ -28,14 +28,16 @@ skip() { echo "SKIPPED $1 -- $2"; SKIP=$((SKIP + 1)); }
 section() { echo; echo "== $1 =="; }
 
 # ---------------------------------------------------------------------------
-# Stage 1 — required binaries. See docs/SETUP.md's Prerequisites table: bash/git/jq/gh are
-# needed by every lane, python3 by the CLI and the Action's decider, curl/tar only by
-# bootstrap.sh's remote-fetch path. shellcheck isn't a `pantheon` runtime dependency, but this
-# repo's own CI lints every shell file with it, so it's checked here too (Dockerfile.smoke
-# installs it explicitly for that reason).
+# Stage 1 — required binaries. See docs/SETUP.md's Prerequisites table: bash/git needed by
+# every lane, gh only for PR mode (`--pr`) — not `--branch`, which resolves everything from
+# local git — python3 by the CLI and the Action's decider, curl/tar only by bootstrap.sh's
+# remote-fetch path. `jq` isn't a dependency at all: pantheon/jqjson.py exists precisely to
+# remove it. shellcheck isn't a `pantheon` runtime dependency either, but this repo's own CI
+# lints every shell file with it, so it's checked here too (Dockerfile.smoke installs it
+# explicitly for that reason).
 # ---------------------------------------------------------------------------
 section "Stage 1: required binaries"
-for bin in bash git jq gh python3 curl tar shellcheck; do
+for bin in bash git gh python3 curl tar shellcheck; do
   if command -v "$bin" >/dev/null 2>&1; then
     pass "binary present: $bin"
   else
@@ -188,11 +190,12 @@ fi
 rm -rf "$SCRATCH_REPO"
 
 # ---------------------------------------------------------------------------
-# Stage 4 — bootstrap.sh into a fresh scratch prefix, and prove the installed `pantheon` package
-# resolves its own agents/ and console scripts from THAT prefix (not from $ROOT) by invoking it
-# with $ROOT nowhere on PATH or in the working directory. tests/test-bootstrap-release-e2e.sh
-# covers the `--version`/release-fetch path's own prefix layout in more depth (including persona
-# resolution from a real, non-editable site-packages install) — this stage is the plain,
+# Stage 4 — bootstrap.sh into a fresh scratch prefix, and prove the installed `pantheon` package's
+# console scripts resolve from THAT prefix (not from $ROOT) by invoking it with $ROOT nowhere on
+# PATH or in the working directory. tests/test-bootstrap-release-e2e.sh covers the
+# `--version`/release-fetch path's own prefix layout in more depth, including persona resolution
+# from a real, non-editable site-packages install (package data, not a separate on-disk copy —
+# bootstrap.sh doesn't vendor agents/*.md into $PREFIX at all) — this stage is the plain,
 # local-checkout install path.
 # ---------------------------------------------------------------------------
 section "Stage 4: bootstrap.sh into a fresh scratch prefix"
@@ -207,7 +210,6 @@ else
 fi
 
 for f in \
-  "agents/artemis.md" \
   "venv/bin/pantheon" \
   "venv/bin/pantheon-git-readonly"
 do

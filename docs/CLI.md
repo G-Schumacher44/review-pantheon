@@ -39,6 +39,20 @@ An explicit `--execution` is resolved immediately, before any `gh`/network call 
 operator-typed action, not PR content, so it doesn't wait on anything. Every other flag not
 listed here doesn't exist; an unrecognized argument prints usage and exits nonzero.
 
+```
+pantheon counsel (--pr <number> | --branch [BASE]) [--provider <lane>]
+                  [--execution readonly|trusted] [--dry-run]
+```
+
+Sugar for `gate --agents "socrates diogenes plato"` — every other flag above (`--pr`/`--branch`,
+`--provider`, `--execution`, `--dry-run`) works identically. `counsel` takes no `--agents` flag at
+all and **ignores `gate.conf`'s `agents=` key** — its panel is always the fixed three counsel
+agents, whatever `gate.conf` says. Worked example:
+
+```bash
+pantheon counsel --pr 42
+```
+
 ## `gate.conf`
 
 Lives at the target repo's root, simple `key=value`, one per line, everything optional (falls
@@ -91,8 +105,12 @@ as a write).
 
 - Subcommand must be exactly one of `diff`, `show`, `log`, `status` — DESIGN.md rule 1's four
   names. Anything else is refused outright.
-- Every remaining argument must be a plain value (ref, path, range) — no flag of any kind, not
-  even a bare `--`. `diff` additionally requires exactly one positional argument that is a real,
+- Flags are default-deny with a curated per-subcommand allowlist (issue #26/PR #28,
+  `pantheon.execution.SAFE_FLAGS_FOR_SUBCOMMAND`), not "no flag at all": `--stat`, `--numstat`,
+  `--name-only`, `--name-status` on `diff`/`show`/`log`; `--oneline` additionally on `log`;
+  `--short`/`-s`/`--porcelain` on `status`; and `-U<n>`/`--unified=<n>` (diff-context count) on
+  `diff`/`show`/`log`. Anything not on that subcommand's own allowlist is refused, including a
+  bare `--`. `diff` additionally requires exactly one positional argument that is a real,
   independently-resolved revision range (`A..B`/`A...B`), not just a string containing `..`.
 - Forced on every call: `--no-ext-diff --no-textconv` (closes configured diff/textconv drivers),
   `-c core.fsmonitor=false` (closes a configured fsmonitor hook), `-c core.pager=cat` +
@@ -169,15 +187,16 @@ the file will sit untracked-but-visible and can get accidentally `git add -A`'d 
   gate. Only a PR with no prior recorded SHA at all falls back to a full-PR review on
   red/unverified. `--dry-run` and a draft-PR skip never reach this write at all — no comment is
   posted, so no `reviewed_sha` changes either way. **One caveat: `--dry-run` still bootstraps the
-  file itself.**
-  `pantheon gate` creates `.review-gate-state.json` as `{}` on first run if it doesn't already
-  exist — unconditionally, before the dry-run/draft branches are even reached (`pantheon.cli`'s
-  `[[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"`) — so a `--dry-run` against a target repo
-  that has never run `pantheon gate` before will leave a fresh, empty `.review-gate-state.json` in
-  the working tree even though it records nothing about the PR. Not a mutation most workflows
-  will notice (an empty JSON object) — but a real one, and NOT git-ignored unless you're on the
-  Way-A (`install.sh`) path (see the caveat above this list). "No state written" for `--dry-run`
-  means "no PR gets marked reviewed," not "the working tree is untouched."
+  file itself; a draft-PR skip does not.**
+  `pantheon.state.load_state_or_raise` bootstraps `.review-gate-state.json` to `{}` on its first
+  call if the file doesn't already exist yet, and `pantheon.cli`'s only call site for it is
+  reached *after* the draft-PR check returns early — so a `--dry-run` against a target repo that
+  has never run `pantheon gate` before still reaches that call and leaves a fresh, empty
+  `.review-gate-state.json` in the working tree even though it records nothing about the PR, while
+  a draft-PR run returns before that call is ever made and creates no file at all. Not a mutation
+  most workflows will notice (an empty JSON object) — but a real one, and NOT git-ignored unless
+  you're on the Way-A (`install.sh`) path (see the caveat above this list). "No state written" for
+  `--dry-run` means "no PR gets marked reviewed," not "the working tree is untouched."
 
 ## Exit codes + reading a verdict comment
 

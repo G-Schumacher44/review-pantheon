@@ -30,14 +30,9 @@
 # a Release does). A local-checkout run (form 1 above) ignores --version entirely — you already
 # have a real checkout at whatever commit it's at, there's nothing to fetch.
 #
-# Idempotent: re-running with the same --prefix only touches files that changed. Same cmp-and-
-# skip contract as install.sh's install_file — a destination file that differs from the
-# shipped source (looks hand-edited) is left alone and reported skipped, never clobbered, for
-# the vendored `agents/*.md` this script also installs. The `pantheon` package install itself
-# (see "Install the pantheon package" section) is idempotent by a DIFFERENT mechanism —
-# `python3 -m venv`/`pip install` are themselves no-ops (or fast, in-place upgrades) on an
-# unchanged source tree, so this script doesn't need to hand-roll its own cmp-and-skip logic for
-# that step.
+# Idempotent: re-running with the same --prefix is a no-op on an unchanged source tree.
+# `python3 -m venv`/`pip install` (see "Install the pantheon package" section) are themselves
+# no-ops, or fast in-place upgrades, so this script doesn't hand-roll its own cmp-and-skip logic.
 #
 # No new dependencies beyond curl/tar (remote-fetch path only, unchanged) and sha256sum OR
 # shasum for checksum verification — every mainstream platform ships at least one of those two
@@ -310,22 +305,6 @@ fetch_release_tarball() {
   printf '%s' "$extracted"
 }
 
-# install_file <src> <dest> — same cmp-and-skip contract as install.sh's install_file: a
-# dest that already exists and differs from src is left alone and reported, not clobbered.
-install_file() {
-  local src="$1" dest="$2"
-  if [[ -f "$dest" ]]; then
-    if cmp -s "$src" "$dest"; then
-      return 0
-    fi
-    SKIPPED+=("$dest")
-    return 0
-  fi
-  mkdir -p "$(dirname "$dest")"
-  cp "$src" "$dest"
-  note "installed $dest"
-}
-
 FETCH_WORKDIR=""
 cleanup() {
   # Preserve the script's real exit status: an EXIT trap's own last command result otherwise
@@ -388,27 +367,6 @@ main() {
   [[ -d "$SRC_ROOT/pantheon" ]] || die "missing $SRC_ROOT/pantheon"
 
   # -------------------------------------------------------------------------
-  # Install agents/*.md under $PREFIX for anything that wants them as plain files (the `pantheon`
-  # package installed below also ships them as package data — see pyproject.toml's
-  # [tool.setuptools.package-data] — but a bare $PREFIX/agents copy is cheap and doesn't require
-  # inspecting an installed wheel to read a persona).
-  # -------------------------------------------------------------------------
-  SKIPPED=()
-
-  mkdir -p "$PREFIX/agents"
-
-  for f in "$SRC_ROOT"/agents/*.md; do
-    install_file "$f" "$PREFIX/agents/$(basename "$f")"
-  done
-
-  if [[ ${#SKIPPED[@]} -gt 0 ]]; then
-    note "left unchanged (differs from shipped version — looks customized):"
-    for f in "${SKIPPED[@]}"; do
-      note "  - $f"
-    done
-  fi
-
-  # -------------------------------------------------------------------------
   # Install the pantheon package — a venv UNDER $PREFIX, not `pip install --user`. Three reasons
   # this shape, not that one:
   #   1. Respects --prefix. bootstrap.sh's whole contract is "everything lands under one
@@ -432,9 +390,7 @@ main() {
   #
   # Idempotent by construction, not by this script's own cmp-and-skip logic: `python3 -m venv`
   # on an existing venv directory reuses/repairs it rather than erroring, and `pip install`
-  # against an unchanged source tree is a fast no-op (a changed one just upgrades in place) —
-  # unlike install_file()'s hand-rolled compare above, neither needs bootstrap.sh to track
-  # "did this change" itself.
+  # against an unchanged source tree is a fast no-op (a changed one just upgrades in place).
   command -v python3 >/dev/null 2>&1 || die "python3 (>=3.9) is required to install the pantheon package — see this script's header comment"
 
   PANTHEON_VENV="$PREFIX/venv"

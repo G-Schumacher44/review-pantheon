@@ -45,7 +45,7 @@ git clone <this repo> review-pantheon
 
 Copies the five personas and a `REVIEW_RULES.md` house-rules template into your target repo
 (`.github/review-agents/`, `REVIEW_RULES.md`), and GENERATES a thin-caller
-`.github/workflows/review.yml` (~25 lines) that calls this repo's own published composite
+`.github/workflows/review.yml` that calls this repo's own published composite
 action, pinned to a full commit SHA rather than a moving tag — see that generated file's own
 header comment for the pin and how to re-pin it. **Honest tradeoff (issue #36):** unlike the
 pre-v0.1.0 version of Way A, this now depends on review-pantheon existing as a public GitHub
@@ -134,8 +134,9 @@ export PATH="$HOME/.review-pantheon/venv/bin:$PATH"
 ```
 
 Installs the `pantheon` package into a venv under the prefix — `pantheon`/`pantheon-git-readonly`
-land in `$PREFIX/venv/bin` — plus the five personas into `$PREFIX/agents`. Nothing is written
-into any target repo either way. Add the printed `export PATH=...` line to your shell rc
+land in `$PREFIX/venv/bin`, and the five personas install as that package's own package data
+(resolved via `importlib.resources`, not a separate on-disk copy). Nothing is written into any
+target repo either way. Add the printed `export PATH=...` line to your shell rc
 yourself (`bootstrap.sh` won't edit it for you). From then on, `pantheon gate --pr <n>` works
 from inside any repo with a `gh`-authenticated remote, same as running it from an in-repo
 checkout. This is the CLI surface only — it doesn't install the GitHub Action; pair it with Way A

@@ -1132,3 +1132,17 @@ def test_fallback_version_only_reads_the_project_table(tmp_path) -> None:
         encoding="utf-8",
     )
     assert pantheon._fallback_version(str(project_then_foreign)) == "1.2.3+local"
+
+
+def test_top_level_version_flag_prints_version_and_exits_zero(capsys) -> None:
+    """`pantheon --version` (no subcommand) must resolve before argparse's `required=True`
+    subparsers constraint is ever consulted — an earlier build had no top-level `--version` at
+    all, so this exited 2 (usage error) instead of printing a version."""
+    import pantheon
+
+    parser = cli_module.build_parser()
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["--version"])
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert out.strip() == f"pantheon {pantheon.__version__}"
