@@ -52,7 +52,8 @@ usage() {
 Usage: bootstrap.sh [--prefix /abs/path] [--version vX.Y.Z]
   (default prefix: ~/.review-pantheon; default version: none — tracks dev HEAD)
 
-Installs the `pantheon` package (a Python venv) and agents/ into the prefix directory,
+Installs the `pantheon` package (a Python venv; the agent personas ship inside it as
+package data) into the prefix directory,
 independent of any target repo's checkout. Prints the one PATH line to add yourself — this
 script never edits your shell rc.
 
