@@ -153,15 +153,10 @@ via GitHub's codeload endpoint instead. That endpoint 404s against a private rep
 repo is public, the curl path fails with an explicit message and a `git clone` fallback command,
 rather than silently doing nothing. Clone-and-run (the first form above) works today regardless.
 
-Idempotent, same cmp-and-skip contract as `install.sh` for the vendored bash files: re-running
-only touches files that changed; a file you've hand-edited in the prefix is left alone and
-reported skipped. Be aware this contract can't tell "hand-edited" from "stale": a file left over
-from an older `bootstrap.sh` run that simply differs from the currently-shipped source is
-skipped the exact same way, so it won't pick up upstream fixes on its own — upgrading an
-existing prefix means removing the file (or the whole prefix) first, then re-running. The
-`pantheon` package venv is idempotent by a different mechanism — `python3 -m venv`/`pip install`
-are themselves safe to re-run and pick up a changed source tree automatically, no stale-file
-caveat there.
+Idempotent: the prefix holds only the `pantheon` package venv (the agent personas ship inside
+it as package data — nothing is vendored as loose files anymore), and `python3 -m venv`/`pip
+install` are themselves safe to re-run — a re-run picks up a changed source tree automatically,
+with no stale-file caveat. Upgrading an existing prefix is just re-running the script.
 
 Want to pin to a specific tagged release instead of tracking `dev`'s current HEAD? Add
 `--version vX.Y.Z` to the remote-fetch (`curl | bash`) form above — it fetches that release's
