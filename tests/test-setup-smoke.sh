@@ -32,8 +32,9 @@ section() { echo; echo "== $1 =="; }
 # every lane, gh only for PR mode (`--pr`) — not `--branch`, which resolves everything from
 # local git — python3 by the CLI and the Action's decider, curl/tar only by bootstrap.sh's
 # remote-fetch path. `jq` is NOT a runtime dependency (pantheon/jqjson.py exists precisely to
-# remove it) — but the verdict-fixture HARNESS (tests/test-verdict-decision-python.sh:41-42)
-# still parses the decider's JSON with it, so the smoke image ships it for that one consumer. shellcheck isn't a `pantheon` runtime dependency either, but this repo's own CI
+# remove it) — but the fixture HARNESSES (tests/test-verdict-decision-python.sh:41-42,
+# tests/test-state-persistence-python.sh:58/89/106) parse JSON with it, so the smoke image
+# ships it for those consumers. shellcheck isn't a `pantheon` runtime dependency either, but this repo's own CI
 # lints every shell file with it, so it's checked here too (Dockerfile.smoke installs it
 # explicitly for that reason).
 # ---------------------------------------------------------------------------

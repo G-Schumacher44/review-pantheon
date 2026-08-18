@@ -405,8 +405,7 @@ main() {
   cat <<EOF
 
 review-pantheon installed to $PREFIX
-  - pantheon package (the CLI): $PREFIX/venv/bin
-  - agents/ (personas, as plain files): $PREFIX/agents
+  - pantheon package (the CLI, personas packaged inside): $PREFIX/venv/bin
 
 Add it to your PATH (this script does not edit your shell rc for you):
 
