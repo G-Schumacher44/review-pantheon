@@ -67,10 +67,10 @@ jobs:
           echo "tag '$TAG' is a valid vX.Y.Z release tag"
 
       - name: Checkout
-        uses: actions/checkout@v4 # matches ci.yml's pin — checks out the pushed tag by default
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 — resolved via gh api repos/actions/checkout/git/ref/tags/v4
         with:
           fetch-depth: 0 # full history — the ancestry check below needs origin/main's real
-          # history, not the shallow single-commit checkout actions/checkout@v4 does by default
+          # history, not the shallow single-commit checkout actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 — resolved via gh api repos/actions/checkout/git/ref/tags/v4 does by default
 
       - name: Verify tag is reachable from main (the promotion ceremony was actually followed)
         run: |
@@ -109,7 +109,7 @@ jobs:
           echo "tag '$TAG' matches pyproject.toml's version '$PYPROJECT_VERSION'"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 — resolved via gh api repos/actions/setup-python/git/ref/tags/v5
         with:
           python-version: "3.x"
 
@@ -249,7 +249,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4 # checks out the pushed tag by default — this job doesn't
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 — resolved via gh api repos/actions/checkout/git/ref/tags/v4
         # need test tooling (shellcheck/python), just the tree contents to package.
 
       - name: Build versioned tarball
@@ -336,10 +336,10 @@ jobs:
       contents: read # just needs to read the tagged checkout to build the sdist/wheel
     steps:
       - name: Checkout
-        uses: actions/checkout@v4 # matches this file's other checkout pins — checks out the pushed tag by default
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 — resolved via gh api repos/actions/checkout/git/ref/tags/v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 — resolved via gh api repos/actions/setup-python/git/ref/tags/v5
         with:
           python-version: "3.x"
 

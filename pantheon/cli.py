@@ -54,7 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from pantheon import basepin, execution, jqjson, providers, render, state, verdict
+from pantheon import __version__, basepin, execution, jqjson, providers, render, state, verdict
 
 __all__ = ["main"]
 
@@ -1599,6 +1599,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_TOP_LEVEL_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     gate_parser = subparsers.add_parser(
