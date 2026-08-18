@@ -31,8 +31,9 @@ section() { echo; echo "== $1 =="; }
 # Stage 1 — required binaries. See docs/SETUP.md's Prerequisites table: bash/git needed by
 # every lane, gh only for PR mode (`--pr`) — not `--branch`, which resolves everything from
 # local git — python3 by the CLI and the Action's decider, curl/tar only by bootstrap.sh's
-# remote-fetch path. `jq` isn't a dependency at all: pantheon/jqjson.py exists precisely to
-# remove it. shellcheck isn't a `pantheon` runtime dependency either, but this repo's own CI
+# remote-fetch path. `jq` is NOT a runtime dependency (pantheon/jqjson.py exists precisely to
+# remove it) — but the verdict-fixture HARNESS (tests/test-verdict-decision-python.sh:41-42)
+# still parses the decider's JSON with it, so the smoke image ships it for that one consumer. shellcheck isn't a `pantheon` runtime dependency either, but this repo's own CI
 # lints every shell file with it, so it's checked here too (Dockerfile.smoke installs it
 # explicitly for that reason).
 # ---------------------------------------------------------------------------

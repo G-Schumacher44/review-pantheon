@@ -18,6 +18,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
+        # jq: consumed ONLY by tests/test-verdict-decision-python.sh's harness (parses the
+        # decider's JSON at its lines 41-42) — NOT a runtime dependency of pantheon itself;
+        # pantheon/jqjson.py exists precisely to remove the runtime need. Removing this once
+        # turned every verdict fixture into PARSE_FAILURE in-container (PR #67).
+        jq \
         curl \
         python3 \
         python3-yaml \
