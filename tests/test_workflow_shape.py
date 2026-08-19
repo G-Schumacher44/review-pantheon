@@ -45,9 +45,26 @@ def _both() -> list[tuple[str, str]]:
 
 
 def test_trigger_is_plain_pull_request() -> None:
+    """`pull_request` must be the ONLY trigger, not merely one of them.
+
+    Same shape the permissions check had: asserting the wanted key is *present* lets any
+    additional key through. A stub that keeps `pull_request:` and adds `push:` or
+    `workflow_dispatch:` would pass a presence check, but those events carry no
+    `github.event.pull_request`, which every step of action.yml reads its PR number and
+    base/head SHAs from — so the action fails partway through rather than not running.
+    """
     for name, body in _both():
-        assert re.search(r"^on:\s*$", body, re.M), f"{name}: no 'on:' block found"
-        assert re.search(r"^\s+pull_request:\s*$", body, re.M), f"{name}: not pull_request-triggered"
+        block = re.search(r"^on:\s*$(.*?)(?=^\S|\Z)", body, re.M | re.S)
+        assert block, f"{name}: no top-level 'on:' block found"
+
+        # Top-level event keys are the ones indented exactly one level; anything deeper
+        # (a `types:` list, for instance) belongs to the event above it.
+        events = re.findall(r"^  ([A-Za-z_]+):", block.group(1), re.M)
+        assert events == ["pull_request"], (
+            f"{name}: 'on:' must declare exactly ['pull_request'], found {events} — other "
+            "events invoke action.yml without github.event.pull_request, which every step "
+            "reads the PR number and base/head SHAs from"
+        )
 
 
 def test_unsafe_triggers_appear_nowhere() -> None:
