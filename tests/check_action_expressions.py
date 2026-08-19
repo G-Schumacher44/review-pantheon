@@ -56,6 +56,7 @@ DQ_LITERAL = re.compile(r'"[^"]*"')
 SAFE_RUN_CONTEXTS = re.compile(r"^\s*(matrix\.[A-Za-z0-9_]+|runner\.[A-Za-z0-9_]+)\s*$")
 
 
+
 def _run_block_spans(text: str) -> list[tuple[int, int]]:
     """Byte spans of every ``run:`` block's script body.
 
@@ -169,12 +170,22 @@ def check_no_pull_request_target(path: Path) -> list[str]:
     It is an attractive mistake, not an obscure one: fork PRs cannot be gated (secrets are
     withheld), and ``pull_request_target`` is the first result anyone searching for a fix will
     find. So the prohibition is enforced here rather than written down and hoped for. See
-    SECURITY.md's "Fork pull requests" for the safe ``workflow_run`` pattern.
+    SECURITY.md's "Fork pull requests" section.
+
+    No exemption is needed. An earlier draft carved one out for action.yml's own refusal step,
+    which had to name the forbidden triggers in order to reject them; that step now allowlists
+    ``pull_request`` instead of enumerating unsafe events, so it never spells the literal at all
+    and the carve-out went with it. A guard with no exceptions is worth more than a guard with a
+    defended one.
     """
     text = path.read_text(encoding="utf-8")
     rel = _rel(path)
     findings: list[str] = []
-    for i, line in enumerate(text.split("\n"), start=1):
+
+    lines = text.split("\n")
+
+    for idx, line in enumerate(lines):
+        i = idx + 1
         # Only actual USE counts, not the warnings in this repo telling you never to use it.
         # Anything after a `#` is a comment — inert in both YAML and bash, so a mention there is
         # documentation, not a trigger. (Contrast the `${{ }}` check above, which deliberately
@@ -188,7 +199,7 @@ def check_no_pull_request_target(path: Path) -> list[str]:
             f"{rel}:{i}: `pull_request_target` is FORBIDDEN in this repo — "
             f"it exposes secrets to a run whose subject is an untrusted diff, and every other "
             f"control here sits below the trigger and cannot compensate. See SECURITY.md's "
-            f'"Fork pull requests" section for the safe workflow_run pattern.'
+            f'"Fork pull requests" section.'
         )
     return findings
 

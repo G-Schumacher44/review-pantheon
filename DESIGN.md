@@ -459,6 +459,38 @@ history, not here — a contract describes what's true now, not how it got that 
   arbitrary shell command is a code-execution primitive, not a review gate, so `readonly` is the
   default on every surface that invokes a provider — `trusted` is an explicit, documented opt-in
   for own-repo/trusted-author use only, never for reviewing a fork PR you don't control.
+  - **The allowlist is only half of it: the built-in bypass is denied too.** Claude Code
+    auto-approves a small built-in set of read commands — `ls`, `cat`, `echo`, `pwd`, `head`,
+    `tail`, `grep`, `find`, `wc`, `which`, `diff`, `stat`, `du`, `cd`, and read-only forms of
+    `git` — *before* `--allowedTools` is consulted, in every permission mode including `dontAsk`.
+    Under `readonly` that is a second path to the checkout that never reaches the wrapper's argv
+    validation. `pantheon.execution.disallowed_tools_for()` emits a deny rule per entry in
+    `DENIED_BUILTIN_BASH_COMMANDS`, and deny beats allow in Claude Code's own precedence, so each
+    of those commands is forced back through a permission decision that `readonly`'s allowlist
+    then fails closed on. `git` is denied deliberately, which forces every git read through the
+    wrapper; the wrapper is invoked by its own absolute path, never a bareword `git`, so the two
+    prefixes are disjoint by construction and a fixture asserts no deny entry shadows the
+    wrapper's own allow entry. Both surfaces read this list from that one function —
+    `action.yml` shells out to `pantheon/execution.py disallowed-tools <tier>` rather than
+    duplicating it in YAML. `trusted` emits no deny list; full Bash is that tier's explicit opt-in.
+    The rule shape is the trailing-wildcard form only (`Bash(cmd *)`), verified empirically with a
+    negative control rather than read off the docs: with no deny rule a bare `pwd` runs, and under
+    `Bash(pwd *)` it is refused — so the wildcard form already covers the zero-argument
+    invocation and an exact-match companion entry would be dead weight.
+  - **Only `pull_request` is permitted, enforced at runtime.** `action.yml`'s first step hard-fails
+    (exit 1, no `if:`, before any checkout-dependent work or model invocation) unless
+    `github.event_name` is exactly `pull_request`. This is an allowlist by design: an earlier
+    draft named the two obviously-dangerous triggers, and review pointed out that
+    `pull_request_review_comment` and `pull_request_review` also run from the base repository
+    with secrets while carrying a populated `github.event.pull_request` payload — so they passed
+    a blacklist. Enumerating unsafe events means being wrong whenever a new one appears; every
+    step here reads the PR number and base/head SHAs from `github.event.pull_request`, so that
+    context is the only one this action is built for. This is deliberately NOT the same path as the fork-PR NOT-GATED exit, which
+    remains a legitimate exit-0 skip: an ordinary `pull_request` run from a fork has no secrets to
+    protect (GitHub withholds them), so review is impossible rather than unsafe. This step covers
+    the opposite case — a run that *does* hold secrets over content it should not. See
+    SECURITY.md's "Fork pull requests cannot be gated by this action" for why the `workflow_run`
+    shape this refuses is not a working path here regardless of the trigger question.
   - The CLI surface's wrapper ships as part of the `pantheon` package and is resolved via its
     installed console script (`pantheon-git-readonly`) — `pantheon.cli._wrapper_invocation()`
     resolves that script's own absolute path via `pantheon.execution.resolve_console_script`,
@@ -491,7 +523,10 @@ history, not here — a contract describes what's true now, not how it got that 
     vector → neutralization → verification status). Read that module directly rather than
     duplicating the table here.
 - **Provider processes launch from a neutral cwd, never the repo checkout — the CLI (Python)
-  lane.** (The Action surface gets the identical protection through a DIFFERENT mechanism,
+  lane.** *(It is a config-discovery boundary, NOT a read boundary: `Read`/`Grep`/`Glob` are not
+  path-scoped and the prompt deliberately hands the agent the checkout's absolute path to reach
+  the repo with. Reading it as a read confinement is the wrong inference and SECURITY.md once
+  made it.)* (The Action surface gets the identical protection through a DIFFERENT mechanism,
   since a `uses:` step can't be cwd-relocated — see "The Action surface closes the identical
   vector too" below.) `--allowedTools`/the read-only wrapper scope what a provider CLI's *tool
   calls* can do, but a provider CLI's own STARTUP also auto-discovers repo-local configuration

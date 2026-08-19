@@ -54,15 +54,48 @@ Codex, Gemini, and Cursor have no equivalent tool-scoping mechanism in their own
 so a best-effort lane carries **no tool restriction at all** — its only guard against a hostile
 fork PR is the same fail-closed verdict handling every lane gets, not a tool-call boundary.
 
-### Bypassing the wrapper is not the same as having no side effects
+### The built-in bypass, and what now closes it
 
-Claude Code's own small, built-in, non-configurable set of always-approved bare read-only
-commands (plain `git diff`/`show`/`log`/`status`, no flags) never reaches the wrapper at all, on
-any tier. Don't read "expected, allowed by Claude Code" as "genuinely read-only": the wrapper
-forces `GIT_OPTIONAL_LOCKS=0` and `GIT_NO_LAZY_FETCH=1` specifically because plain git doesn't
-default to either, so a bare `git status` outside the wrapper can still write `.git/index`, and a
-bare object read in a partial clone can still lazy-fetch — real, reproduced side effects this
-policy doesn't treat as gate-defeating.
+Claude Code auto-approves a built-in set of read commands *before* `--allowedTools` is consulted,
+in every permission mode. That set is larger than this section used to claim: it is not only bare
+read-only `git` forms but `ls`, `cat`, `echo`, `pwd`, `head`, `tail`, `grep`, `find`, `wc`,
+`which`, `diff`, `stat`, `du`, and `cd`. Under `readonly` that was a second path to the checkout
+that never reached the wrapper's argv validation.
+
+**`readonly` now denies that set explicitly.** Claude Code's documented precedence puts deny
+before allow, so `pantheon.execution.disallowed_tools_for()` emits a deny rule per command and
+each one is forced back through a permission decision that `readonly`'s allowlist then fails
+closed on. `git` is denied deliberately, which routes every git read through the wrapper; the
+wrapper is invoked by its own absolute path, never a bareword `git`, so the two prefixes are
+disjoint and a fixture asserts no deny entry shadows the wrapper's own allow entry. Both surfaces
+read the list from that one function. `trusted` emits no deny list — full Bash is that tier's
+explicit opt-in.
+
+**What that changes about side effects.** The previously-documented consequences of the bypass —
+a bare `git status` refreshing `.git/index`, a bare object read lazy-fetching in a partial clone —
+are no longer reachable through the Bash tool under `readonly`, because those invocations are now
+refused rather than auto-approved. The wrapper still forces `GIT_OPTIONAL_LOCKS=0` and
+`GIT_NO_LAZY_FETCH=1` for everything it does run, so the protection does not depend on the deny
+list alone.
+
+**The remaining honest limit.** This closes the *Bash* path only.
+
+`Read`, `Grep` and `Glob` stay allowed and are **not path-scoped at all** — they can read any
+path the process can read. Nothing in this tier confines them, and that is by design on the CLI
+surface: the provider runs from a neutral scratch directory, so the prompt hands the agent the
+checkout's absolute path and tells it to reach the repo that way. No `--add-dir` is involved and
+none is needed. Verified directly rather than assumed — a `Read` of an absolute path outside the
+neutral cwd succeeds.
+
+Do not read the neutral working directory as a read boundary. What it *does* buy is config
+isolation: a repo-supplied `.claude/settings.json` hook, `.mcp.json` server, or `env` block is
+not discovered, because discovery keys off the working directory. That is verified too (a hook
+fires when the cwd is the hostile repo and does not fire from the neutral cwd), and it is a
+different property from confining reads.
+
+A deny list also enumerates what is known: a built-in this list does not name would not be
+denied. If you are diagnosing a refused command under `readonly`, this is the mechanism refusing
+it, and that is intended.
 
 ### What `readonly` closes, and its honest limit
 
@@ -147,22 +180,52 @@ Action surface or in any `.github/workflows/*.yml`, and CI runs it on every push
 Note that `install.sh` does not vendor that guard — an adopter inherits the workflow, not this
 repo's CI enforcement, so the prohibition is yours to keep on your own fork of the setup.
 
-### If you genuinely need fork review
+### Fork pull requests cannot be gated by this action
 
-Use the two-stage `workflow_run` pattern, which is GitHub's own documented answer:
+State it plainly, because two plausible-sounding workarounds are not workarounds:
 
-1. A `pull_request`-triggered workflow does the untrusted work with **no secrets**, and uploads the
-   diff (and only the diff) as an artifact.
-2. A second workflow triggered on `workflow_run` completion runs in the base repository's trusted
-   context with the credential, downloads that artifact, and reviews it — **never checking out the
-   fork's code**.
+GitHub withholds `secrets.*` from a `pull_request` run originating in a fork, deliberately — the
+PR's own code executes in that job, so an available credential would be a stranger's for the
+taking. The model credential therefore arrives empty, no provider call is possible, and the action
+exits with a **NOT GATED** notice rather than pinning a permanently-red required check to a PR
+nobody can turn green. That is the designed behavior, not a gap to configure around.
 
-The security of this rests entirely on step 2 never executing anything originating from the fork.
-Treat any change to that workflow as a change to the threat model.
+**Maintainer approval does not change this.** Requiring approval for first-time contributors
+controls only *whether the secretless workflow runs at all*; it does not grant that run access to
+secrets. An approved fork PR still reaches the NOT GATED branch. Approval is a useful control over
+whether untrusted workflows execute — it is not a way to obtain this gate's verdict.
 
-A simpler alternative that many projects prefer: gate on author association, so members and
-collaborators are reviewed automatically while outside contributions require a maintainer to
-approve the workflow run first (GitHub supports this natively for first-time contributors).
+**The two-stage `workflow_run` pattern does not work here either** (an earlier version of this
+section recommended it; the action now refuses that trigger outright).
+
+The shape — a `pull_request` workflow uploading the diff as an artifact with no secrets, then a
+`workflow_run` workflow reviewing that artifact in the trusted context without checking out fork
+code — reads well and is GitHub's own documented answer to the general problem. It still fails
+here, for two independent reasons:
+
+- **The input surface does not exist.** `action.yml` declares no `pr_number` / `base_sha` /
+  `head_sha` inputs; every step reads them from `github.event.pull_request.*`. Under `workflow_run`
+  that context is absent, and GitHub documents `workflow_run.pull_requests` as **empty for
+  fork-originated pull requests** — precisely the case this section exists to serve. Stage 2 would
+  have nothing to review.
+- **"Never checks out the fork's code" is not the same as "the fork's blobs are absent."** This
+  action requires `git diff <base>...<head>` to resolve, which means the fork's commit objects must
+  be present in the runner's git history. Once fetched, the read-only git wrapper can read that
+  content exactly as it would a checkout. The property the pattern was recommended for does not
+  hold here even when the pattern is followed correctly.
+
+Restoring that path would take explicit `pr_number`/`base_sha`/`head_sha` inputs plus a diff-only
+resolution that never fetches fork commits.
+
+**What you can actually do with a fork contribution:**
+
+- **Review it yourself.** The gate is one input to a maintainer's judgment, not a replacement for
+  it, and a fork PR is exactly where that distinction matters.
+- **Bring the commits into the base repository** — push them to a branch here and open an
+  ordinary same-repo PR. That run has secrets and is gated normally. Note what this means: you are
+  vouching for the content by importing it, and the gate then reviews it as your branch. That is a
+  deliberate act, not a bypass, and it should be one.
+- **Run the CLI locally** against the fork PR, under `readonly`, from a checkout you control.
 
 ## Blast radius
 

@@ -281,7 +281,9 @@ def test_run_agent_uses_neutral_cwd_under_readonly_execution(tmp_path, monkeypat
 
     captured: dict = {}
 
-    def fake_provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None):
+    def fake_provider_run(
+        provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None, disallowed_tools=None
+    ):
         captured["neutral_cwd"] = neutral_cwd
         return '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"ok"}'
 
@@ -321,7 +323,9 @@ def test_run_agent_uses_repo_root_as_cwd_under_trusted_execution(tmp_path, monke
 
     captured: dict = {}
 
-    def fake_provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None):
+    def fake_provider_run(
+        provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None, disallowed_tools=None
+    ):
         captured["neutral_cwd"] = neutral_cwd
         return '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"ok"}'
 
