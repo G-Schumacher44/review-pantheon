@@ -55,18 +55,6 @@ DQ_LITERAL = re.compile(r'"[^"]*"')
 # else — `steps.*.outputs.*`, `github.*`, `inputs.*`, `needs.*` — must go through `env:`.
 SAFE_RUN_CONTEXTS = re.compile(r"^\s*(matrix\.[A-Za-z0-9_]+|runner\.[A-Za-z0-9_]+)\s*$")
 
-# The ONE legitimate SHAPE in which `pull_request_target` may appear outside a comment (this
-# exemption is matched repo-wide, not scoped to action.yml — see the scope note below): action.yml's own
-# runtime refusal of it (this repo's hard-refuse-on-trigger step — see action.yml's "Refuse
-# pull_request_target / workflow_run triggers"), which must COMPARE github.event_name against the
-# literal string in order to reject it. Recognized narrowly by the exact shell `case` pattern-arm
-# shape that refusal step uses — `pull_request_target|workflow_run)` (either order) — which is not
-# valid YAML for an `on:` trigger key (a mapping key can't end in a bare `)`, and a trigger is
-# never conditioned on TWO event names joined by `|`) and, per check_no_pull_request_target's own
-# additional containment check below, must fall inside an actual `run:` block span (reusing
-# `_run_block_spans`, already exercised by the interpolation check above) — i.e. shell script
-# text, never YAML structure, so it can never itself become a trigger key no matter how it reads.
-_REFUSAL_CASE_ARM_RE = re.compile(r"^\s*(?:pull_request_target\|workflow_run|workflow_run\|pull_request_target)\)\s*$")
 
 
 def _run_block_spans(text: str) -> list[tuple[int, int]]:
@@ -184,23 +172,17 @@ def check_no_pull_request_target(path: Path) -> list[str]:
     find. So the prohibition is enforced here rather than written down and hoped for. See
     SECURITY.md's "Fork pull requests" section.
 
-    One narrow exception (see :data:`_REFUSAL_CASE_ARM_RE`'s own comment): action.yml's own
-    runtime refusal step, which legitimately compares ``github.event_name`` against this literal
-    to reject ``pull_request_target``/``workflow_run`` runs — recognized by its exact shell
-    case-arm shape AND required to fall inside a real ``run:`` block span, never bare YAML
-    structure, so a disguised trigger key can never hide behind this exemption.
+    No exemption is needed. An earlier draft carved one out for action.yml's own refusal step,
+    which had to name the forbidden triggers in order to reject them; that step now allowlists
+    ``pull_request`` instead of enumerating unsafe events, so it never spells the literal at all
+    and the carve-out went with it. A guard with no exceptions is worth more than a guard with a
+    defended one.
     """
     text = path.read_text(encoding="utf-8")
     rel = _rel(path)
     findings: list[str] = []
-    run_spans = _run_block_spans(text)
 
     lines = text.split("\n")
-    line_offsets: list[int] = []
-    pos = 0
-    for line in lines:
-        line_offsets.append(pos)
-        pos += len(line) + 1
 
     for idx, line in enumerate(lines):
         i = idx + 1
@@ -212,8 +194,6 @@ def check_no_pull_request_target(path: Path) -> list[str]:
         # the two are evaluated at different times.)
         code = re.split(r"(?:^|\s)#", line, maxsplit=1)[0]
         if "pull_request_target" not in code:
-            continue
-        if _REFUSAL_CASE_ARM_RE.match(line) and any(start <= line_offsets[idx] < end for start, end in run_spans):
             continue
         findings.append(
             f"{rel}:{i}: `pull_request_target` is FORBIDDEN in this repo — "

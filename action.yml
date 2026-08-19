@@ -220,18 +220,25 @@ runs:
     # the shell case-arm that must compare against them — and a strict guard with a single
     # exemption is worth more than a guard carved out for prose. The message below names
     # the offending trigger dynamically via $EVENT_NAME, which is more useful anyway.
-    - name: Refuse unsafe workflow triggers
+    - name: Require the pull_request trigger
       shell: bash
       env:
         EVENT_NAME: ${{ github.event_name }}
       run: |
         set -euo pipefail
-        case "$EVENT_NAME" in
-          pull_request_target|workflow_run)
-            echo "::error::review-pantheon: refusing to run under the '$EVENT_NAME' trigger. This trigger gives the job running this action access to the BASE repository's secrets while the content under review can be fully controlled by a fork PR (its checkout, its diff, its commits) — untrusted content would run with those secrets in scope. That is a structural trust violation, not a tunable setting. Use the plain pull_request trigger, as examples/review-gate.yml and install.sh Way A do: fork PRs are then correctly reported NOT GATED rather than reviewed unsafely. See SECURITY.md, 'Fork pull requests'."
-            exit 1
-            ;;
-        esac
+        # ALLOWLIST, not a blacklist of the events that happen to be dangerous. An earlier
+        # draft refused two named triggers; review pointed out that
+        # `pull_request_review_comment` and `pull_request_review` also run from the BASE
+        # repository with secrets while carrying a populated `github.event.pull_request`
+        # payload — so they passed the blacklist, received the credential, and would have
+        # driven a model over fork-controlled content. Enumerating the unsafe events means
+        # being wrong every time GitHub adds one. Every step below reads the PR number and
+        # base/head SHAs from `github.event.pull_request`, so `pull_request` is the only
+        # context this action is built for; everything else fails closed, by construction.
+        if [ "$EVENT_NAME" != "pull_request" ]; then
+          echo "::error::review-pantheon: refusing to run under the '$EVENT_NAME' trigger. This action is built for the plain pull_request context only — every step reads the PR number and base/head SHAs from github.event.pull_request, and the privileged triggers that still populate that payload run with this repository's secrets over content a fork can control. Wire the gate on pull_request, as examples/review-gate.yml and install.sh Way A do: fork PRs are then correctly reported NOT GATED rather than reviewed unsafely. See SECURITY.md, 'Fork pull requests cannot be gated by this action'."
+          exit 1
+        fi
 
     # No scrub step for `.claude`/`.mcp.json`/CLAUDE.md here: `anthropics/claude-code-action`'s
     # own pinned source (`src/entrypoints/run.ts`'s `restoreConfigFromBase`) already restores

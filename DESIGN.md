@@ -477,11 +477,15 @@ history, not here — a contract describes what's true now, not how it got that 
     negative control rather than read off the docs: with no deny rule a bare `pwd` runs, and under
     `Bash(pwd *)` it is refused — so the wildcard form already covers the zero-argument
     invocation and an exact-match companion entry would be dead weight.
-  - **Unsafe triggers are refused at runtime, not merely discouraged.** `action.yml`'s first step
-    hard-fails (exit 1, no `if:`, before any checkout-dependent work or model invocation) when
-    `github.event_name` is `pull_request_target` or `workflow_run`. Both give the job running this
-    action's own steps the base repository's secrets while the content under review can be
-    fork-controlled. This is deliberately NOT the same path as the fork-PR NOT-GATED exit, which
+  - **Only `pull_request` is permitted, enforced at runtime.** `action.yml`'s first step hard-fails
+    (exit 1, no `if:`, before any checkout-dependent work or model invocation) unless
+    `github.event_name` is exactly `pull_request`. This is an allowlist by design: an earlier
+    draft named the two obviously-dangerous triggers, and review pointed out that
+    `pull_request_review_comment` and `pull_request_review` also run from the base repository
+    with secrets while carrying a populated `github.event.pull_request` payload — so they passed
+    a blacklist. Enumerating unsafe events means being wrong whenever a new one appears; every
+    step here reads the PR number and base/head SHAs from `github.event.pull_request`, so that
+    context is the only one this action is built for. This is deliberately NOT the same path as the fork-PR NOT-GATED exit, which
     remains a legitimate exit-0 skip: an ordinary `pull_request` run from a fork has no secrets to
     protect (GitHub withholds them), so review is impossible rather than unsafe. This step covers
     the opposite case — a run that *does* hold secrets over content it should not. See
