@@ -415,36 +415,58 @@ def _extract_append_call_args(body: str) -> list[str]:
 def test_redact_paths_is_the_only_redaction_chokepoint_in_this_module() -> None:
     src = RENDER_PY.read_text(encoding="utf-8")
 
-    # (a) Exactly one function is named redact_paths -- the single primitive.
-    def_hits = re.findall(r"^def redact_paths\(", src, re.MULTILINE)
-    assert len(def_hits) == 1, f"expected exactly one `def redact_paths(`, found {len(def_hits)}"
+    # (a)+(b) One primitive per redaction concern, and each placeholder produced in exactly
+    # one place. Parameterized rather than written twice: the path and credential primitives
+    # are the same invariant with different names, and the previous form duplicated ~40 lines
+    # so a future third primitive would have been copy-pasted a third time.
+    #
+    # `expected_refs` is how many times the name may appear in the module at all: redact_paths
+    # is the public entry point (its own `def` only — callers live in other functions and are
+    # counted by (c)'s enumeration instead), while _redact_credentials must appear exactly
+    # twice, its `def` plus the single call inside redact_paths. A third occurrence means
+    # something bypassed the chokepoint to call it directly.
+    def _sub_calls_mentioning(token: str) -> int:
+        """Count `.sub(...)` calls whose full argument list mentions `token`.
 
-    # (b) The redaction placeholder "<repo>" is only ever PRODUCED (as an argument to a `.sub(`
-    # call — matches both `pattern.sub(...)` and a bare `re.sub(...)`) inside redact_paths
-    # itself — a second ad hoc site independently emitting "<repo>" would be exactly the "sixth
-    # site with its own bespoke logic" this test exists to catch. Paren-balance-scanned (not just
-    # "immediately follows the open paren") so a call shape like `re.sub(pattern, "<repo>", text)`
-    # — the replacement in a DIFFERENT argument position than redact_paths's own
-    # `pattern.sub("<repo>", text)` — is still caught; verified this actually catches such a
-    # mutation live before relying on it (not merely "should work in theory").
-    sub_call_starts = [m.end() for m in re.finditer(r"\.sub\(", src)]
-    sub_calls_with_repo_placeholder = 0
-    for i in sub_call_starts:
-        depth = 1
-        j = i
-        while depth > 0 and j < len(src):
-            if src[j] == "(":
-                depth += 1
-            elif src[j] == ")":
-                depth -= 1
-            j += 1
-        if '"<repo>"' in src[i:j]:
-            sub_calls_with_repo_placeholder += 1
-    assert sub_calls_with_repo_placeholder == 1, (
-        f'expected exactly one `.sub(...)` call whose arguments contain the "<repo>" placeholder '
-        f"(inside redact_paths), found {sub_calls_with_repo_placeholder} -- a new redaction call "
-        "site must route through redact_paths, not reimplement its own substitution"
-    )
+        Paren-balance-scanned, not "immediately after the open paren", so a call shaped
+        `re.sub(pattern, PLACEHOLDER, text)` is caught as well as `pattern.sub(PLACEHOLDER, text)`.
+        Verified live against a real mutation before being relied on.
+        """
+        found = 0
+        for m in re.finditer(r"\.sub\(", src):
+            i = m.end()
+            depth, j = 1, m.end()
+            while depth > 0 and j < len(src):
+                if src[j] == "(":
+                    depth += 1
+                elif src[j] == ")":
+                    depth -= 1
+                j += 1
+            if token in src[i:j]:
+                found += 1
+        return found
+
+    for name, placeholder, expected_refs in (
+        ("redact_paths", '"<repo>"', None),
+        ("_redact_credentials", "_REDACTED_CREDENTIAL", 2),
+    ):
+        defs = re.findall(rf"^def {re.escape(name)}\(", src, re.MULTILINE)
+        assert len(defs) == 1, f"expected exactly one `def {name}(`, found {len(defs)}"
+
+        emitters = _sub_calls_mentioning(placeholder)
+        assert emitters == 1, (
+            f"expected exactly one `.sub(...)` call whose arguments reference {placeholder} "
+            f"(inside {name}), found {emitters} -- a new redaction site must route through "
+            f"{name}, not reimplement its own substitution"
+        )
+
+        if expected_refs is not None:
+            refs = len(re.findall(rf"{re.escape(name)}\(", src))
+            assert refs == expected_refs, (
+                f"expected `{name}(` to appear exactly {expected_refs} times in "
+                f"{RENDER_PY.name} (its `def` line and the one call inside redact_paths), "
+                f"found {refs} -- a new call site must route through redact_paths instead"
+            )
 
     # (c) Every lines.append(...) call inside render_comment() either carries a static string
     # literal (nothing external can reach it), a KNOWN-safe bare identifier (see the allowlist
@@ -487,50 +509,6 @@ def test_redact_paths_is_the_only_redaction_chokepoint_in_this_module() -> None:
         "identifier to _KNOWN_SAFE_BARE_IDENTIFIERS above WITH a justification for why it's safe "
         "by construction:\n" + "\n".join(f"  - {v}" for v in violations)
     )
-
-    # (d) Exactly one function is named _redact_credentials -- the companion primitive
-    # redact_paths itself calls (mirrors check (a) for the path-redaction primitive).
-    credential_def_hits = re.findall(r"^def _redact_credentials\(", src, re.MULTILINE)
-    assert len(credential_def_hits) == 1, (
-        f"expected exactly one `def _redact_credentials(`, found {len(credential_def_hits)}"
-    )
-
-    # (e) _redact_credentials is referenced exactly twice in the whole module: its own `def` line,
-    # and the one call inside redact_paths's body. A THIRD occurrence would mean some other
-    # function (sanitize_inline, _machine_tail_text, or a brand new call site) is calling it
-    # directly instead of going through redact_paths -- exactly the bypass-the-chokepoint failure
-    # mode this whole test class exists to catch, just for the credential primitive instead of the
-    # path one.
-    credential_call_hits = len(re.findall(r"_redact_credentials\(", src))
-    assert credential_call_hits == 2, (
-        f"expected `_redact_credentials(` to appear exactly twice in {RENDER_PY.name} (its `def` "
-        f"line and the one call inside redact_paths), found {credential_call_hits} -- a new call "
-        "site must not call _redact_credentials directly; route through redact_paths instead"
-    )
-
-    # (f) mirrors (b) for the credential placeholder: exactly one `.sub(...)` call whose arguments
-    # reference _REDACTED_CREDENTIAL -- the one inside _redact_credentials itself. A second such
-    # call site would be a credential-redaction bypass of the same shape (b) already guards
-    # against for paths.
-    sub_calls_with_credential_placeholder = 0
-    for i in sub_call_starts:
-        depth = 1
-        j = i
-        while depth > 0 and j < len(src):
-            if src[j] == "(":
-                depth += 1
-            elif src[j] == ")":
-                depth -= 1
-            j += 1
-        if "_REDACTED_CREDENTIAL" in src[i:j]:
-            sub_calls_with_credential_placeholder += 1
-    assert sub_calls_with_credential_placeholder == 1, (
-        "expected exactly one `.sub(...)` call whose arguments reference _REDACTED_CREDENTIAL "
-        f"(inside _redact_credentials), found {sub_calls_with_credential_placeholder} -- a new "
-        "credential redaction call site must route through _redact_credentials, not reimplement "
-        "its own substitution"
-    )
-
 
 # ---------------------------------------------------------------------------
 # Structural invariant — every credential-shaped forwarded env key is redactable

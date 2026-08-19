@@ -277,10 +277,8 @@ def _json_escaped_variant(target: str) -> str | None:
 
 
 def redact_paths(text: str, repo_root: str | None) -> str:
-    """THE single redaction chokepoint for this module (adversarial review, round 5, coordinator
-    finding, closing five straight rounds of instance-by-instance patching — too narrow, then
-    partial variants, then escape ordering, then unanchored substitution and a missed fallback
-    path): every place in this module that can carry model text or a path — human-readable
+    """THE single redaction chokepoint for this module: every place in this module that can
+    carry model text or a path — human-readable
     sections (:func:`sanitize_inline`), the machine tail's pretty-printed JSON AND its raw-text
     fallback (:func:`_machine_tail_text`) — calls THIS function, and nothing else in this module
     performs its own ad hoc redaction. ``tests/test_render.py``'s
