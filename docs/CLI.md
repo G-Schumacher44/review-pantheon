@@ -143,7 +143,9 @@ protections above applied to them.
 precedence — so a bare `git status` or `cat` is refused rather than auto-approved. If you see a
 command refused under `readonly` that you expected to work, this is why, and it is intended;
 `trusted` restores full Bash. Note the scope: this closes the Bash path only. `Read`/`Grep`/`Glob`
-remain allowed and are bounded by the neutral provider working directory, not by these rules. See
+remain allowed and are **not path-scoped** — the neutral working directory is not a read
+boundary, and the prompt deliberately hands the agent the checkout's absolute path to reach the
+repo with. What the neutral cwd buys is config isolation, not read confinement. See
 [SECURITY.md](../SECURITY.md#scope-notes--read-before-assuming-a-finding-is-new) for the full
 scope note and remaining limits.
 

@@ -523,7 +523,10 @@ history, not here — a contract describes what's true now, not how it got that 
     vector → neutralization → verification status). Read that module directly rather than
     duplicating the table here.
 - **Provider processes launch from a neutral cwd, never the repo checkout — the CLI (Python)
-  lane.** (The Action surface gets the identical protection through a DIFFERENT mechanism,
+  lane.** *(It is a config-discovery boundary, NOT a read boundary: `Read`/`Grep`/`Glob` are not
+  path-scoped and the prompt deliberately hands the agent the checkout's absolute path to reach
+  the repo with. Reading it as a read confinement is the wrong inference and SECURITY.md once
+  made it.)* (The Action surface gets the identical protection through a DIFFERENT mechanism,
   since a `uses:` step can't be cwd-relocated — see "The Action surface closes the identical
   vector too" below.) `--allowedTools`/the read-only wrapper scope what a provider CLI's *tool
   calls* can do, but a provider CLI's own STARTUP also auto-discovers repo-local configuration

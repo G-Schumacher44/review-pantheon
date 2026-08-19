@@ -78,12 +78,24 @@ refused rather than auto-approved. The wrapper still forces `GIT_OPTIONAL_LOCKS=
 `GIT_NO_LAZY_FETCH=1` for everything it does run, so the protection does not depend on the deny
 list alone.
 
-**The remaining honest limit.** This closes the *Bash* path. `Read`, `Grep` and `Glob` stay
-allowed and unrestricted by these rules — they are read-only by nature but not scoped by the deny
-list, and on the CLI surface their reach is bounded by the neutral provider working directory
-rather than by a tool rule. And a deny list enumerates what is known: a built-in this list does
-not name would not be denied. If you are diagnosing a refused command under `readonly`, this is
-the mechanism refusing it, and that is intended.
+**The remaining honest limit.** This closes the *Bash* path only.
+
+`Read`, `Grep` and `Glob` stay allowed and are **not path-scoped at all** — they can read any
+path the process can read. Nothing in this tier confines them, and that is by design on the CLI
+surface: the provider runs from a neutral scratch directory, so the prompt hands the agent the
+checkout's absolute path and tells it to reach the repo that way. No `--add-dir` is involved and
+none is needed. Verified directly rather than assumed — a `Read` of an absolute path outside the
+neutral cwd succeeds.
+
+Do not read the neutral working directory as a read boundary. What it *does* buy is config
+isolation: a repo-supplied `.claude/settings.json` hook, `.mcp.json` server, or `env` block is
+not discovered, because discovery keys off the working directory. That is verified too (a hook
+fires when the cwd is the hostile repo and does not fire from the neutral cwd), and it is a
+different property from confining reads.
+
+A deny list also enumerates what is known: a built-in this list does not name would not be
+denied. If you are diagnosing a refused command under `readonly`, this is the mechanism refusing
+it, and that is intended.
 
 ### What `readonly` closes, and its honest limit
 
