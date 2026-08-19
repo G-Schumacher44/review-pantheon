@@ -510,6 +510,7 @@ def test_redact_paths_is_the_only_redaction_chokepoint_in_this_module() -> None:
         "by construction:\n" + "\n".join(f"  - {v}" for v in violations)
     )
 
+
 # ---------------------------------------------------------------------------
 # Structural invariant — every credential-shaped forwarded env key is redactable
 # ---------------------------------------------------------------------------
