@@ -147,19 +147,28 @@ Action surface or in any `.github/workflows/*.yml`, and CI runs it on every push
 Note that `install.sh` does not vendor that guard — an adopter inherits the workflow, not this
 repo's CI enforcement, so the prohibition is yours to keep on your own fork of the setup.
 
-### If you genuinely need fork review
+### Fork pull requests cannot be gated by this action
 
-**Gate on author association.** Members and collaborators are reviewed automatically; outside
-contributions require a maintainer to approve the workflow run before it executes (GitHub supports
-this natively for first-time contributors). This is the working answer today, and the only one this
-project recommends.
+State it plainly, because two plausible-sounding workarounds are not workarounds:
 
-**Not the two-stage `workflow_run` pattern.** An earlier version of this section recommended it —
-a `pull_request` workflow uploading the diff as an artifact with no secrets, then a `workflow_run`
-workflow reviewing that artifact in the trusted context without checking out fork code. It reads
-well, it is GitHub's own documented shape for the general problem, and **it does not work with this
-action.** The action refuses to run under `workflow_run` for that reason, so following the old
-advice now fails loudly rather than silently doing something unsafe. Two independent reasons:
+GitHub withholds `secrets.*` from a `pull_request` run originating in a fork, deliberately — the
+PR's own code executes in that job, so an available credential would be a stranger's for the
+taking. The model credential therefore arrives empty, no provider call is possible, and the action
+exits with a **NOT GATED** notice rather than pinning a permanently-red required check to a PR
+nobody can turn green. That is the designed behavior, not a gap to configure around.
+
+**Maintainer approval does not change this.** Requiring approval for first-time contributors
+controls only *whether the secretless workflow runs at all*; it does not grant that run access to
+secrets. An approved fork PR still reaches the NOT GATED branch. Approval is a useful control over
+whether untrusted workflows execute — it is not a way to obtain this gate's verdict.
+
+**The two-stage `workflow_run` pattern does not work here either** (an earlier version of this
+section recommended it; the action now refuses that trigger outright).
+
+The shape — a `pull_request` workflow uploading the diff as an artifact with no secrets, then a
+`workflow_run` workflow reviewing that artifact in the trusted context without checking out fork
+code — reads well and is GitHub's own documented answer to the general problem. It still fails
+here, for two independent reasons:
 
 - **The input surface does not exist.** `action.yml` declares no `pr_number` / `base_sha` /
   `head_sha` inputs; every step reads them from `github.event.pull_request.*`. Under `workflow_run`
@@ -172,10 +181,18 @@ advice now fails loudly rather than silently doing something unsafe. Two indepen
   content exactly as it would a checkout. The property the pattern was recommended for does not
   hold here even when the pattern is followed correctly.
 
-Restoring this path would take explicit `pr_number`/`base_sha`/`head_sha` inputs plus a diff-only
-resolution that never fetches fork commits. Until then, treat fork PRs as NOT GATED — which is what
-the action reports on them, by design (GitHub withholds the model credential from fork-originated
-`pull_request` runs, so the gate exits with a notice rather than pretending to review).
+Restoring that path would take explicit `pr_number`/`base_sha`/`head_sha` inputs plus a diff-only
+resolution that never fetches fork commits.
+
+**What you can actually do with a fork contribution:**
+
+- **Review it yourself.** The gate is one input to a maintainer's judgment, not a replacement for
+  it, and a fork PR is exactly where that distinction matters.
+- **Bring the commits into the base repository** — push them to a branch here and open an
+  ordinary same-repo PR. That run has secrets and is gated normally. Note what this means: you are
+  vouching for the content by importing it, and the gate then reviews it as your branch. That is a
+  deliberate act, not a bypass, and it should be one.
+- **Run the CLI locally** against the fork PR, under `readonly`, from a checkout you control.
 
 ## Blast radius
 

@@ -441,8 +441,8 @@ history, not here — a contract describes what's true now, not how it got that 
     remains a legitimate exit-0 skip: an ordinary `pull_request` run from a fork has no secrets to
     protect (GitHub withholds them), so review is impossible rather than unsafe. This step covers
     the opposite case — a run that *does* hold secrets over content it should not. See
-    SECURITY.md's "If you genuinely need fork review" for why the `workflow_run` shape this
-    refuses is not a working path for this action regardless of the trigger question.
+    SECURITY.md's "Fork pull requests cannot be gated by this action" for why the `workflow_run`
+    shape this refuses is not a working path here regardless of the trigger question.
   - The CLI surface's wrapper ships as part of the `pantheon` package and is resolved via its
     installed console script (`pantheon-git-readonly`) — `pantheon.cli._wrapper_invocation()`
     resolves that script's own absolute path via `pantheon.execution.resolve_console_script`,
