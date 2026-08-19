@@ -58,13 +58,33 @@ def test_unsafe_triggers_appear_nowhere() -> None:
 
 
 def test_permissions_are_least_privilege() -> None:
+    """Exact mapping, not a denylist.
+
+    An earlier form asserted the two expected grants were present and blacklisted four
+    specific over-broad ones — so a NEW grant (`issues: write`, `checks: write`, anything
+    unanticipated) sailed through the very test introduced to prevent token-scope drift.
+    A least-privilege check has to be an allowlist: parse the block and require it to
+    contain exactly the two grants the gate needs, and nothing else.
+    """
+    expected = {"contents": "read", "pull-requests": "write"}
+
     for name, body in _both():
-        assert re.search(r"^\s*contents:\s*read\s*$", body, re.M), f"{name}: contents must be read"
-        assert re.search(r"^\s*pull-requests:\s*write\s*$", body, re.M), (
-            f"{name}: pull-requests: write is required to post the verdict comment"
+        block = re.search(r"^permissions:\s*$(.*?)(?=^\S|\Z)", body, re.M | re.S)
+        assert block, f"{name}: no top-level 'permissions:' block found"
+
+        granted: dict[str, str] = {}
+        for line in block.group(1).splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            m = re.match(r"^\s+([A-Za-z-]+):\s*([A-Za-z-]+)\s*$", line)
+            assert m, f"{name}: unparsed line in permissions block: {line!r}"
+            granted[m.group(1)] = m.group(2)
+
+        assert granted == expected, (
+            f"{name}: permissions must be exactly {expected}, found {granted} — the gate needs "
+            "contents:read to diff and pull-requests:write to post its verdict, and nothing "
+            "more; any additional grant widens what a compromised run could reach"
         )
-        for wider in ("contents: write", "packages: write", "id-token: write", "actions: write"):
-            assert wider not in body, f"{name}: over-broad permission '{wider}'"
 
 
 def test_checkout_does_not_persist_credentials() -> None:
