@@ -105,12 +105,56 @@ def test_permissions_are_least_privilege() -> None:
 
 
 def test_checkout_does_not_persist_credentials() -> None:
+    """EVERY checkout step, not "the file mentions it somewhere".
+
+    Third instance of this shape in this file (permissions and triggers were the first two):
+    a presence check passes as soon as one occurrence is right. A second `actions/checkout`
+    added without the option would persist the token into `.git/config`, where the reviewer —
+    which is not path-scoped — can read it. Parse the steps and require it on each one.
+    """
     for name, body in _both():
-        assert "actions/checkout" in body, f"{name}: no checkout step"
-        assert re.search(r"^\s*persist-credentials:\s*false\s*$", body, re.M), (
-            f"{name}: checkout must set persist-credentials: false — otherwise the workflow "
-            f"token is written into the workspace .git/config the reviewer can read"
-        )
+        # Split on step boundaries ("- uses:" / "- name:" at list-item indentation).
+        steps = re.split(r"^\s+-\s+(?=uses:|name:)", body, flags=re.M)
+        checkouts = [st for st in steps if re.search(r"uses:\s*actions/checkout", st)]
+        assert checkouts, f"{name}: no actions/checkout step found"
+
+        for idx, step in enumerate(checkouts):
+            assert re.search(r"^\s*persist-credentials:\s*false\s*$", step, re.M), (
+                f"{name}: actions/checkout step #{idx + 1} does not set "
+                "persist-credentials: false — that checkout writes the workflow token into "
+                ".git/config, which the reviewer can read (Read/Grep/Glob are not path-scoped)"
+            )
+
+
+def test_action_tool_policy_is_asserted_for_both_tiers() -> None:
+    """action.yml's tool policy, asserted — the claim used to be made and not kept.
+
+    A comment in action.yml said the expression guard verified the action and Python tool
+    policies agree. It does not: it never inspects ALLOWED_TOOLS, DENIED_TOOLS,
+    --permission-mode or --disallowedTools, so deleting the action's --disallowedTools line
+    left every suite green while silently reopening the built-in-command bypass. The CLI
+    surface has had these assertions all along; this is the action surface catching up.
+    """
+    action = (ROOT / "action.yml").read_text(encoding="utf-8")
+
+    assert re.search(r'readonly\)\s*\n\s*ALLOWED_TOOLS="Read,Grep,Glob,Bash\(\$GIT_WRAPPER \*\)"', action), (
+        "readonly must scope Bash to the wrapper prefix with Read/Grep/Glob unrestricted"
+    )
+    assert re.search(r"trusted\)\s*\n\s*ALLOWED_TOOLS='Read,Grep,Glob,Bash'", action), "trusted must grant full Bash"
+    # The deny list must be sourced from the single Python function, not duplicated in YAML.
+    assert "disallowed-tools readonly" in action, (
+        "readonly must source its deny list from pantheon/execution.py's disallowed-tools "
+        "subcommand — a hand-copied YAML list is how the two surfaces drift apart"
+    )
+    assert re.search(r'trusted\)(?:.|\n)*?DENIED_TOOLS=""', action), "trusted must emit no deny list"
+    # Both flags must actually reach claude_args, or the values above are decorative.
+    assert "--permission-mode dontAsk" in action, (
+        "without dontAsk, an unmatched tool call has no answer outside an interactive terminal"
+    )
+    assert re.search(r'--disallowedTools \\"\$DENIED_TOOLS\\"', action), (
+        "DENIED_TOOLS must be passed through to claude_args — computing it and not passing it "
+        "is the exact silent-reopen this test exists to catch"
+    )
 
 
 def test_upstream_action_is_sha_pinned() -> None:

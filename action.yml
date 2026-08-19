@@ -371,7 +371,9 @@ runs:
         # pantheon/execution.py's disallowed_tools_for() rather than duplicated here — that
         # function is the ONE source for the tier->deny decision, exactly as allowed_tools_for()
         # is for the allow decision. Hand-copying the list into shell is how the two surfaces
-        # would drift; tests/check_action_expressions.py asserts they agree.
+        # would drift; tests/test_workflow_shape.py's test_action_tool_policy_is_asserted_for_both_tiers
+        # asserts the generated claude_args for both tiers (an earlier version of this comment named
+        # a test that never inspected these values at all).
         case "$EXECUTION" in
           readonly)
             ALLOWED_TOOLS="Read,Grep,Glob,Bash($GIT_WRAPPER *)"
