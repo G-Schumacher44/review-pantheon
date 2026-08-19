@@ -149,20 +149,33 @@ repo's CI enforcement, so the prohibition is yours to keep on your own fork of t
 
 ### If you genuinely need fork review
 
-Use the two-stage `workflow_run` pattern, which is GitHub's own documented answer:
+**Gate on author association.** Members and collaborators are reviewed automatically; outside
+contributions require a maintainer to approve the workflow run before it executes (GitHub supports
+this natively for first-time contributors). This is the working answer today, and the only one this
+project recommends.
 
-1. A `pull_request`-triggered workflow does the untrusted work with **no secrets**, and uploads the
-   diff (and only the diff) as an artifact.
-2. A second workflow triggered on `workflow_run` completion runs in the base repository's trusted
-   context with the credential, downloads that artifact, and reviews it — **never checking out the
-   fork's code**.
+**Not the two-stage `workflow_run` pattern.** An earlier version of this section recommended it —
+a `pull_request` workflow uploading the diff as an artifact with no secrets, then a `workflow_run`
+workflow reviewing that artifact in the trusted context without checking out fork code. It reads
+well, it is GitHub's own documented shape for the general problem, and **it does not work with this
+action.** The action refuses to run under `workflow_run` for that reason, so following the old
+advice now fails loudly rather than silently doing something unsafe. Two independent reasons:
 
-The security of this rests entirely on step 2 never executing anything originating from the fork.
-Treat any change to that workflow as a change to the threat model.
+- **The input surface does not exist.** `action.yml` declares no `pr_number` / `base_sha` /
+  `head_sha` inputs; every step reads them from `github.event.pull_request.*`. Under `workflow_run`
+  that context is absent, and GitHub documents `workflow_run.pull_requests` as **empty for
+  fork-originated pull requests** — precisely the case this section exists to serve. Stage 2 would
+  have nothing to review.
+- **"Never checks out the fork's code" is not the same as "the fork's blobs are absent."** This
+  action requires `git diff <base>...<head>` to resolve, which means the fork's commit objects must
+  be present in the runner's git history. Once fetched, the read-only git wrapper can read that
+  content exactly as it would a checkout. The property the pattern was recommended for does not
+  hold here even when the pattern is followed correctly.
 
-A simpler alternative that many projects prefer: gate on author association, so members and
-collaborators are reviewed automatically while outside contributions require a maintainer to
-approve the workflow run first (GitHub supports this natively for first-time contributors).
+Restoring this path would take explicit `pr_number`/`base_sha`/`head_sha` inputs plus a diff-only
+resolution that never fetches fork commits. Until then, treat fork PRs as NOT GATED — which is what
+the action reports on them, by design (GitHub withholds the model credential from fork-originated
+`pull_request` runs, so the gate exits with a notice rather than pretending to review).
 
 ## Blast radius
 

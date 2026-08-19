@@ -415,6 +415,34 @@ history, not here — a contract describes what's true now, not how it got that 
   arbitrary shell command is a code-execution primitive, not a review gate, so `readonly` is the
   default on every surface that invokes a provider — `trusted` is an explicit, documented opt-in
   for own-repo/trusted-author use only, never for reviewing a fork PR you don't control.
+  - **The allowlist is only half of it: the built-in bypass is denied too.** Claude Code
+    auto-approves a small built-in set of read commands — `ls`, `cat`, `echo`, `pwd`, `head`,
+    `tail`, `grep`, `find`, `wc`, `which`, `diff`, `stat`, `du`, `cd`, and read-only forms of
+    `git` — *before* `--allowedTools` is consulted, in every permission mode including `dontAsk`.
+    Under `readonly` that is a second path to the checkout that never reaches the wrapper's argv
+    validation. `pantheon.execution.disallowed_tools_for()` emits a deny rule per entry in
+    `DENIED_BUILTIN_BASH_COMMANDS`, and deny beats allow in Claude Code's own precedence, so each
+    of those commands is forced back through a permission decision that `readonly`'s allowlist
+    then fails closed on. `git` is denied deliberately, which forces every git read through the
+    wrapper; the wrapper is invoked by its own absolute path, never a bareword `git`, so the two
+    prefixes are disjoint by construction and a fixture asserts no deny entry shadows the
+    wrapper's own allow entry. Both surfaces read this list from that one function —
+    `action.yml` shells out to `pantheon/execution.py disallowed-tools <tier>` rather than
+    duplicating it in YAML. `trusted` emits no deny list; full Bash is that tier's explicit opt-in.
+    The rule shape is the trailing-wildcard form only (`Bash(cmd *)`), verified empirically with a
+    negative control rather than read off the docs: with no deny rule a bare `pwd` runs, and under
+    `Bash(pwd *)` it is refused — so the wildcard form already covers the zero-argument
+    invocation and an exact-match companion entry would be dead weight.
+  - **Unsafe triggers are refused at runtime, not merely discouraged.** `action.yml`'s first step
+    hard-fails (exit 1, no `if:`, before any checkout-dependent work or model invocation) when
+    `github.event_name` is `pull_request_target` or `workflow_run`. Both give the job running this
+    action's own steps the base repository's secrets while the content under review can be
+    fork-controlled. This is deliberately NOT the same path as the fork-PR NOT-GATED exit, which
+    remains a legitimate exit-0 skip: an ordinary `pull_request` run from a fork has no secrets to
+    protect (GitHub withholds them), so review is impossible rather than unsafe. This step covers
+    the opposite case — a run that *does* hold secrets over content it should not. See
+    SECURITY.md's "If you genuinely need fork review" for why the `workflow_run` shape this
+    refuses is not a working path for this action regardless of the trigger question.
   - The CLI surface's wrapper ships as part of the `pantheon` package and is resolved via its
     installed console script (`pantheon-git-readonly`) — `pantheon.cli._wrapper_invocation()`
     resolves that script's own absolute path via `pantheon.execution.resolve_console_script`,

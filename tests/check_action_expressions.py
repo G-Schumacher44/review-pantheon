@@ -55,7 +55,8 @@ DQ_LITERAL = re.compile(r'"[^"]*"')
 # else — `steps.*.outputs.*`, `github.*`, `inputs.*`, `needs.*` — must go through `env:`.
 SAFE_RUN_CONTEXTS = re.compile(r"^\s*(matrix\.[A-Za-z0-9_]+|runner\.[A-Za-z0-9_]+)\s*$")
 
-# The ONE legitimate place `pull_request_target` may appear outside a comment: action.yml's own
+# The ONE legitimate SHAPE in which `pull_request_target` may appear outside a comment (this
+# exemption is matched repo-wide, not scoped to action.yml — see the scope note below): action.yml's own
 # runtime refusal of it (this repo's hard-refuse-on-trigger step — see action.yml's "Refuse
 # pull_request_target / workflow_run triggers"), which must COMPARE github.event_name against the
 # literal string in order to reject it. Recognized narrowly by the exact shell `case` pattern-arm
