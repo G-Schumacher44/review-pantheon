@@ -192,9 +192,14 @@ surfaces this repo directly controls, independent of every layer above:
   shape-matched — but a transformed one can.** `anthropics/claude-code-action`'s own pinned source
   hands the workflow token (and the rest of its process env, minus two OIDC vars) to the process
   running the reviewer model; that model then reads the untrusted PR content this gate exists to
-  review. `pantheon.render`'s redaction chokepoint strips any literal credential value this
-  process's own env holds, and any known GitHub/Anthropic credential-shaped token, from every
-  field before the comment is posted — see DESIGN.md's "Security posture" section for the full
-  writeup. **This is not complete coverage:** a model that splits, encodes, or paraphrases a
-  credential before emitting it defeats both the literal-value and shape-based passes. Treat this
-  as narrowing the exposure window, not closing it.
+  review. `pantheon.render`'s redaction chokepoint strips any literal credential value the
+  RENDERING process's own env holds — which now includes the reviewer's actual token, forwarded
+  into the render/post step as a dedicated redaction-only variable specifically because that
+  step's own env is not otherwise guaranteed to hold what the reviewer step's env held (a real
+  gap on a GHES install or an overridden `github_token` input, closed as Codex P1 findings on PR
+  #75 — see DESIGN.md's "Security posture" section, "Credential redaction at render time," for
+  the full writeup) — plus any known GitHub/Anthropic credential-shaped token, from every field
+  before the comment is posted. **This is not complete coverage:** a model that splits, encodes,
+  or paraphrases a credential before emitting it defeats both the literal-value and shape-based
+  passes, and the shape-based pass only ever covers formats this module has been taught. Treat
+  this as narrowing the exposure window, not closing it.

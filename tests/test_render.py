@@ -530,3 +530,58 @@ def test_redact_paths_is_the_only_redaction_chokepoint_in_this_module() -> None:
         "credential redaction call site must route through _redact_credentials, not reimplement "
         "its own substitution"
     )
+
+
+# ---------------------------------------------------------------------------
+# Structural invariant — every credential-shaped forwarded env key is redactable
+# ---------------------------------------------------------------------------
+
+# Which of a real allowlist's own key NAMES look credential-shaped -- TOKEN/SECRET/KEY are the
+# three substrings every actual secret-value entry on both pantheon.cli._CLI_ENV_PASSTHROUGH_KEYS
+# and pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS carries today (GH_TOKEN, GITHUB_TOKEN,
+# GH_ENTERPRISE_TOKEN, ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY,
+# CURSOR_API_KEY -- verified by hand once, at authoring time, against both real tuples; NOT
+# hand-copied into this test as their own list, which is exactly what let GH_ENTERPRISE_TOKEN slip
+# through undetected before this test existed). Every non-credential entry on both allowlists today
+# (HOME, USER, LANG, TERM, TMPDIR, TZ, the XDG_* roots, GH_HOST, GH_CONFIG_DIR, SSH_AUTH_SOCK,
+# SSH_AGENT_PID, CLAUDE_CONFIG_DIR, the CLAUDE_CODE_USE_* flags, AWS_REGION, AWS_DEFAULT_REGION,
+# AWS_PROFILE, GOOGLE_CLOUD_PROJECT, CLOUD_ML_REGION, and every *_PROXY variant) contains none of
+# these three substrings -- the one near-miss, GOOGLE_APPLICATION_CREDENTIALS, is excluded via
+# providers._PATH_SHAPED_ENV_KEYS below (a credentials FILE PATH, not an opaque credential value --
+# redact_paths's containment logic is the right tool for that, not this one).
+_CREDENTIAL_NAME_MARKERS = ("TOKEN", "SECRET", "KEY")
+
+
+def _credential_shaped_keys(env_keys, path_shaped_keys=frozenset()):
+    return {
+        key
+        for key in env_keys
+        if key not in path_shaped_keys and any(marker in key.upper() for marker in _CREDENTIAL_NAME_MARKERS)
+    }
+
+
+def test_every_credential_shaped_forwarded_env_key_is_redacted() -> None:
+    """Mechanically enforces the actual structural gap Codex found on PR #75 (GH_ENTERPRISE_TOKEN
+    forwarded by pantheon.cli, never redacted): every env-var NAME on either real allowlist that
+    forwards process env into a reviewer subprocess -- pantheon.cli._CLI_ENV_PASSTHROUGH_KEYS
+    (git/gh auth for this repo's own orchestration calls) and
+    pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS (the provider CLI lanes) -- and that LOOKS
+    credential-shaped by name must also be a literal-value redaction target in
+    render._CREDENTIAL_ENV_KEYS. Derived from the real module constants at test time, not a
+    hand-copied name list, so a future contributor who forwards a new credential to either
+    allowlist without teaching render._CREDENTIAL_ENV_KEYS about it fails THIS test -- the same
+    class of gap this test itself was added to close does not get to reopen silently.
+    """
+    from pantheon import cli, providers
+
+    forwarded_credential_keys = _credential_shaped_keys(cli._CLI_ENV_PASSTHROUGH_KEYS) | _credential_shaped_keys(
+        providers._PROVIDER_ENV_PASSTHROUGH_KEYS, providers._PATH_SHAPED_ENV_KEYS
+    )
+    redacted_keys = set(render._CREDENTIAL_ENV_KEYS)
+    missing = forwarded_credential_keys - redacted_keys
+    assert not missing, (
+        "credential-shaped env var name(s) forwarded to a reviewer subprocess but absent from "
+        f"render._CREDENTIAL_ENV_KEYS, so they could never be literally redacted: {sorted(missing)} "
+        "-- add each to render._CREDENTIAL_ENV_KEYS"
+    )

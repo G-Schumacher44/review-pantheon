@@ -189,13 +189,31 @@ _MIN_CREDENTIAL_LITERAL_LEN = 16
 # deliberately excluded even though they're on that list: the former is a path TO a credentials
 # file (redact_paths's own containment logic is the right tool for a path, not this one), the
 # latter a profile NAME, neither is itself a secret value this renderer could leak verbatim.
-# GH_TOKEN/GITHUB_TOKEN aren't on pantheon.providers's list at all (that module never launches
-# `gh`) — they're pantheon.cli's own git/gh allowlist, the credential this repo's *own*
-# `gh pr comment` call authenticates with, and exactly the one a compromised reviewer run has the
-# clearest incentive to exfiltrate through a posted comment.
+# GH_TOKEN/GITHUB_TOKEN/GH_ENTERPRISE_TOKEN aren't on pantheon.providers's list at all (that
+# module never launches `gh`) — they're pantheon.cli's own git/gh allowlist (`gh`'s own three
+# supported auth-token variables, `gh help environment` — GH_ENTERPRISE_TOKEN authenticates a
+# GitHub Enterprise Server host the same way GH_TOKEN/GITHUB_TOKEN authenticate github.com), the
+# credential this repo's *own* `gh pr comment` call authenticates with, and exactly the one a
+# compromised reviewer run has the clearest incentive to exfiltrate through a posted comment.
+# Omitting GH_ENTERPRISE_TOKEN specifically was a real gap (Codex P1, PR #75): it IS forwarded by
+# pantheon.cli, so on a GHES install it WAS present in the reviewer's own env, and it was never a
+# redaction target — `test_every_credential_shaped_forwarded_env_key_is_redacted` in
+# tests/test_render.py now enforces mechanically, from the real allowlist constants (not a
+# hand-copied name list), that this class of gap can't reopen silently.
+#
+# PANTHEON_REVIEWER_GITHUB_TOKEN is NOT a forwarded auth credential at all — it exists solely so
+# this module's literal-value pass can see the reviewer token action.yml's separate "Build and
+# post combined comment" step would otherwise never observe (see that step's own env-block
+# comment for the full reasoning): each `Run <agent>` step gets `${{ inputs.github_token }}`, but
+# that render/post step only gets `${{ github.token }}` as GH_TOKEN — the two coincide under the
+# default setup but diverge the moment a consumer workflow overrides the `github_token` input
+# (a GitHub App installation token, a PAT, a GHES token), and a literal-value pass can only ever
+# redact a value it can actually see in ITS OWN process env.
 _CREDENTIAL_ENV_KEYS: tuple[str, ...] = (
     "GITHUB_TOKEN",
     "GH_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "PANTHEON_REVIEWER_GITHUB_TOKEN",
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "AWS_ACCESS_KEY_ID",
