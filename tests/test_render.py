@@ -257,6 +257,81 @@ def test_machine_tail_text_redacts_a_credential_in_the_raw_text_fallback_path(mo
 
 
 # ---------------------------------------------------------------------------
+# Credential redaction must survive _table_top_cell's truncation — regression coverage for the
+# bug where truncate(best, 90) ran BEFORE redaction: a credential straddling that 90-char cut
+# point kept the literal-value pass from seeing one contiguous run to match, and could push the
+# shape regex's trailing-length floor past the truncated tail too, letting a fragment of the real
+# credential survive into a posted comment. Repeating across padding offsets covers the
+# "reconstruct the secret by walking the truncation window across several runs" attack, not just
+# one lucky (or unlucky) alignment.
+# ---------------------------------------------------------------------------
+
+# Obviously-fake filler shaped like a GitHub PAT (matches _CREDENTIAL_SHAPE_RE on its own, and is
+# also used as a literal GITHUB_TOKEN value below) — never a real credential. 32 chars total, well
+# past both _MIN_CREDENTIAL_LITERAL_LEN and the shape regex's 20-char trailing floor.
+_FAKE_STRADDLING_TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+
+
+def test_table_top_cell_redacts_a_credential_before_truncating_not_after(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", _FAKE_STRADDLING_TOKEN)
+    for offset in range(0, len(_FAKE_STRADDLING_TOKEN), 4):
+        # Padding chosen so the token lands at a different position relative to truncate()'s
+        # 90-char cut on each iteration -- some offsets put the cut mid-token, some put the whole
+        # token on one side of it. Every offset must come back clean regardless.
+        padding = "x" * (60 + offset)
+        suffix = "y" * 60
+        issue = padding + _FAKE_STRADDLING_TOKEN + suffix
+        assert len(issue) > 90  # must actually exercise truncate()'s cap, not just be a no-op
+        verdict_obj = {"findings": [{"severity": "blocker", "issue": issue}]}
+
+        cell = render._table_top_cell("VERIFIED", "", verdict_obj, None)
+        rendered = render.sanitize_inline(cell, None)  # the same call render_comment() makes
+
+        assert _FAKE_STRADDLING_TOKEN not in rendered, f"offset={offset}: full token leaked"
+        # No 8-plus-char fragment of the token should survive either -- a partial leak is still
+        # enough for an attacker to stitch the full secret back together across repeated runs.
+        for i in range(len(_FAKE_STRADDLING_TOKEN) - 8):
+            fragment = _FAKE_STRADDLING_TOKEN[i : i + 8]
+            assert fragment not in rendered, f"offset={offset}: fragment {fragment!r} leaked"
+
+
+def test_table_top_cell_redacts_a_repo_root_before_truncating_not_after() -> None:
+    # Same class of bug, the path-redaction half: a repo_root landing across the truncation cut
+    # point must not survive as a dangling fragment either.
+    root = "/Users/alice/dev/review-pantheon-secret-checkout"
+    for offset in range(0, len(root), 5):
+        padding = "x" * (60 + offset)
+        suffix = "y" * 60
+        issue = padding + root + "/gate.sh" + suffix
+        assert len(issue) > 90
+        verdict_obj = {"findings": [{"severity": "blocker", "issue": issue}]}
+
+        cell = render._table_top_cell("VERIFIED", "", verdict_obj, root)
+        rendered = render.sanitize_inline(cell, root)
+
+        assert root not in rendered, f"offset={offset}: full repo_root leaked"
+
+
+def test_redact_paths_is_idempotent_on_already_redacted_text(monkeypatch) -> None:
+    # _table_top_cell's early redact_paths() call and the caller's later
+    # sanitize_inline(...)/redact_paths() call both run over the SAME text -- correctness depends
+    # on the second pass being a true no-op, not just re-redacting harmlessly by luck. Verified
+    # explicitly here rather than assumed.
+    monkeypatch.setenv("GITHUB_TOKEN", _FAKE_TOKEN_VALUE)
+    root = "/Users/alice/dev/review-pantheon"
+    text = "token " + _FAKE_TOKEN_VALUE + " leaked from " + root + "/src/gate.sh"
+
+    once = render.redact_paths(text, root)
+    twice = render.redact_paths(once, root)
+
+    assert once == twice
+    assert _FAKE_TOKEN_VALUE not in once
+    assert root not in once
+    assert "<redacted-credential>" in once
+    assert "<repo>/src/gate.sh" in once
+
+
+# ---------------------------------------------------------------------------
 # Mechanical enumeration test — the one-chokepoint contract
 # ---------------------------------------------------------------------------
 

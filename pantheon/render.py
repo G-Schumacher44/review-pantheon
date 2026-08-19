@@ -529,13 +529,42 @@ def _top_finding_text(verdict_obj: Any) -> str:
     return jqjson.subst(jqjson.jq_text(_or_default(sorted_findings[0].get("issue"), "")))
 
 
-def _table_top_cell(verdict: str, top_text: str, verdict_obj: Any) -> str:
-    """Mirrors ``_pantheon_table_top_cell``."""
+def _table_top_cell(verdict: str, top_text: str, verdict_obj: Any, repo_root: str | None = None) -> str:
+    """Mirrors ``_pantheon_table_top_cell``, plus one Python-port-only step ``best`` needs that
+    bash's original never did (bash's own ``_pantheon_table_top_cell`` has no credential-
+    redaction concept at all — this is a deliberate, security-motivated deviation from the
+    otherwise byte-identical-to-bash contract, same category as :func:`redact_paths`'s own
+    repo-root redaction).
+
+    :func:`redact_paths` runs on ``best`` HERE, before :func:`truncate` — not left to the
+    caller's later ``sanitize_inline(_table_top_cell(...), repo_root)`` call to handle after the
+    fact. ``truncate`` slices on a raw character count with no awareness of what it's cutting
+    through: a credential landing across that cut point survives redaction two different ways —
+    the literal-value pass no longer sees the value as one contiguous run to match, and the
+    shape-regex pass's trailing-character floor (``{20,}``) can fail once the tail past the cut is
+    gone. Left uncorrected, an attacker who controls the finding text controls the padding before
+    a credential too, and can walk the truncation window across repeated runs to read the whole
+    secret out in fragments. Redacting first means there is nothing contiguous left for
+    ``truncate`` to split.
+
+    Calling :func:`redact_paths` here does NOT double-redact anything: it is the module's one
+    redaction PRIMITIVE (see its own docstring), not the full :func:`sanitize_inline` pipeline —
+    it only ever replaces a matched credential/path with a fixed placeholder
+    (``<redacted-credential>`` / ``<repo>``) that contains none of the characters either of its
+    own two passes matches on, so a second pass over already-redacted text is a verified no-op,
+    not a corruption risk (see ``tests/test_render.py``'s idempotence coverage). This is safe
+    specifically BECAUSE it is ``redact_paths`` and not ``sanitize_inline`` — ``sanitize_inline``
+    additionally does markdown/HTML escaping (``<`` -> ``&lt;`` et al.), which is NOT idempotent
+    (a second pass over already-escaped text mangles it further, e.g. ``&lt;`` -> ``&amp;lt;``),
+    so calling that a second time here instead would be wrong. The caller's own
+    ``sanitize_inline(_table_top_cell(...), repo_root)`` call still runs afterward exactly once,
+    unchanged — it's what applies the markdown escaping this function itself never needs to do.
+    """
     if verdict == "SKIPPED":
         return f"skipped — {top_text}"
     best = _top_finding_text(verdict_obj)
     if best:
-        return truncate(best, 90)
+        return truncate(redact_paths(best, repo_root), 90)
     if top_text and top_text != "no findings":
         return top_text
     return "—"
@@ -717,7 +746,7 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
         # Sanitize the raw verdict value FIRST, then wrap it in our own backticks — sanitizing an
         # already-backtick-wrapped string would treat those backticks as hostile content too.
         vcell = f"`{sanitize_inline(d.verdict, repo_root)}` — {d.color}"
-        topcell = sanitize_inline(_table_top_cell(d.verdict, d.top, findings_obj), repo_root)
+        topcell = sanitize_inline(_table_top_cell(d.verdict, d.top, findings_obj, repo_root), repo_root)
         lines.append(f"| {agent} | {vcell} | {topcell} |")
 
     lines.append("")
