@@ -133,14 +133,19 @@ docstring and `tests/test-git-readonly-wrapper.sh`.
 
 </details>
 
-**The built-in bypass — read this before assuming coverage is total.** Claude Code itself always
-allows a small, non-configurable set of bare read-only commands (plain `git diff`/`show`/`log`/
-`status`, no flags) regardless of tier — those never reach the wrapper at all, so none of the
-forced-environment protections above apply to them. This is expected (Claude Code's own
-built-in), but it means a bare `git status` outside the wrapper can still perform its default
-optional index refresh, and a bare object read in a partial clone can still lazy-fetch — real
-side effects, not eliminated by this tier. See [SECURITY.md](../SECURITY.md#scope-notes--read-before-assuming-a-finding-is-new)
-for the full honest scope note.
+**The built-in bypass — now denied under `readonly`.** Claude Code auto-approves a built-in set of
+read commands before `--allowedTools` is consulted, in every permission mode: `ls`, `cat`, `echo`,
+`pwd`, `head`, `tail`, `grep`, `find`, `wc`, `which`, `diff`, `stat`, `du`, `cd`, and bare
+read-only `git` forms. Those never reach the wrapper, so none of the forced-environment
+protections above applied to them.
+
+`readonly` now emits an explicit deny rule for each — deny beats allow in Claude Code's own
+precedence — so a bare `git status` or `cat` is refused rather than auto-approved. If you see a
+command refused under `readonly` that you expected to work, this is why, and it is intended;
+`trusted` restores full Bash. Note the scope: this closes the Bash path only. `Read`/`Grep`/`Glob`
+remain allowed and are bounded by the neutral provider working directory, not by these rules. See
+[SECURITY.md](../SECURITY.md#scope-notes--read-before-assuming-a-finding-is-new) for the full
+scope note and remaining limits.
 
 **Provider-lane caveat.** This tiering is Claude-specific. `pantheon.providers`' codex/gemini/
 cursor lanes invoke their own CLIs directly and never consume the wrapper — Codex, Gemini, and

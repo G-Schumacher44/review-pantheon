@@ -54,15 +54,36 @@ Codex, Gemini, and Cursor have no equivalent tool-scoping mechanism in their own
 so a best-effort lane carries **no tool restriction at all** — its only guard against a hostile
 fork PR is the same fail-closed verdict handling every lane gets, not a tool-call boundary.
 
-### Bypassing the wrapper is not the same as having no side effects
+### The built-in bypass, and what now closes it
 
-Claude Code's own small, built-in, non-configurable set of always-approved bare read-only
-commands (plain `git diff`/`show`/`log`/`status`, no flags) never reaches the wrapper at all, on
-any tier. Don't read "expected, allowed by Claude Code" as "genuinely read-only": the wrapper
-forces `GIT_OPTIONAL_LOCKS=0` and `GIT_NO_LAZY_FETCH=1` specifically because plain git doesn't
-default to either, so a bare `git status` outside the wrapper can still write `.git/index`, and a
-bare object read in a partial clone can still lazy-fetch — real, reproduced side effects this
-policy doesn't treat as gate-defeating.
+Claude Code auto-approves a built-in set of read commands *before* `--allowedTools` is consulted,
+in every permission mode. That set is larger than this section used to claim: it is not only bare
+read-only `git` forms but `ls`, `cat`, `echo`, `pwd`, `head`, `tail`, `grep`, `find`, `wc`,
+`which`, `diff`, `stat`, `du`, and `cd`. Under `readonly` that was a second path to the checkout
+that never reached the wrapper's argv validation.
+
+**`readonly` now denies that set explicitly.** Claude Code's documented precedence puts deny
+before allow, so `pantheon.execution.disallowed_tools_for()` emits a deny rule per command and
+each one is forced back through a permission decision that `readonly`'s allowlist then fails
+closed on. `git` is denied deliberately, which routes every git read through the wrapper; the
+wrapper is invoked by its own absolute path, never a bareword `git`, so the two prefixes are
+disjoint and a fixture asserts no deny entry shadows the wrapper's own allow entry. Both surfaces
+read the list from that one function. `trusted` emits no deny list — full Bash is that tier's
+explicit opt-in.
+
+**What that changes about side effects.** The previously-documented consequences of the bypass —
+a bare `git status` refreshing `.git/index`, a bare object read lazy-fetching in a partial clone —
+are no longer reachable through the Bash tool under `readonly`, because those invocations are now
+refused rather than auto-approved. The wrapper still forces `GIT_OPTIONAL_LOCKS=0` and
+`GIT_NO_LAZY_FETCH=1` for everything it does run, so the protection does not depend on the deny
+list alone.
+
+**The remaining honest limit.** This closes the *Bash* path. `Read`, `Grep` and `Glob` stay
+allowed and unrestricted by these rules — they are read-only by nature but not scoped by the deny
+list, and on the CLI surface their reach is bounded by the neutral provider working directory
+rather than by a tool rule. And a deny list enumerates what is known: a built-in this list does
+not name would not be denied. If you are diagnosing a refused command under `readonly`, this is
+the mechanism refusing it, and that is intended.
 
 ### What `readonly` closes, and its honest limit
 
