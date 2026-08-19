@@ -976,7 +976,19 @@ def _claude(
 
     prompt = _read_prompt(prompt_file)
     tools = allowed_tools or default_allowed_tools(repo_root)
-    deny_tools = default_disallowed_tools() if disallowed_tools is None else disallowed_tools
+    # The two defaults are COUPLED on purpose. Inferring the readonly deny list while the caller
+    # supplied its own allowed_tools produced a contradictory invocation: an explicit full-Bash
+    # caller (the documented `python -m pantheon.providers run` shim, or any standalone
+    # provider_run) passed `Read,Grep,Glob,Bash` and still had git/pwd/cat refused out from under
+    # it, because the deny side defaulted to readonly regardless. A caller who states its own tool
+    # policy owns BOTH halves of it; only a caller that took the allowed_tools default — i.e. one
+    # that expressed no policy at all — gets the readonly deny list inferred to match.
+    if disallowed_tools is not None:
+        deny_tools = disallowed_tools
+    elif allowed_tools:
+        deny_tools = ""
+    else:
+        deny_tools = default_disallowed_tools()
     argv = [claude_bin, "-p", prompt, "--allowedTools", tools]
     if deny_tools:
         argv += ["--disallowedTools", deny_tools]
