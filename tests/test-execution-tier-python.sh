@@ -88,6 +88,54 @@ else
   fail "allowed_tools_for trusted: unexpected value '$trusted_tools'"
 fi
 
+# --- deny list: the built-in read commands that bypass the wrapper entirely ---
+deny_readonly="$(pycall "execution.disallowed_tools_for('readonly')")"
+
+# Every documented built-in must appear in BOTH forms. The prefix form enforces a word
+# boundary; the exact form covers the bare, zero-argument invocation, which is precisely
+# what the built-in auto-approve set covers and therefore what this list exists to deny.
+missing=""
+for cmd in ls cat echo pwd head tail grep find wc which diff stat du cd git; do
+  [[ "$deny_readonly" == *"Bash($cmd)"* ]]   || missing="$missing $cmd(exact)"
+  [[ "$deny_readonly" == *"Bash($cmd *)"* ]] || missing="$missing $cmd(prefix)"
+done
+if [[ -z "$missing" ]]; then
+  pass "disallowed_tools_for readonly: every built-in bypass command denied in exact AND prefix form"
+else
+  fail "disallowed_tools_for readonly: missing deny entries:$missing"
+fi
+
+# THE critical property: deny beats allow in Claude Code's precedence, so a deny entry that
+# shadowed the wrapper's own allow entry would silently disable the gate's only sanctioned
+# path to the diff — the exact way this hardening could break the thing it protects.
+wrapper_shadowed=""
+while IFS= read -r entry; do
+  [[ -z "$entry" ]] && continue
+  prefix="${entry#Bash(}"; prefix="${prefix%)}"; prefix="${prefix% \*}"
+  case "$WRAPPER_PATH" in
+    "$prefix"|"$prefix "*) wrapper_shadowed="$entry" ;;
+  esac
+done <<<"$(tr ',' '\n' <<<"$deny_readonly")"
+if [[ -z "$wrapper_shadowed" ]]; then
+  pass "disallowed_tools_for readonly: no deny entry shadows the wrapper's own allow entry"
+else
+  fail "disallowed_tools_for readonly: '$wrapper_shadowed' shadows the wrapper path — deny beats allow, the gate would lose its only sanctioned git path"
+fi
+
+deny_trusted="$(pycall "execution.disallowed_tools_for('trusted')")"
+if [[ -z "$deny_trusted" ]]; then
+  pass "disallowed_tools_for trusted: empty — full Bash is that tier's documented, explicit opt-in"
+else
+  fail "disallowed_tools_for trusted: expected empty, got '$deny_trusted'"
+fi
+
+deny_fallback="$(pycall "execution.disallowed_tools_for('bogus-tier')")"
+if [[ "$deny_fallback" == "$deny_readonly" ]]; then
+  pass "disallowed_tools_for <unrecognized>: fails safe to the readonly deny list, not open"
+else
+  fail "disallowed_tools_for <unrecognized>: did not fail safe to readonly"
+fi
+
 fallback_tools="$(pycall "execution.allowed_tools_for('bogus-tier', '$WRAPPER_PATH')")"
 if [[ "$fallback_tools" == "$readonly_tools" ]]; then
   pass "allowed_tools_for <unrecognized>: fails safe to the readonly value, not open"
