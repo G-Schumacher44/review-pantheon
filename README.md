@@ -137,22 +137,24 @@ pressure-tests the plan before it's built.
 ---
 
 <a name="on-generative-ai-use"></a>
-**On generative AI use.** review-pantheon is a public rebuild of a private review system the
-author already runs — ported and re-implemented from scratch for open distribution (no code
-copied over), with `DESIGN.md` as the rebuild's binding contract. Claude-based agents did the
-rebuild work, with the author directing as coordinator — where a commit message says "the
-coordinator", that's the human in the loop. The gate could not review this repo until it existed: of the first 44 commits, 23
-went straight to `dev` with no pull request, and 14 of those touch code — including the original
-CLI, the Action, the installer, and `bootstrap.sh`. Since branch protection landed (2026-07-31),
-almost every change has gone through the gate: Artemis and Apollo on a pull request, fail-closed.
-One admin-bypass direct push has landed since (`1148e19`, a `.gitignore` hardening commit — its
-content was re-landed through the gate in #63/#64) — CONTRIBUTING.md's "Ground rules" section
-discloses the emergency-hatch bypass this used. The history shows which is which.
+**On generative AI use.** Claude agents built this repo — a from-scratch public rebuild of a
+private review system the author runs, no code copied over, with `DESIGN.md` as the binding
+contract and a human coordinator directing the work.
 
-The vulnerable `${{ }}`-interpolation pattern that let PR content reach a shell string directly
-has been present since `action/review.yml` was first added (`a94821c`), carried forward through
-`88e0b01`'s restructure — found and fixed by this repo's own twin gate in `4b35500`, once there
-was a gate to find it. Human-directed, spec-driven, self-gated, and late to gate itself.
+It couldn't gate itself into existence: of the first 44 commits, half went straight to `dev`,
+because there was no gate yet to stop them — the original CLI, the Action, and the installers
+among them. Branch protection landed 2026-07-31; since then everything goes through the gate
+on a pull request, fail-closed — Artemis on every diff, Apollo wherever there's a claim of
+work to verify (docs-only changes skip him, loudly) — with one disclosed exception that used
+the admin hatch and was re-landed through the gate after (CONTRIBUTING.md's "Ground rules"
+covers the hatch).
+The history shows which is which — that's the point of keeping it.
+
+Fittingly, one of the gate's first real catches was in this repo's own pre-gate code: PR text
+could reach a shell string in a vendored CI workflow — the classic Actions injection. It was
+caught and closed while the repo was still private, days before the first public release, and
+the published action itself never carried it. Built by AI, directed by a human, gated by
+itself — and honest about the order those happened in.
 
 ## License
 
