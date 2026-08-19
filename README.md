@@ -143,9 +143,11 @@ contract and a human coordinator directing the work.
 
 It couldn't gate itself into existence: of the first 44 commits, half went straight to `dev`,
 because there was no gate yet to stop them — the original CLI, the Action, and the installers
-among them. Branch protection landed 2026-07-31; since then everything goes through Artemis and
-Apollo on a pull request, fail-closed, with one disclosed exception that used the admin hatch
-and was re-landed through the gate after (CONTRIBUTING.md's "Ground rules" covers the hatch).
+among them. Branch protection landed 2026-07-31; since then everything goes through the gate
+on a pull request, fail-closed — Artemis on every diff, Apollo wherever there's a claim of
+work to verify (docs-only changes skip him, loudly) — with one disclosed exception that used
+the admin hatch and was re-landed through the gate after (CONTRIBUTING.md's "Ground rules"
+covers the hatch).
 The history shows which is which — that's the point of keeping it.
 
 Fittingly, one of the gate's first real catches was in this repo's own pre-gate code: PR text
