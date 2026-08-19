@@ -571,15 +571,16 @@ def disallowed_tools_for(tier: str) -> str:
     closes a real gap the wrapper's argv validation alone does not."""
     if tier == "trusted":
         return ""
-    # BOTH forms per command, deliberately. The prefix form ``Bash(cmd *)`` enforces a word
-    # boundary (it matches "ls -la" but not "lsof"), and Claude Code's docs do not work the
-    # zero-argument case explicitly — yet a BARE, unflagged invocation is precisely what the
-    # built-in auto-approve set covers and therefore precisely what this list exists to deny.
-    # Emitting the exact-match form ``Bash(cmd)`` alongside it closes that case without relying
-    # on an unverified reading of the wildcard's end-of-string behavior.
-    return ",".join(
-        entry for command in DENIED_BUILTIN_BASH_COMMANDS for entry in (f"Bash({command})", f"Bash({command} *)")
-    )
+    # The prefix form alone, VERIFIED EMPIRICALLY rather than read off the docs. An earlier
+    # draft emitted an exact-match ``Bash(cmd)`` entry beside each prefix entry, hedging against
+    # the docs not working the zero-argument case explicitly — the case that matters most here,
+    # since a bare unflagged invocation is exactly what the built-in auto-approve set covers.
+    # A live probe settled it, with a negative control:
+    #   claude -p "run: pwd" --permission-mode dontAsk  (no deny rule)  -> pwd RUNS
+    #   ... --disallowedTools "Bash(pwd *)"                             -> REFUSED
+    # so the trailing-wildcard form already matches the bare command. The exact-match half was
+    # dead weight; a disproven hedge left in place is worse than one never written.
+    return ",".join(f"Bash({command} *)" for command in DENIED_BUILTIN_BASH_COMMANDS)
 
 
 def validate_execution(value: str) -> bool:

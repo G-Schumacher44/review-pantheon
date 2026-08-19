@@ -91,18 +91,24 @@ fi
 # --- deny list: the built-in read commands that bypass the wrapper entirely ---
 deny_readonly="$(pycall "execution.disallowed_tools_for('readonly')")"
 
-# Every documented built-in must appear in BOTH forms. The prefix form enforces a word
-# boundary; the exact form covers the bare, zero-argument invocation, which is precisely
-# what the built-in auto-approve set covers and therefore what this list exists to deny.
+# Every documented built-in must be denied. The trailing-wildcard form is sufficient on its
+# own: a live probe (with a no-deny-rule control proving bare `pwd` otherwise runs) confirmed
+# `Bash(pwd *)` refuses the bare zero-argument invocation, so the exact-match form an earlier
+# draft also emitted was dead weight. See disallowed_tools_for()'s comment for the probe.
 missing=""
 for cmd in ls cat echo pwd head tail grep find wc which diff stat du cd git; do
-  [[ "$deny_readonly" == *"Bash($cmd)"* ]]   || missing="$missing $cmd(exact)"
-  [[ "$deny_readonly" == *"Bash($cmd *)"* ]] || missing="$missing $cmd(prefix)"
+  [[ "$deny_readonly" == *"Bash($cmd *)"* ]] || missing="$missing $cmd"
 done
 if [[ -z "$missing" ]]; then
-  pass "disallowed_tools_for readonly: every built-in bypass command denied in exact AND prefix form"
+  pass "disallowed_tools_for readonly: every built-in bypass command denied"
 else
   fail "disallowed_tools_for readonly: missing deny entries:$missing"
+fi
+
+if [[ "$deny_readonly" != *"Bash(ls),"* ]]; then
+  pass "disallowed_tools_for readonly: no redundant exact-match entries (prefix form covers bare)"
+else
+  fail "disallowed_tools_for readonly: exact-match entries returned — the probe showed they are redundant"
 fi
 
 # THE critical property: deny beats allow in Claude Code's precedence, so a deny entry that
