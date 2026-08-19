@@ -123,6 +123,140 @@ def test_machine_tail_text_is_a_noop_when_repo_root_is_none() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Credential redaction — literal-value pass
+# ---------------------------------------------------------------------------
+
+# Obviously-fake filler, never a real credential shape/value — used everywhere below a test needs
+# a stand-in for "some long opaque secret string."
+_FAKE_TOKEN_VALUE = "not-a-real-secret-0123456789abcdef"
+
+
+def test_redact_credentials_redacts_a_literal_env_value(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", _FAKE_TOKEN_VALUE)
+    text = "leaked in a finding: " + _FAKE_TOKEN_VALUE + " end"
+    result = render._redact_credentials(text)
+    assert _FAKE_TOKEN_VALUE not in result
+    assert "<redacted-credential>" in result
+
+
+def test_redact_credentials_covers_every_documented_credential_env_key(monkeypatch) -> None:
+    for key in render._CREDENTIAL_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    for key in render._CREDENTIAL_ENV_KEYS:
+        monkeypatch.setenv(key, _FAKE_TOKEN_VALUE + key)
+    for key in render._CREDENTIAL_ENV_KEYS:
+        result = render._redact_credentials("value for " + key + ": " + _FAKE_TOKEN_VALUE + key)
+        assert _FAKE_TOKEN_VALUE + key not in result, f"{key} was not redacted"
+
+
+def test_redact_credentials_skips_an_unset_env_var_silently(monkeypatch) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    text = "nothing secret here, and definitely not " + _FAKE_TOKEN_VALUE
+    # The unset var must never crash and must never redact unrelated text.
+    result = render._redact_credentials(text)
+    assert result == text
+
+
+def test_redact_credentials_skips_an_empty_env_value(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "")
+    text = "an ordinary sentence that must not be corrupted by an empty redaction target."
+    assert render._redact_credentials(text) == text
+
+
+def test_redact_credentials_skips_a_too_short_env_value(monkeypatch) -> None:
+    short_value = "abc123"  # well under _MIN_CREDENTIAL_LITERAL_LEN
+    assert len(short_value) < render._MIN_CREDENTIAL_LITERAL_LEN
+    monkeypatch.setenv("GITHUB_TOKEN", short_value)
+    text = "this prose happens to contain abc123 as an ordinary substring, not a secret."
+    assert render._redact_credentials(text) == text
+
+
+# ---------------------------------------------------------------------------
+# Credential redaction — shape-based pass
+# ---------------------------------------------------------------------------
+
+
+def test_redact_credentials_matches_a_github_token_shape_with_no_matching_env_var(monkeypatch) -> None:
+    for key in render._CREDENTIAL_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    fake_ghp = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+    text = "a token leaked from PR content: " + fake_ghp
+    result = render._redact_credentials(text)
+    assert fake_ghp not in result
+    assert "<redacted-credential>" in result
+
+
+def test_redact_credentials_matches_every_github_prefix_and_the_fine_grained_pat(monkeypatch) -> None:
+    for key in render._CREDENTIAL_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    filler = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+    for prefix in ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"):
+        fake = prefix + filler
+        result = render._redact_credentials("token: " + fake)
+        assert fake not in result, f"{prefix} shape was not redacted"
+
+
+def test_redact_credentials_matches_an_anthropic_key_shape_with_no_matching_env_var(monkeypatch) -> None:
+    for key in render._CREDENTIAL_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    fake_key = "sk-ant-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+    text = "leaked: " + fake_key
+    result = render._redact_credentials(text)
+    assert fake_key not in result
+    assert "<redacted-credential>" in result
+
+
+def test_redact_credentials_does_not_flag_a_short_unrelated_gh_prefixed_word(monkeypatch) -> None:
+    for key in render._CREDENTIAL_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    text = "ghost_of_a_variable_name and ghp_short are not credential leaks"
+    result = render._redact_credentials(text)
+    # "ghost_..." doesn't match the gh[psour]_ prefix set at all; "ghp_short" is under the
+    # 20-char trailing-length floor -- neither should be touched.
+    assert result == text
+
+
+# ---------------------------------------------------------------------------
+# Credential redaction, through the redact_paths chokepoint and the machine tail
+# ---------------------------------------------------------------------------
+
+
+def test_redact_paths_redacts_credentials_even_when_repo_root_is_none(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", _FAKE_TOKEN_VALUE)
+    text = "credential in text with no repo_root configured: " + _FAKE_TOKEN_VALUE
+    result = render.redact_paths(text, None)
+    assert _FAKE_TOKEN_VALUE not in result
+    assert "<redacted-credential>" in result
+
+
+def test_redact_paths_redacts_both_credentials_and_paths_in_one_call(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", _FAKE_TOKEN_VALUE)
+    root = "/Users/alice/dev/review-pantheon"
+    text = "token " + _FAKE_TOKEN_VALUE + " leaked from " + root + "/src/gate.sh"
+    result = render.redact_paths(text, root)
+    assert _FAKE_TOKEN_VALUE not in result
+    assert root not in result
+    assert "<redacted-credential>" in result
+    assert "<repo>/src/gate.sh" in result
+
+
+def test_machine_tail_text_redacts_a_credential_in_the_parsed_json_success_path(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", _FAKE_TOKEN_VALUE)
+    raw_text = '{"issue": "leaked token ' + _FAKE_TOKEN_VALUE + '"}'
+    result = render._machine_tail_text(raw_text, None)
+    assert _FAKE_TOKEN_VALUE not in result
+    assert "<redacted-credential>" in result
+
+
+def test_machine_tail_text_redacts_a_credential_in_the_raw_text_fallback_path(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", _FAKE_TOKEN_VALUE)
+    raw_text = 'not valid json overall: {"issue": "leaked ' + _FAKE_TOKEN_VALUE + '", truncated'
+    result = render._machine_tail_text(raw_text, None)
+    assert _FAKE_TOKEN_VALUE not in result
+    assert "<redacted-credential>" in result
+
+
+# ---------------------------------------------------------------------------
 # Mechanical enumeration test — the one-chokepoint contract
 # ---------------------------------------------------------------------------
 
@@ -277,4 +411,47 @@ def test_redact_paths_is_the_only_redaction_chokepoint_in_this_module() -> None:
         "either route this through sanitize_inline(...)/redact_paths(...), or add the new "
         "identifier to _KNOWN_SAFE_BARE_IDENTIFIERS above WITH a justification for why it's safe "
         "by construction:\n" + "\n".join(f"  - {v}" for v in violations)
+    )
+
+    # (d) Exactly one function is named _redact_credentials -- the companion primitive
+    # redact_paths itself calls (mirrors check (a) for the path-redaction primitive).
+    credential_def_hits = re.findall(r"^def _redact_credentials\(", src, re.MULTILINE)
+    assert len(credential_def_hits) == 1, (
+        f"expected exactly one `def _redact_credentials(`, found {len(credential_def_hits)}"
+    )
+
+    # (e) _redact_credentials is referenced exactly twice in the whole module: its own `def` line,
+    # and the one call inside redact_paths's body. A THIRD occurrence would mean some other
+    # function (sanitize_inline, _machine_tail_text, or a brand new call site) is calling it
+    # directly instead of going through redact_paths -- exactly the bypass-the-chokepoint failure
+    # mode this whole test class exists to catch, just for the credential primitive instead of the
+    # path one.
+    credential_call_hits = len(re.findall(r"_redact_credentials\(", src))
+    assert credential_call_hits == 2, (
+        f"expected `_redact_credentials(` to appear exactly twice in {RENDER_PY.name} (its `def` "
+        f"line and the one call inside redact_paths), found {credential_call_hits} -- a new call "
+        "site must not call _redact_credentials directly; route through redact_paths instead"
+    )
+
+    # (f) mirrors (b) for the credential placeholder: exactly one `.sub(...)` call whose arguments
+    # reference _REDACTED_CREDENTIAL -- the one inside _redact_credentials itself. A second such
+    # call site would be a credential-redaction bypass of the same shape (b) already guards
+    # against for paths.
+    sub_calls_with_credential_placeholder = 0
+    for i in sub_call_starts:
+        depth = 1
+        j = i
+        while depth > 0 and j < len(src):
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+            j += 1
+        if "_REDACTED_CREDENTIAL" in src[i:j]:
+            sub_calls_with_credential_placeholder += 1
+    assert sub_calls_with_credential_placeholder == 1, (
+        "expected exactly one `.sub(...)` call whose arguments reference _REDACTED_CREDENTIAL "
+        f"(inside _redact_credentials), found {sub_calls_with_credential_placeholder} -- a new "
+        "credential redaction call site must route through _redact_credentials, not reimplement "
+        "its own substitution"
     )

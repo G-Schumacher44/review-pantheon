@@ -188,3 +188,13 @@ surfaces this repo directly controls, independent of every layer above:
   second pin on top: the generated stub itself references `G-Schumacher44/review-pantheon` by a
   full commit SHA, not the floating `v1` tag Way C's stub uses — re-pinning either one is an
   explicit, auditable edit, not something that changes under a consumer on its own.
+- **A credential the reviewer model echoes back does not reach the posted comment verbatim or
+  shape-matched — but a transformed one can.** `anthropics/claude-code-action`'s own pinned source
+  hands the workflow token (and the rest of its process env, minus two OIDC vars) to the process
+  running the reviewer model; that model then reads the untrusted PR content this gate exists to
+  review. `pantheon.render`'s redaction chokepoint strips any literal credential value this
+  process's own env holds, and any known GitHub/Anthropic credential-shaped token, from every
+  field before the comment is posted — see DESIGN.md's "Security posture" section for the full
+  writeup. **This is not complete coverage:** a model that splits, encodes, or paraphrases a
+  credential before emitting it defeats both the literal-value and shape-based passes. Treat this
+  as narrowing the exposure window, not closing it.
