@@ -405,6 +405,50 @@ history, not here — a contract describes what's true now, not how it got that 
   (`github_token: ${{ inputs.github_token }}`), so consumers never need to grant
   `id-token: write` — that permission is only needed for claude-code-action's internal
   OIDC-token-exchange fallback, which it skips entirely once a `github_token` input is supplied.
+- **Credential redaction at render time — closes the render's own link in a three-link chain,
+  honestly, not completely.** `anthropics/claude-code-action`'s own pinned source copies its
+  entire `process.env` — the workflow token included — into the SDK options for the process that
+  runs the reviewer model (deleting only two OIDC-related vars first); the reviewer model then
+  reads untrusted PR content. Neither of those first two links is something this repo controls.
+  The third link — rendering that model's verdict fields into the PR comment we post — is: even
+  if a compromised reviewer emits a credential in a `file`/`issue`/`scenario`/`summary` field,
+  `pantheon.render.redact_paths` (the module's single redaction chokepoint, extended — see that
+  function's own docstring) strips it before the comment is ever posted, in both the
+  human-readable sections and the machine tail (the raw-JSON echo, this control's highest-risk
+  surface since it prints model output verbatim). Two passes: literal env-configured credential
+  VALUES the RENDERER's own process can see (`GITHUB_TOKEN`/`GH_TOKEN`/`GH_ENTERPRISE_TOKEN`,
+  `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, the AWS/OpenAI/Gemini/Google/Cursor keys — every
+  opaque-credential entry on `pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS`, plus
+  `GH_TOKEN`/`GITHUB_TOKEN`/`GH_ENTERPRISE_TOKEN` from `pantheon.cli`'s own git/gh allowlist — a
+  mechanical test, `test_every_credential_shaped_forwarded_env_key_is_redacted`, enforces that
+  every credential-shaped name on either real allowlist is on this redaction list too, so this
+  can't silently drift out of sync the way `GH_ENTERPRISE_TOKEN`'s own omission did — Codex P1,
+  PR #75), and known credential-SHAPED prefixes (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`,
+  `sk-ant-`) for a token this process's own env never held at all.
+
+  **This literal-value pass has an unstated precondition worth naming: it can only redact a value
+  present in the RENDERING process's OWN environment — nothing guarantees that's a superset of
+  what the REVIEWING process's environment held.** The published action's own composite-action
+  steps are a concrete instance: each `Run <agent>` step hands the reviewer model
+  `${{ inputs.github_token }}`, but the separate "Build and post combined comment" step that
+  renders and posts the result only received `${{ github.token }}` — identical under the default
+  setup, which is why this went unnoticed, but a consumer workflow that overrides the
+  `github_token` input (a GitHub App installation token, a PAT, a GHES token) hands the reviewer a
+  DIFFERENT token than the render step could see, and the shape-based pass doesn't cover every
+  legacy/GHES/App token format either. Fixed by forwarding the reviewer's own token into that
+  step's environment as a dedicated, REDACTION-ONLY variable
+  (`PANTHEON_REVIEWER_GITHUB_TOKEN` — see `action.yml`'s "Build and post combined comment" step
+  and `pantheon.render._CREDENTIAL_ENV_KEYS`'s own comment) purely so the literal pass can see it —
+  never used to authenticate anything itself (Codex P1, PR #75).
+
+  **The honest limit, restated precisely: literal redaction covers credential VALUES the
+  renderer's own process can see (now including the reviewer's actual token, forwarded
+  redaction-only, not just this repo's own git/gh credential); shape redaction covers
+  credential-SHAPED formats this module knows about. Neither pass can catch a credential the
+  model transforms** — split across characters, base64-encoded, paraphrased, or otherwise never
+  appearing verbatim/shape-matched in the rendered text. That's a real, disclosed gap, not a
+  claim of completeness; the mitigation this control provides is closing the links in the chain
+  that were ours to close, not eliminating the class.
 - **Tiered tool execution — read-only by default.** Every provider invocation's tool set is
   scoped by an `execution` setting: `readonly` (the default — `gate.conf`'s `execution=`, the
   CLI's `--execution` flag, or `action.yml`'s `execution` input) restricts Bash to exactly one

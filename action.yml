@@ -908,6 +908,24 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         GH_TOKEN: ${{ github.token }}
+        # REDACTION-ONLY — pantheon.render never uses this to authenticate anything; it exists
+        # solely so its literal-value credential pass (pantheon.render._redact_credentials) can
+        # SEE the token a reviewer step actually held. Every `Run <agent>` step above hands the
+        # reviewer model the `github_token` input (e.g. the "Run plato" step's own `with:` block,
+        # a few lines up), but THIS step only received
+        # `${{ github.token }}` as GH_TOKEN above — the two are the same value under the default
+        # setup, which is exactly why this was missed, but a consumer workflow that overrides the
+        # `github_token` input (a GitHub App installation token, a PAT, a GHES token) hands the
+        # reviewer a DIFFERENT token than this step could see, and a literal-value redaction pass
+        # can only ever redact a value that is present in ITS OWN process environment. This looks
+        # backwards at a glance — a secret deliberately injected into a step whose whole job is
+        # producing PUBLIC output — but it is the fix, not the hole: it is read exactly once, by
+        # the redaction pass, and is never itself written to the comment. Do not remove this
+        # thinking it is unused or redundant with GH_TOKEN above; removing it silently reopens the
+        # gap where an overridden reviewer token can never be literally redacted (Codex P1, PR
+        # #75) — see pantheon/render.py's _CREDENTIAL_ENV_KEYS comment on
+        # PANTHEON_REVIEWER_GITHUB_TOKEN for the redactor-side half of this fix.
+        PANTHEON_REVIEWER_GITHUB_TOKEN: ${{ inputs.github_token }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         POST_COMMENT: ${{ inputs.post_comment }}
         APOLLO_DOCS_SKIPPED: ${{ steps.docs-check.outputs.docs_only }}
