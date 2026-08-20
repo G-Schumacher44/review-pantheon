@@ -865,7 +865,7 @@ def _run_agent(
     allowed_tools: str,
     timeout: float,
     neutral_cwd: str,
-    disallowed_tools: str = "",
+    disallowed_tools: str,
 ) -> render.AgentRenderData:
     if agent == "apollo" and docs_only:
         _note("docs-only diff — skipping apollo loudly (nothing but docs changed).")

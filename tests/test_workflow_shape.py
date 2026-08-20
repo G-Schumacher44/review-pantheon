@@ -157,6 +157,33 @@ def test_action_tool_policy_is_asserted_for_both_tiers() -> None:
     )
 
 
+def test_combine_step_forwards_the_reviewer_github_token() -> None:
+    """The redaction pass can only redact a credential it can see in its OWN process env
+    (``pantheon.render._redact_credentials`` is a literal-value match, not magic). Every
+    ``Run <agent>`` step hands the reviewer model ``inputs.github_token`` via its own `with:`
+    block, but the "Build and post combined comment" step is a separate process that does not
+    inherit that value automatically — it must be forwarded explicitly as
+    ``PANTHEON_REVIEWER_GITHUB_TOKEN``, or a consumer who overrides ``github_token`` (a GitHub
+    App install token, a PAT, a GHES token) gets a comment that can never redact it, silently
+    reopening #75's Codex P1. Protected only by a comment until now; parsed and asserted here.
+    """
+    action = (ROOT / "action.yml").read_text(encoding="utf-8")
+    steps = re.split(r"^\s+-\s+(?=uses:|name:)", action, flags=re.M)
+    combine_steps = [st for st in steps if re.search(r"^\s*name:\s*Build and post combined comment\s*$", st, re.M)]
+    assert len(combine_steps) == 1, (
+        f"action.yml: expected exactly one 'Build and post combined comment' step, found {len(combine_steps)}"
+    )
+    assert re.search(
+        r"^\s*PANTHEON_REVIEWER_GITHUB_TOKEN:\s*\$\{\{\s*inputs\.github_token\s*\}\}\s*$",
+        combine_steps[0],
+        re.M,
+    ), (
+        "action.yml: the combine step's env block does not forward "
+        "PANTHEON_REVIEWER_GITHUB_TOKEN: ${{ inputs.github_token }} — the redaction pass would "
+        "have no reviewer token to redact against for a consumer that overrides github_token"
+    )
+
+
 def test_upstream_action_is_sha_pinned() -> None:
     """A moving tag can change what code runs without any change landing here.
 
