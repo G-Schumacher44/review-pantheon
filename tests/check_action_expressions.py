@@ -56,6 +56,165 @@ DQ_LITERAL = re.compile(r'"[^"]*"')
 SAFE_RUN_CONTEXTS = re.compile(r"^\s*(matrix\.[A-Za-z0-9_]+|runner\.[A-Za-z0-9_]+)\s*$")
 
 
+# ------------------------------------------------------------------------------------------------
+# check_env_bindings' variable-reference scanner — a small bash-aware tokenizer, not a plain regex
+# grep, because the naive `\$\w+` approach both under- and over-counts: it would flag a `$1` inside
+# a single-quoted awk program (bash never expands it — the awk *subprocess* reads it literally) and
+# miss nothing that matters, so accuracy here means tracking exactly the three things that change
+# whether bash itself would perform the expansion: single-quote state (suppresses ALL expansion),
+# backslash escapes (a literal '$', never an expansion), and heredoc bodies (expand only when the
+# delimiter word is completely unquoted — see bash's own documented rule).
+# ------------------------------------------------------------------------------------------------
+
+# One "variable token" as it can appear right after a bare `$` or inside `${...}`: a normal
+# identifier, a run of digits (bash positional params $1/$2/... — and, not coincidentally, exactly
+# the shape of an awk/perl field reference like $1, so the digit rule handles both without needing
+# to know which program is being invoked), or a single shell special-parameter character.
+_VAR_TOKEN = r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?#@*!$-]"
+_BRACE_VAR = re.compile(r"\$\{(" + _VAR_TOKEN + r")")
+_BARE_VAR = re.compile(r"\$(" + _VAR_TOKEN + r")")
+# A heredoc redirect: `<<`, an optional `-` (strip leading tabs), then the delimiter word, which
+# may be bare, single-quoted, or double-quoted. Per bash's rule, the body is expanded ONLY when the
+# delimiter is entirely unquoted (group 4) — a single- or double-quoted delimiter (groups 2/3)
+# turns the whole body into literal text, same as a single-quoted string.
+_HEREDOC_OPEN = re.compile(r"<<(-)?[ \t]*(?:'(\w+)'|\"(\w+)\"|(\w+))")
+
+# Shell builtins/positional/specials that are never bound via a step's own `env:` — the shell (or
+# the invoked awk/perl program, for the digit case) supplies them directly.
+_SHELL_BUILTIN_VARS = frozenset(
+    {"HOME", "PATH", "PWD", "OLDPWD", "TMPDIR", "RANDOM", "IFS", "SHLVL", "SECONDS", "LINENO", "PPID", "UID", "EUID"}
+)
+_SHELL_SPECIAL_CHARS = frozenset({"?", "#", "@", "*", "$", "!", "-"})
+# Runner-provided context: every `GITHUB_*`/`RUNNER_*` env var (GITHUB_OUTPUT, GITHUB_STEP_SUMMARY,
+# GITHUB_WORKSPACE, RUNNER_TEMP, ...) is set by the Actions runner on every step unconditionally,
+# and `CI` is the one bare runner-provided name outside that prefix scheme.
+_RUNNER_PREFIXES = ("GITHUB_", "RUNNER_")
+_RUNNER_EXACT = frozenset({"CI"})
+
+
+def _var_permitted_unbound(var: str) -> bool:
+    if var.isdigit():
+        return True
+    if var in _SHELL_SPECIAL_CHARS or var in _SHELL_BUILTIN_VARS or var in _RUNNER_EXACT:
+        return True
+    return var.startswith(_RUNNER_PREFIXES)
+
+
+def _extract_var_reads(script: str) -> list[tuple[str, int]]:
+    """Every ``$VAR`` / ``${VAR...}`` bash would actually expand in ``script``, as (name, offset).
+
+    Deliberately NOT ``re.findall(r"\\$\\w+", script)`` — that would flag a `$1` inside a
+    single-quoted ``awk '{print $1}'`` (bash never touches it; the awk subprocess reads it as
+    literal text) and would miss nothing being read inside a heredoc whose delimiter IS unquoted
+    (where expansion genuinely happens). Tracking single-quote state, backslash escapes, and
+    heredoc-delimiter quoting is exactly the set of bash rules that decide whether a given ``$``
+    is a real expansion — nothing less finds every real read, nothing simpler avoids the two false
+    positives above.
+
+    Known, accepted imprecision: quote state is a single in/out toggle, not a per-``$( )``-subshell
+    stack, so a `"` that closes an OUTER string and one that opens a nested string inside a `$(...)`
+    on the same line can leave the tracked state one toggle "off" from bash's real nested-context
+    rules. This never suppresses a real finding here (single-quote detection, the only state that
+    gates expansion, still ends the line correctly balanced for every case in this repo's own
+    `action.yml`) and full subshell-aware parsing is the YAML-aware-walk this file's own module
+    docstring already declines to become.
+    """
+    names: list[tuple[str, int]] = []
+    i = 0
+    n = len(script)
+    in_single = False
+    in_double = False
+    heredoc_delim: str | None = None
+    heredoc_expand = True
+    heredoc_strip_tabs = False
+    pending_heredoc: tuple[str, bool, bool] | None = None
+
+    while i < n:
+        if heredoc_delim is not None:
+            line_end = script.find("\n", i)
+            if line_end == -1:
+                line_end = n
+            line = script[i:line_end]
+            check = line.lstrip("\t") if heredoc_strip_tabs else line
+            if check == heredoc_delim:
+                heredoc_delim = None
+            elif heredoc_expand:
+                for m in re.finditer(r"\\?\$(?:\{(" + _VAR_TOKEN + r")|(" + _VAR_TOKEN + r"))", line):
+                    if m.group(0).startswith("\\"):
+                        continue
+                    names.append((m.group(1) or m.group(2), i + m.start()))
+            i = line_end + 1
+            continue
+
+        ch = script[i]
+
+        if ch == "\n":
+            i += 1
+            if pending_heredoc is not None:
+                heredoc_delim, heredoc_expand, heredoc_strip_tabs = pending_heredoc
+                pending_heredoc = None
+            continue
+
+        if ch == "\\" and not in_single:
+            i += 2
+            continue
+
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            i += 1
+            continue
+
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+            continue
+
+        if ch == "#" and not in_single and not in_double and (i == 0 or script[i - 1] in " \t\n;(){}|&"):
+            nl = script.find("\n", i)
+            i = nl if nl != -1 else n
+            continue
+
+        if ch == "<" and not in_single and not in_double and script[i : i + 2] == "<<" and script[i : i + 3] != "<<<":
+            m = _HEREDOC_OPEN.match(script, i)
+            if m:
+                dash, sq, dq, bare = m.groups()
+                delim = sq or dq or bare
+                pending_heredoc = (delim, bare is not None, dash == "-")
+                i = m.end()
+                continue
+
+        if ch == "$" and not in_single:
+            m = _BRACE_VAR.match(script, i)
+            if not m:
+                m = _BARE_VAR.match(script, i)
+            if m:
+                names.append((m.group(1), i))
+                i = m.end()
+                continue
+            i += 1
+            continue
+
+        i += 1
+
+    return names
+
+
+def _step_local_definitions(block: str) -> set[str]:
+    """Names this step's OWN script assigns before reading — a self-defined value needs no `env:`
+    binding, same exemption the original two-var check already made for ACTION_PATH/PERSONAS_DIR
+    (e.g. the "Resolve gate configuration" step computes `GIT_WRAPPER=...` itself), generalized to
+    cover every assignment shape actually used in this repo's `action.yml`: plain `VAR=`,
+    `export`/`local`/`declare VAR=`, a `for VAR in` loop variable, and a `read ... VAR` target.
+    """
+    defined: set[str] = set()
+    for m in re.finditer(r"^\s*(?:export\s+|local\s+|declare\s+)?([A-Za-z_][A-Za-z0-9_]*)=", block, re.M):
+        defined.add(m.group(1))
+    for m in re.finditer(r"^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b", block, re.M):
+        defined.add(m.group(1))
+    for m in re.finditer(r"\bread\b(?:\s+-[A-Za-z]+)*\s+([A-Za-z_][A-Za-z0-9_ ]*)", block):
+        defined.update(m.group(1).split())
+    return defined
+
 
 def _run_block_spans(text: str) -> list[tuple[int, int]]:
     """Byte spans of every ``run:`` block's script body.
@@ -214,6 +373,18 @@ def check_env_bindings(path: Path) -> list[str]:
     — an absolute path at the filesystem root. `set -u` does not save you: the var is *defined* as
     empty by the runner, not unset.
 
+    DERIVED, not hand-restated (issue #78): earlier versions of this function validated a
+    hardcoded 2-tuple (``ACTION_PATH``, ``PERSONAS_DIR``) while ``action.yml`` binds dozens of
+    distinct action-context vars across its steps — every var outside that pair was silently
+    unchecked, mutation-proved by deleting a real binding (``HEAD_SHA`` on the "Validate PR
+    base/head SHAs" step) and observing the guard stay clean. This version scans every step's OWN
+    ``run:`` script (via :func:`_extract_var_reads`, not a bare ``\\$\\w+`` grep — see that
+    function's docstring for why) for every var it actually reads, and requires each one to be
+    either permitted unbound (:func:`_var_permitted_unbound` — shell builtins/specials and
+    ``GITHUB_*``/``RUNNER_*``/``CI``), locally defined by that same script
+    (:func:`_step_local_definitions`), or bound in that step's own ``env:``. Anything else is a
+    finding — default-deny, not an allowlist of the names someone thought to check.
+
     Checked per STEP, not per file: a sibling step having the binding proves nothing about this one.
     """
     text = path.read_text(encoding="utf-8")
@@ -221,27 +392,53 @@ def check_env_bindings(path: Path) -> list[str]:
     lines = text.split("\n")
     findings: list[str] = []
 
+    offsets: list[int] = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+
     # Step boundaries: a `- name:` at any indentation (composite steps and workflow steps differ).
     starts = [i for i, ln in enumerate(lines) if re.match(r"^\s*- name:", ln)]
     starts.append(len(lines))
 
+    run_spans = _run_block_spans(text)
+
     for k in range(len(starts) - 1):
+        step_start_offset = offsets[starts[k]]
+        step_end_offset = offsets[starts[k + 1]] if starts[k + 1] < len(offsets) else len(text)
         block = "\n".join(lines[starts[k] : starts[k + 1]])
         if "run:" not in block:
             continue
-        for var in ("ACTION_PATH", "PERSONAS_DIR"):
-            uses = re.search(rf"\${var}\b|\$\{{{var}\}}", block)
-            if not uses:
+
+        reads: list[tuple[str, int]] = []
+        for rs, re_ in run_spans:
+            if step_start_offset <= rs < step_end_offset:
+                # _extract_var_reads' offsets are relative to the text[rs:re_] SUBSTRING it was
+                # given — translate back to whole-file offsets before any _line_of(text, ...) call.
+                reads.extend((var, rs + local_offset) for var, local_offset in _extract_var_reads(text[rs:re_]))
+        if not reads:
+            continue
+
+        local_defs = _step_local_definitions(block)
+        seen: dict[str, int] = {}
+        for var, offset in reads:
+            if var not in seen:
+                seen[var] = offset
+
+        for var, offset in seen.items():
+            if _var_permitted_unbound(var):
                 continue
-            # The step that DEFINES the value (assigns it in its own script) needs no binding.
-            if re.search(rf"^\s*{var}=", block, re.M):
+            if var in local_defs:
                 continue
-            if not re.search(rf"^\s+{var}:\s", block, re.M):
-                findings.append(
-                    f"{rel}:{starts[k] + 1}: step reads ${var} but does not bind it in its own "
-                    f"env: — it expands to the EMPTY STRING at run time, silently rewriting every "
-                    f'"${var}/..." path to the filesystem root'
-                )
+            if re.search(rf"^\s+{re.escape(var)}:\s", block, re.M):
+                continue
+            findings.append(
+                f"{rel}:{_line_of(text, offset)}: step reads ${var} but does not bind it in its own "
+                f"env: (and it is not a shell builtin/special, a GITHUB_*/RUNNER_*/CI runner var, "
+                f"or locally assigned in this step's own script) — it expands to the EMPTY STRING "
+                f'at run time, silently rewriting every "${var}/..." path to the filesystem root'
+            )
     return findings
 
 

@@ -95,10 +95,15 @@ deny_readonly="$(pycall "execution.disallowed_tools_for('readonly')")"
 # own: a live probe (with a no-deny-rule control proving bare `pwd` otherwise runs) confirmed
 # `Bash(pwd *)` refuses the bare zero-argument invocation, so the exact-match form an earlier
 # draft also emitted was dead weight. See disallowed_tools_for()'s comment for the probe.
+# The command list itself is pulled from the live DENIED_BUILTIN_BASH_COMMANDS constant, not
+# hand-copied here — a hand-copy is exactly the drift class issue #78 closed (the same list was
+# independently hand-restated a third time in SECURITY.md; see test_security_md_denied_commands.py).
+denied_commands="$(pycall "'\n'.join(execution.DENIED_BUILTIN_BASH_COMMANDS)")"
 missing=""
-for cmd in ls cat echo pwd head tail grep find wc which diff stat du cd git; do
+while IFS= read -r cmd; do
+  [[ -z "$cmd" ]] && continue
   [[ "$deny_readonly" == *"Bash($cmd *)"* ]] || missing="$missing $cmd"
-done
+done <<<"$denied_commands"
 if [[ -z "$missing" ]]; then
   pass "disallowed_tools_for readonly: every built-in bypass command denied"
 else

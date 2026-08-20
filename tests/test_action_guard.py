@@ -166,6 +166,113 @@ def test_allows_a_step_that_binds_what_it_reads(tmp_path: Path) -> None:
     assert guard.check_env_bindings(path) == []
 
 
+def test_flags_a_step_reading_an_unbound_var_with_no_hardcoded_name(tmp_path: Path) -> None:
+    """Derived, not a hand-restated allowlist (issue #78): a var this suite never names must
+    still be caught, since a hardcoded name tuple is exactly the drift class that let 57 of
+    action.yml's 59 bound vars go unchecked."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: echo "$TOTALLY_UNRELATED_VAR"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("TOTALLY_UNRELATED_VAR" in f for f in findings), findings
+
+
+def test_allows_shell_builtin_and_positional_vars_unbound(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        '          echo "$HOME $PATH $PWD $TMPDIR $RANDOM $1 $2 $? $@ $#"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_allows_runner_provided_vars_unbound(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        '          echo "x" >> "$GITHUB_OUTPUT"\n'
+        '          echo "$RUNNER_TEMP $CI"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_allows_a_var_the_script_assigns_itself(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          LOCAL_VAR=hello\n"
+        '          echo "$LOCAL_VAR"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_allows_a_for_loop_variable(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          for item in a b c; do\n"
+        '            echo "$item"\n'
+        "          done\n",
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_allows_a_read_loop_variable(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        '          while IFS= read -r line; do echo "$line"; done <<< "$x"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert not any("$line" in f for f in findings), findings
+
+
+def test_does_not_flag_a_var_inside_a_single_quoted_heredoc(tmp_path: Path) -> None:
+    """A single-quoted heredoc delimiter (``<<'EOF'``) disables ALL expansion in its body — bash
+    never touches ``$UNBOUND`` there, so it must not be treated as a read requiring a binding."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<'EOF'\n"
+        "          this is $UNBOUND_IN_HEREDOC literal text\n"
+        "          EOF\n",
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_flags_a_var_inside_an_unquoted_heredoc(tmp_path: Path) -> None:
+    """The counterpart: an UNQUOTED heredoc delimiter (``<<EOF``) DOES expand its body, so a read
+    there is real and must still require a binding."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<EOF\n"
+        "          this is $UNBOUND_IN_HEREDOC expanded\n"
+        "          EOF\n",
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("UNBOUND_IN_HEREDOC" in f for f in findings), findings
+
+
+def test_does_not_flag_an_escaped_dollar(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: echo "price is \\$UNBOUND_VAR"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_does_not_flag_an_awk_field_reference_in_a_single_quoted_program(tmp_path: Path) -> None:
+    """``awk '{print $1}'`` — bash never expands ``$1`` inside the single-quoted awk program; it
+    is a field reference the awk subprocess reads literally, not a bash variable read."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n          echo \"a b\" | awk '{print $1, $2}'\n",
+    )
+    assert guard.check_env_bindings(path) == []
+
+
 # --------------------------------------------------------------------------------------------
 # The live surfaces must actually be clean — this is the assertion CI depends on.
 # --------------------------------------------------------------------------------------------
