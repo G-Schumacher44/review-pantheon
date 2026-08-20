@@ -58,7 +58,7 @@ fork PR is the same fail-closed verdict handling every lane gets, not a tool-cal
 
 Claude Code auto-approves a built-in set of read commands *before* `--allowedTools` is consulted,
 in every permission mode. That set is larger than this section used to claim: it is not only bare
-read-only `git` forms but `ls`, `cat`, `echo`, `pwd`, `head`, `tail`, `grep`, `find`, `wc`, `sed`,
+read-only `git` forms but `ls`, `cat`, `echo`, `pwd`, `head`, `tail`, `grep`, `find`, `wc`,
 `which`, `diff`, `stat`, `du`, and `cd`. Under `readonly` that was a second path to the checkout
 that never reached the wrapper's argv validation.
 

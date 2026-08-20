@@ -99,15 +99,23 @@ deny_readonly="$(pycall "execution.disallowed_tools_for('readonly')")"
 # hand-copied here — a hand-copy is exactly the drift class issue #78 closed (the same list was
 # independently hand-restated a third time in SECURITY.md; see test_security_md_denied_commands.py).
 denied_commands="$(pycall "'\n'.join(execution.DENIED_BUILTIN_BASH_COMMANDS)")"
-missing=""
-while IFS= read -r cmd; do
-  [[ -z "$cmd" ]] && continue
-  [[ "$deny_readonly" == *"Bash($cmd *)"* ]] || missing="$missing $cmd"
-done <<<"$denied_commands"
-if [[ -z "$missing" ]]; then
-  pass "disallowed_tools_for readonly: every built-in bypass command denied"
+# A pycall failure (e.g. the constant renamed/removed) leaves $denied_commands empty via plain
+# command-substitution capture — set -o pipefail alone does not abort a bare assignment, so an
+# unguarded empty-string read loop below would silently iterate zero commands and report a false
+# PASS. Fail loud instead of trusting emptiness means "nothing to check."
+if [[ -z "$denied_commands" ]]; then
+  fail "disallowed_tools_for readonly: could not read DENIED_BUILTIN_BASH_COMMANDS from pantheon.execution (pycall produced no output — see stderr above for the real error)"
 else
-  fail "disallowed_tools_for readonly: missing deny entries:$missing"
+  missing=""
+  while IFS= read -r cmd; do
+    [[ -z "$cmd" ]] && continue
+    [[ "$deny_readonly" == *"Bash($cmd *)"* ]] || missing="$missing $cmd"
+  done <<<"$denied_commands"
+  if [[ -z "$missing" ]]; then
+    pass "disallowed_tools_for readonly: every built-in bypass command denied"
+  else
+    fail "disallowed_tools_for readonly: missing deny entries:$missing"
+  fi
 fi
 
 if [[ "$deny_readonly" != *"Bash(ls),"* ]]; then
