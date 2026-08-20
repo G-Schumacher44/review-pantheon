@@ -166,6 +166,219 @@ def test_allows_a_step_that_binds_what_it_reads(tmp_path: Path) -> None:
     assert guard.check_env_bindings(path) == []
 
 
+def test_flags_a_step_reading_an_unbound_var_with_no_hardcoded_name(tmp_path: Path) -> None:
+    """Derived, not a hand-restated allowlist (issue #78): a var this suite never names must
+    still be caught, since a hardcoded name tuple is exactly the drift class that let 57 of
+    action.yml's 59 bound vars go unchecked."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: echo "$TOTALLY_UNRELATED_VAR"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("TOTALLY_UNRELATED_VAR" in f for f in findings), findings
+
+
+def test_allows_shell_builtin_and_positional_vars_unbound(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        '          echo "$HOME $PATH $PWD $TMPDIR $RANDOM $1 $2 $? $@ $#"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_flags_a_length_of_expansion_on_an_unbound_var(tmp_path: Path) -> None:
+    """``${#UNBOUND}`` (length-of) is a PREFIX operator on UNBOUND, not a read of the permitted
+    special parameter ``#`` (argument count) — the brace matcher must record UNBOUND as the read,
+    not stop at the prefix and let the real variable go unchecked (Codex finding, PR #82 line 74)."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: echo "${#SOME_UNBOUND_VAR}"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("SOME_UNBOUND_VAR" in f for f in findings), findings
+
+
+def test_flags_an_indirect_expansion_on_an_unbound_var(tmp_path: Path) -> None:
+    """``${!UNBOUND}`` (indirection) is the same prefix-operator shape as ``${#UNBOUND}`` — same
+    fix, same finding."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: echo "${!SOME_UNBOUND_VAR}"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("SOME_UNBOUND_VAR" in f for f in findings), findings
+
+
+def test_allows_bare_arg_count_and_last_bg_pid_braced_forms(tmp_path: Path) -> None:
+    """``${#}`` (argument count) and ``${!}`` (last background PID) ARE the permitted special
+    parameters themselves, not a prefix on a missing variable — the optional-prefix regex must
+    backtrack to the bare-special reading when no variable-shaped token follows the prefix char."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n          echo "${#} ${!}"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_allows_runner_provided_vars_unbound(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        '          echo "x" >> "$GITHUB_OUTPUT"\n'
+        '          echo "$RUNNER_TEMP $CI"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_allows_a_var_the_script_assigns_itself(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          LOCAL_VAR=hello\n"
+        '          echo "$LOCAL_VAR"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_allows_a_for_loop_variable(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          for item in a b c; do\n"
+        '            echo "$item"\n'
+        "          done\n",
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_flags_unbound_github_token(tmp_path: Path) -> None:
+    """``GITHUB_TOKEN`` is NOT one of the runner's default env vars (unlike ``GITHUB_OUTPUT`` /
+    ``GITHUB_STEP_SUMMARY`` / etc.) — a step reading it must bind it explicitly via its own
+    ``env:``. A prior version of this guard wildcarded every ``GITHUB_*`` name as pre-bound,
+    which silently exempted exactly this case (Codex finding, PR #82)."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n          echo "token is $GITHUB_TOKEN"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("GITHUB_TOKEN" in f for f in findings), findings
+
+
+def test_does_not_flag_a_var_named_like_prose_containing_read(tmp_path: Path) -> None:
+    """An unanchored ``read`` regex would match the word "read" anywhere in a step's script —
+    including inside a comment or an echoed string — and misattribute whatever follows it as a
+    locally-defined variable, hiding a genuinely unbound var with that name (Artemis finding,
+    PR #82)."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          # this value is read exactly once, by ONCE\n"
+        '          echo "$ONCE"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("ONCE" in f for f in findings), findings
+
+
+def test_allows_a_read_loop_variable(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        '          while IFS= read -r line; do echo "$line"; done <<< "$x"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert not any("$line" in f for f in findings), findings
+
+
+def test_does_not_flag_a_var_inside_a_single_quoted_heredoc(tmp_path: Path) -> None:
+    """A single-quoted heredoc delimiter (``<<'EOF'``) disables ALL expansion in its body — bash
+    never touches ``$UNBOUND`` there, so it must not be treated as a read requiring a binding."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<'EOF'\n"
+        "          this is $UNBOUND_IN_HEREDOC literal text\n"
+        "          EOF\n",
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_flags_a_var_inside_an_unquoted_heredoc(tmp_path: Path) -> None:
+    """The counterpart: an UNQUOTED heredoc delimiter (``<<EOF``) DOES expand its body, so a read
+    there is real and must still require a binding."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<EOF\n"
+        "          this is $UNBOUND_IN_HEREDOC expanded\n"
+        "          EOF\n",
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("UNBOUND_IN_HEREDOC" in f for f in findings), findings
+
+
+def test_flags_a_length_of_expansion_on_an_unbound_var_inside_an_unquoted_heredoc(tmp_path: Path) -> None:
+    """The heredoc-body scanner must resolve ``${#VAR}``/``${!VAR}`` prefix operators the same way
+    the main scanner does — an earlier fix added the prefix backtrack to ``_BRACE_VAR`` (used by
+    the normal ``run:`` text path) but the heredoc branch kept its own separate variable regex, so
+    ``${#UNBOUND}`` inside an expanding heredoc still matched the permitted special parameter ``#``
+    alone and the real read of UNBOUND went unchecked (Codex finding, PR #82, round 2)."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<EOF\n"
+        "          length is ${#SOME_UNBOUND_VAR}\n"
+        "          EOF\n",
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("SOME_UNBOUND_VAR" in f for f in findings), findings
+
+
+def test_flags_an_indirect_expansion_on_an_unbound_var_inside_an_unquoted_heredoc(tmp_path: Path) -> None:
+    """Same defect class as the length-of case above, for the ``${!VAR}`` indirection prefix."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<EOF\n"
+        "          value is ${!SOME_UNBOUND_VAR}\n"
+        "          EOF\n",
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("SOME_UNBOUND_VAR" in f for f in findings), findings
+
+
+def test_allows_bare_arg_count_and_last_bg_pid_braced_forms_inside_an_unquoted_heredoc(tmp_path: Path) -> None:
+    """``${#}``/``${!}`` are the permitted special parameters themselves, not a prefix on a missing
+    variable — the heredoc scanner must backtrack to the bare-special reading exactly like the main
+    scanner does, whether the match comes from the shared ``_match_var`` helper or not."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<EOF\n"
+        "          ${#} ${!}\n"
+        "          EOF\n",
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_does_not_flag_an_escaped_dollar(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: echo "price is \\$UNBOUND_VAR"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
+def test_does_not_flag_an_awk_field_reference_in_a_single_quoted_program(tmp_path: Path) -> None:
+    """``awk '{print $1}'`` — bash never expands ``$1`` inside the single-quoted awk program; it
+    is a field reference the awk subprocess reads literally, not a bash variable read."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n          echo \"a b\" | awk '{print $1, $2}'\n",
+    )
+    assert guard.check_env_bindings(path) == []
+
+
 # --------------------------------------------------------------------------------------------
 # The live surfaces must actually be clean — this is the assertion CI depends on.
 # --------------------------------------------------------------------------------------------
