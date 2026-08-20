@@ -317,6 +317,50 @@ def test_flags_a_var_inside_an_unquoted_heredoc(tmp_path: Path) -> None:
     assert any("UNBOUND_IN_HEREDOC" in f for f in findings), findings
 
 
+def test_flags_a_length_of_expansion_on_an_unbound_var_inside_an_unquoted_heredoc(tmp_path: Path) -> None:
+    """The heredoc-body scanner must resolve ``${#VAR}``/``${!VAR}`` prefix operators the same way
+    the main scanner does — an earlier fix added the prefix backtrack to ``_BRACE_VAR`` (used by
+    the normal ``run:`` text path) but the heredoc branch kept its own separate variable regex, so
+    ``${#UNBOUND}`` inside an expanding heredoc still matched the permitted special parameter ``#``
+    alone and the real read of UNBOUND went unchecked (Codex finding, PR #82, round 2)."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<EOF\n"
+        "          length is ${#SOME_UNBOUND_VAR}\n"
+        "          EOF\n",
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("SOME_UNBOUND_VAR" in f for f in findings), findings
+
+
+def test_flags_an_indirect_expansion_on_an_unbound_var_inside_an_unquoted_heredoc(tmp_path: Path) -> None:
+    """Same defect class as the length-of case above, for the ``${!VAR}`` indirection prefix."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<EOF\n"
+        "          value is ${!SOME_UNBOUND_VAR}\n"
+        "          EOF\n",
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("SOME_UNBOUND_VAR" in f for f in findings), findings
+
+
+def test_allows_bare_arg_count_and_last_bg_pid_braced_forms_inside_an_unquoted_heredoc(tmp_path: Path) -> None:
+    """``${#}``/``${!}`` are the permitted special parameters themselves, not a prefix on a missing
+    variable — the heredoc scanner must backtrack to the bare-special reading exactly like the main
+    scanner does, whether the match comes from the shared ``_match_var`` helper or not."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          cat <<EOF\n"
+        "          ${#} ${!}\n"
+        "          EOF\n",
+    )
+    assert guard.check_env_bindings(path) == []
+
+
 def test_does_not_flag_an_escaped_dollar(tmp_path: Path) -> None:
     path = _write(
         tmp_path,

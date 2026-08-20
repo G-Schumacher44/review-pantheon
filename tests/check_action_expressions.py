@@ -78,6 +78,23 @@ _VAR_TOKEN = r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?#@*!$-]"
 # the special char `#` alone and the real read of UNBOUND is never recorded (Codex finding, PR #82).
 _BRACE_VAR = re.compile(r"\$\{(?:[#!])?(" + _VAR_TOKEN + r")")
 _BARE_VAR = re.compile(r"\$(" + _VAR_TOKEN + r")")
+
+
+def _match_var(text: str, pos: int) -> re.Match[str] | None:
+    """Match the `$VAR`/`${VAR}` read that starts at ``text[pos]`` (a literal ``$``), or ``None``.
+
+    The ONE place both scanners in this module — the main character-walker below and the
+    heredoc-body line scanner — resolve a ``$`` into a variable name. A second, unsynced copy of
+    this same brace-then-bare fallback is exactly what let the ``${#VAR}``/``${!VAR}`` prefix
+    handling land in ``_BRACE_VAR`` while the heredoc branch kept its own separate pattern that
+    never got the fix: `${#UNBOUND}`/`${!UNBOUND}` inside an expanding heredoc matched the
+    permitted special char alone and the real variable read went unrecorded (Codex finding, PR #82
+    round 2). One function, called from both sites, makes that split structurally impossible to
+    reintroduce.
+    """
+    return _BRACE_VAR.match(text, pos) or _BARE_VAR.match(text, pos)
+
+
 # A heredoc redirect: `<<`, an optional `-` (strip leading tabs), then the delimiter word, which
 # may be bare, single-quoted, or double-quoted. Per bash's rule, the body is expanded ONLY when the
 # delimiter is entirely unquoted (group 4) — a single- or double-quoted delimiter (groups 2/3)
@@ -191,10 +208,20 @@ def _extract_var_reads(script: str) -> list[tuple[str, int]]:
             if check == heredoc_delim:
                 heredoc_delim = None
             elif heredoc_expand:
-                for m in re.finditer(r"\\?\$(?:\{(" + _VAR_TOKEN + r")|(" + _VAR_TOKEN + r"))", line):
-                    if m.group(0).startswith("\\"):
+                j = 0
+                while True:
+                    dollar = line.find("$", j)
+                    if dollar == -1:
+                        break
+                    if dollar > 0 and line[dollar - 1] == "\\":
+                        j = dollar + 1
                         continue
-                    names.append((m.group(1) or m.group(2), i + m.start()))
+                    m = _match_var(line, dollar)
+                    if m:
+                        names.append((m.group(1), i + dollar))
+                        j = m.end()
+                    else:
+                        j = dollar + 1
             i = line_end + 1
             continue
 
@@ -236,9 +263,7 @@ def _extract_var_reads(script: str) -> list[tuple[str, int]]:
                 continue
 
         if ch == "$" and not in_single:
-            m = _BRACE_VAR.match(script, i)
-            if not m:
-                m = _BARE_VAR.match(script, i)
+            m = _match_var(script, i)
             if m:
                 names.append((m.group(1), i))
                 i = m.end()
