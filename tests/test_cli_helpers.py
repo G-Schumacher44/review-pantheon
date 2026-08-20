@@ -307,7 +307,7 @@ def test_run_agent_uses_neutral_cwd_under_readonly_execution(tmp_path, monkeypat
         spec_file="",
     )
     cli_module._run_agent(
-        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash(x *)", 60.0, str(neutral)
+        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash(x *)", 60.0, str(neutral), ""
     )
 
     assert captured["neutral_cwd"] == str(neutral)
@@ -349,7 +349,7 @@ def test_run_agent_uses_repo_root_as_cwd_under_trusted_execution(tmp_path, monke
         spec_file="",
     )
     cli_module._run_agent(
-        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash", 60.0, str(neutral)
+        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash", 60.0, str(neutral), ""
     )
 
     # Under trusted mode, the provider's own cwd must be the REAL checkout -- _build_prompt's own
