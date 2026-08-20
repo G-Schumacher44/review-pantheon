@@ -298,6 +298,14 @@ def test_table_top_cell_redacts_a_credential_before_truncating_not_after(monkeyp
 def test_table_top_cell_redacts_a_repo_root_before_truncating_not_after() -> None:
     # Same class of bug, the path-redaction half: a repo_root landing across the truncation cut
     # point must not survive as a dangling fragment either.
+    #
+    # A bare `root not in rendered` check can't fail here: truncate() cuts at 90 chars, and every
+    # offset below puts root's start at index >= 60, so truncate() alone already guarantees the
+    # untouched string "root" (49 chars) is never fully present past the cut -- the assertion
+    # would pass whether or not redact_paths() ran at all. Mirrors the credential sibling above:
+    # sweep for any 8-plus-char FRAGMENT of root surviving, which is exactly what a
+    # truncate-before-redact regression leaves behind (a partial root cut mid-string, never
+    # matched by redact_paths's whole-string pattern on the truncated remainder).
     root = "/Users/alice/dev/review-pantheon-secret-checkout"
     for offset in range(0, len(root), 5):
         padding = "x" * (60 + offset)
@@ -310,6 +318,9 @@ def test_table_top_cell_redacts_a_repo_root_before_truncating_not_after() -> Non
         rendered = render.sanitize_inline(cell, root)
 
         assert root not in rendered, f"offset={offset}: full repo_root leaked"
+        for i in range(len(root) - 8):
+            fragment = root[i : i + 8]
+            assert fragment not in rendered, f"offset={offset}: fragment {fragment!r} leaked"
 
 
 def test_redact_paths_is_idempotent_on_already_redacted_text(monkeypatch) -> None:

@@ -215,11 +215,6 @@ runs:
     # to gate against — reviewing is simply impossible, not unsafe). This step is the opposite
     # case — a run that DOES have secrets in scope, over content it structurally should not — and
     # it hard-fails rather than skips.
-    # Step name deliberately avoids the literal trigger names: the expression guard
-    # (tests/check_action_expressions.py) forbids them outside its ONE narrow exemption —
-    # the shell case-arm that must compare against them — and a strict guard with a single
-    # exemption is worth more than a guard carved out for prose. The message below names
-    # the offending trigger dynamically via $EVENT_NAME, which is more useful anyway.
     - name: Require the pull_request trigger
       shell: bash
       env:
