@@ -187,6 +187,40 @@ def test_allows_shell_builtin_and_positional_vars_unbound(tmp_path: Path) -> Non
     assert guard.check_env_bindings(path) == []
 
 
+def test_flags_a_length_of_expansion_on_an_unbound_var(tmp_path: Path) -> None:
+    """``${#UNBOUND}`` (length-of) is a PREFIX operator on UNBOUND, not a read of the permitted
+    special parameter ``#`` (argument count) — the brace matcher must record UNBOUND as the read,
+    not stop at the prefix and let the real variable go unchecked (Codex finding, PR #82 line 74)."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: echo "${#SOME_UNBOUND_VAR}"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("SOME_UNBOUND_VAR" in f for f in findings), findings
+
+
+def test_flags_an_indirect_expansion_on_an_unbound_var(tmp_path: Path) -> None:
+    """``${!UNBOUND}`` (indirection) is the same prefix-operator shape as ``${#UNBOUND}`` — same
+    fix, same finding."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: echo "${!SOME_UNBOUND_VAR}"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("SOME_UNBOUND_VAR" in f for f in findings), findings
+
+
+def test_allows_bare_arg_count_and_last_bg_pid_braced_forms(tmp_path: Path) -> None:
+    """``${#}`` (argument count) and ``${!}`` (last background PID) ARE the permitted special
+    parameters themselves, not a prefix on a missing variable — the optional-prefix regex must
+    backtrack to the bare-special reading when no variable-shaped token follows the prefix char."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n          echo "${#} ${!}"\n',
+    )
+    assert guard.check_env_bindings(path) == []
+
+
 def test_allows_runner_provided_vars_unbound(tmp_path: Path) -> None:
     path = _write(
         tmp_path,

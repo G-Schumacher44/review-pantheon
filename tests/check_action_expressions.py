@@ -71,7 +71,12 @@ SAFE_RUN_CONTEXTS = re.compile(r"^\s*(matrix\.[A-Za-z0-9_]+|runner\.[A-Za-z0-9_]
 # the shape of an awk/perl field reference like $1, so the digit rule handles both without needing
 # to know which program is being invoked), or a single shell special-parameter character.
 _VAR_TOKEN = r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?#@*!$-]"
-_BRACE_VAR = re.compile(r"\$\{(" + _VAR_TOKEN + r")")
+# `${#VAR}` (length-of) and `${!VAR}` (indirection) are PREFIX operators, not the variable being
+# read — greedily try to consume a `#`/`!` prefix before the variable token, but let the optional
+# group backtrack away for the bare-special forms (`${#}` = arg count, `${!}` = last bg PID) where
+# no variable-shaped token follows. Without the backtrack-capable optional, `${#UNBOUND}` matches
+# the special char `#` alone and the real read of UNBOUND is never recorded (Codex finding, PR #82).
+_BRACE_VAR = re.compile(r"\$\{(?:[#!])?(" + _VAR_TOKEN + r")")
 _BARE_VAR = re.compile(r"\$(" + _VAR_TOKEN + r")")
 # A heredoc redirect: `<<`, an optional `-` (strip leading tabs), then the delimiter word, which
 # may be bare, single-quoted, or double-quoted. Per bash's rule, the body is expanded ONLY when the
