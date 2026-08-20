@@ -85,19 +85,66 @@ _SHELL_BUILTIN_VARS = frozenset(
     {"HOME", "PATH", "PWD", "OLDPWD", "TMPDIR", "RANDOM", "IFS", "SHLVL", "SECONDS", "LINENO", "PPID", "UID", "EUID"}
 )
 _SHELL_SPECIAL_CHARS = frozenset({"?", "#", "@", "*", "$", "!", "-"})
-# Runner-provided context: every `GITHUB_*`/`RUNNER_*` env var (GITHUB_OUTPUT, GITHUB_STEP_SUMMARY,
-# GITHUB_WORKSPACE, RUNNER_TEMP, ...) is set by the Actions runner on every step unconditionally,
-# and `CI` is the one bare runner-provided name outside that prefix scheme.
-_RUNNER_PREFIXES = ("GITHUB_", "RUNNER_")
-_RUNNER_EXACT = frozenset({"CI"})
+# Runner-provided context: EXACTLY the "Default environment variables" GitHub's Actions runner
+# injects into every step (docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables),
+# enumerated rather than prefix-matched. A `GITHUB_*`/`RUNNER_*` PREFIX match would also wave through
+# `GITHUB_TOKEN` unbound — and `GITHUB_TOKEN` is NOT one of the runner's defaults; it is a secret
+# that a step must bind explicitly via its own `env:`, which is exactly the class of action-context
+# binding this guard exists to catch (Codex finding, PR #82).
+_RUNNER_DEFAULT_VARS = frozenset(
+    {
+        "CI",
+        "GITHUB_ACTION",
+        "GITHUB_ACTION_PATH",
+        "GITHUB_ACTION_REPOSITORY",
+        "GITHUB_ACTIONS",
+        "GITHUB_ACTOR",
+        "GITHUB_ACTOR_ID",
+        "GITHUB_API_URL",
+        "GITHUB_BASE_REF",
+        "GITHUB_ENV",
+        "GITHUB_EVENT_NAME",
+        "GITHUB_EVENT_PATH",
+        "GITHUB_GRAPHQL_URL",
+        "GITHUB_HEAD_REF",
+        "GITHUB_JOB",
+        "GITHUB_OUTPUT",
+        "GITHUB_PATH",
+        "GITHUB_REF",
+        "GITHUB_REF_NAME",
+        "GITHUB_REF_PROTECTED",
+        "GITHUB_REF_TYPE",
+        "GITHUB_REPOSITORY",
+        "GITHUB_REPOSITORY_ID",
+        "GITHUB_REPOSITORY_OWNER",
+        "GITHUB_REPOSITORY_OWNER_ID",
+        "GITHUB_RETENTION_DAYS",
+        "GITHUB_RUN_ATTEMPT",
+        "GITHUB_RUN_ID",
+        "GITHUB_RUN_NUMBER",
+        "GITHUB_SERVER_URL",
+        "GITHUB_SHA",
+        "GITHUB_STEP_SUMMARY",
+        "GITHUB_TRIGGERING_ACTOR",
+        "GITHUB_WORKFLOW",
+        "GITHUB_WORKFLOW_REF",
+        "GITHUB_WORKFLOW_SHA",
+        "GITHUB_WORKSPACE",
+        "RUNNER_ARCH",
+        "RUNNER_DEBUG",
+        "RUNNER_ENVIRONMENT",
+        "RUNNER_NAME",
+        "RUNNER_OS",
+        "RUNNER_TEMP",
+        "RUNNER_TOOL_CACHE",
+    }
+)
 
 
 def _var_permitted_unbound(var: str) -> bool:
     if var.isdigit():
         return True
-    if var in _SHELL_SPECIAL_CHARS or var in _SHELL_BUILTIN_VARS or var in _RUNNER_EXACT:
-        return True
-    return var.startswith(_RUNNER_PREFIXES)
+    return var in _SHELL_SPECIAL_CHARS or var in _SHELL_BUILTIN_VARS or var in _RUNNER_DEFAULT_VARS
 
 
 def _extract_var_reads(script: str) -> list[tuple[str, int]]:
@@ -199,6 +246,20 @@ def _extract_var_reads(script: str) -> list[tuple[str, int]]:
     return names
 
 
+# A shell command boundary immediately before `read`: true line start, a command separator
+# (`;`, `&&`, `||`, `|`, `(`, `{`), or a compound-command keyword (`do`/`then`/`else`/`elif`/
+# `while`/`until`/`if`) — optionally followed by a `VAR=value` prefix run (the `while IFS= read -r
+# line` idiom). Anchored the same way as the two sibling detectors below (require the definition to
+# sit at the START of a command), but a bare `^\s*` — the siblings' literal anchor — would miss that
+# idiom, since `read` there follows `while IFS= ` on the same line, not the line start.
+_READ_LOCAL_DEF = re.compile(
+    r"(?:^[ \t]*|[;&|({][ \t]*|\b(?:do|then|else|elif|while|until|if)\b[ \t]*)"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*"
+    r"read\b(?:\s+-[A-Za-z]+)*\s+([A-Za-z_][A-Za-z0-9_ ]*)",
+    re.M,
+)
+
+
 def _step_local_definitions(block: str) -> set[str]:
     """Names this step's OWN script assigns before reading — a self-defined value needs no `env:`
     binding, same exemption the original two-var check already made for ACTION_PATH/PERSONAS_DIR
@@ -211,7 +272,7 @@ def _step_local_definitions(block: str) -> set[str]:
         defined.add(m.group(1))
     for m in re.finditer(r"^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b", block, re.M):
         defined.add(m.group(1))
-    for m in re.finditer(r"\bread\b(?:\s+-[A-Za-z]+)*\s+([A-Za-z_][A-Za-z0-9_ ]*)", block):
+    for m in _READ_LOCAL_DEF.finditer(block):
         defined.update(m.group(1).split())
     return defined
 

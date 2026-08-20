@@ -218,6 +218,34 @@ def test_allows_a_for_loop_variable(tmp_path: Path) -> None:
     assert guard.check_env_bindings(path) == []
 
 
+def test_flags_unbound_github_token(tmp_path: Path) -> None:
+    """``GITHUB_TOKEN`` is NOT one of the runner's default env vars (unlike ``GITHUB_OUTPUT`` /
+    ``GITHUB_STEP_SUMMARY`` / etc.) — a step reading it must bind it explicitly via its own
+    ``env:``. A prior version of this guard wildcarded every ``GITHUB_*`` name as pre-bound,
+    which silently exempted exactly this case (Codex finding, PR #82)."""
+    path = _write(
+        tmp_path,
+        'jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n          echo "token is $GITHUB_TOKEN"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("GITHUB_TOKEN" in f for f in findings), findings
+
+
+def test_does_not_flag_a_var_named_like_prose_containing_read(tmp_path: Path) -> None:
+    """An unanchored ``read`` regex would match the word "read" anywhere in a step's script —
+    including inside a comment or an echoed string — and misattribute whatever follows it as a
+    locally-defined variable, hiding a genuinely unbound var with that name (Artemis finding,
+    PR #82)."""
+    path = _write(
+        tmp_path,
+        "jobs:\n  a:\n    steps:\n      - name: x\n        run: |\n"
+        "          # this value is read exactly once, by ONCE\n"
+        '          echo "$ONCE"\n',
+    )
+    findings = guard.check_env_bindings(path)
+    assert any("ONCE" in f for f in findings), findings
+
+
 def test_allows_a_read_loop_variable(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
