@@ -394,7 +394,7 @@ history, not here — a contract describes what's true now, not how it got that 
   exits 0 with a NOT-GATED notice instead of failing (`action.yml`'s "Assert exactly one auth
   input is set" step; disclosed in SECURITY.md/SETUP.md, not a silent skip of the general rule).
   It pins `anthropics/claude-code-action` to a full commit
-  SHA — `239e3a730883eeb5c53db12b0fc9573b3024b126` (v1.0.191) — read directly from that
+  SHA — `d40ddef4c030e508327d6e35a9c45f3368482c50` (v1.0.195) — read directly from that
   release's own `action.yml`, not assumed or copied from an older version's docs (a moving
   tag, or an unpinned `uses:`, is the thing to avoid here). If you re-pin to a newer release
   yourself, that's step one of the install checklist (`install.sh`'s printed output and the
