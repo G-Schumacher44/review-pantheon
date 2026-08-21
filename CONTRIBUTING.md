@@ -45,7 +45,7 @@ Prerequisites (bash, git, gh, python3, one provider CLI): see
 Run the suites — each is a standalone fixture test, no runner needed. **This table is the
 canonical, complete list of the bash fixture suites (15 files; verified against `git ls-tree -r tests/*.sh`)**
 — DESIGN.md's "Layout" section points here instead of re-listing them, see DESIGN.md rule 5 on
-the two staying in sync. A separate pytest unit layer (11 files, `tests/test_*.py`; verified
+the two staying in sync. A separate pytest unit layer (12 files, `tests/test_*.py`; verified
 against `git ls-tree -r tests/test_*.py`) is its own documented category below — CI's sync-check
 (`.github/workflows/ci.yml`) asserts both tables' rows AND both prose counts against
 `git ls-tree -r tests/` on every PR, so a drift between either number and the actual tree fails
@@ -74,7 +74,7 @@ bash tests/test-verdict-decision-python.sh
 # ...repeat per script, or run the ones relevant to your change
 ```
 
-**Pytest unit layer (11 files, `tests/test_*.py`; verified against `git ls-tree -r tests/test_*.py`).**
+**Pytest unit layer (12 files, `tests/test_*.py`; verified against `git ls-tree -r tests/test_*.py`).**
 Collected via `pyproject.toml`'s `[tool.pytest.ini_options]` (`tests/test_*.py` only — never the
 black-box `tests/test-*.sh` suites above). Scope policy, binding: pure-function seams and
 `pantheon/jqjson.py`'s own edge-case matrix (non-standard constants, overflow/underflow numbers,
@@ -92,6 +92,7 @@ it complements, not repeats. This table is the canonical, up-to-date file list a
 | `tests/test_action_guard.py` | `tests/check_action_expressions.py` itself — one planted violation per YAML syntax form (block-scalar `run:`, single-line `run:`, `pull_request_target`, missing `env:` binding) plus the clean counterparts. The guard is CI's only enforcement of three SECURITY.md claims, so it needs a test that proves it can fail. |
 | `tests/test_cli_agents_dir.py` | `pantheon.cli._agents_dir()`'s fallback-selection logic (mocked) — persona resolution from a real, non-editable `pip`/`pipx` install vs. a dev-checkout sibling directory. |
 | `tests/test_cli_helpers.py` | `pantheon.cli`'s pure-function seams no black-box suite drives directly — `_parse_conf_text` (the `gate.conf` key=value parser) — plus `_build_prompt`'s per-mode header shape and `_resolve_branch_context` against real git fixtures (both fail-closed refusals, the base-tip policy anchor, detached HEAD, dirty-tree warning). |
+| `tests/test_docs_pin_drift.py` | `action.yml`'s upstream `claude-code-action` full-SHA pin vs. the pin SECURITY.md and DESIGN.md restate in prose — every doc naming a pin must name the LIVE one (Apollo on PR #86: the v1.0.195 bump updated all five call sites but left both docs citing the old SHA; same hand-restated-value drift class as `tests/test_security_md_denied_commands.py`). |
 | `tests/test_execution.py` | `pantheon.execution.resolve_console_script`, the shared function behind both `pantheon.cli`'s and `pantheon.providers`' own console-script resolution. |
 | `tests/test_jqjson.py` | `pantheon.jqjson`'s four functions directly and in isolation, parametrized across the JSON-boundary edge-case matrix. |
 | `tests/test_providers.py` | `pantheon.providers`' argv-construction, PATH-resolution, environment-construction, and timeout/process-group seams — the ONLY coverage this module has (no black-box `test-providers.sh` exists either; a disclosed pre-existing gap, closed at this layer). |
