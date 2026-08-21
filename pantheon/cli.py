@@ -865,6 +865,7 @@ def _run_agent(
     allowed_tools: str,
     timeout: float,
     neutral_cwd: str,
+    disallowed_tools: str,
 ) -> render.AgentRenderData:
     if agent == "apollo" and docs_only:
         _note("docs-only diff — skipping apollo loudly (nothing but docs changed).")
@@ -938,6 +939,7 @@ def _run_agent(
             timeout,
             repo_root=ctx.repo_root,
             neutral_cwd=provider_cwd,
+            disallowed_tools=disallowed_tools,
         )
     except providers.ProviderError as e:
         _note(f"provider lane '{provider}' failed for {agent} ({e}) — UNVERIFIED")
@@ -1279,6 +1281,11 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
     agents = _validate_agents(agents_list)
 
     allowed_tools = execution.allowed_tools_for(execution_tier, _wrapper_invocation(repo_root))
+    # Explicit "" for "trusted" (never None -- see providers._claude's own docstring for why the
+    # distinction matters: None means "caller gave no deny list, fall back to the readonly one",
+    # which would silently reopen the built-in-Bash-bypass gap under trusted if this passed None
+    # here instead of a genuine, deliberate no-deny-list signal).
+    disallowed_tools = execution.disallowed_tools_for(execution_tier)
 
     # Docs-only detection.
     changed = _git(["diff", "--name-only", diff_range], cwd=repo_root).stdout
@@ -1400,6 +1407,7 @@ def run_gate(args: argparse.Namespace, forced_agents: str | None = None) -> int:
                 allowed_tools,
                 timeout,
                 neutral_cwd,
+                disallowed_tools,
             )
 
         overall = render.overall_color(agent_data[a].color for a in agents)

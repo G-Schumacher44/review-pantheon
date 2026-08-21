@@ -33,14 +33,15 @@
 # from the calling repo's checked-out working tree, for the same fork-PR-injection reason
 # REVIEW_RULES.md/DESIGN.md are (DESIGN.md's "Security posture").
 #
-# anthropics/claude-code-action is pinned below to a real, verified commit SHA — v1.0.191,
-# tag `v1.0.191` (the `v1` tag also currently resolves to this same commit; pin the full SHA,
+# anthropics/claude-code-action is pinned below to a real, verified commit SHA — v1.0.195,
+# tag `v1.0.195` (the `v1` tag also currently resolves to this same commit; pin the full SHA,
 # not a tag, since tags on that repo move):
-#   https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
-#   SHA: 239e3a730883eeb5c53db12b0fc9573b3024b126
-# Verified by reading that release's actual action.yml directly (not assumed from memory or an
-# older version's docs):
-#   https://raw.githubusercontent.com/anthropics/claude-code-action/239e3a730883eeb5c53db12b0fc9573b3024b126/action.yml
+#   https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
+#   SHA: d40ddef4c030e508327d6e35a9c45f3368482c50
+# Verified by dereferencing the annotated tag object to its commit via the GitHub API (not
+# trusted from prose), then diffing that release's action.yml against the prior pin's — byte
+# identical, confirming no input/output/behavior change to how this file invokes it:
+#   https://raw.githubusercontent.com/anthropics/claude-code-action/d40ddef4c030e508327d6e35a9c45f3368482c50/action.yml
 # against that repo's own migration guide for what changed in its v1.0 rewrite:
 #   https://github.com/anthropics/claude-code-action/blob/main/docs/migration-guide.md
 # Confirmed real names (all four of our prior guesses needed correcting — see git history for
@@ -54,7 +55,7 @@
 #     model is gone). v1's outputs are `execution_file`, `branch_name`, `github_token`,
 #     `structured_output`, `session_id`. This action uses `structured_output`, populated by
 #     passing `--json-schema '<schema>'` in `claude_args` — see
-#     https://github.com/anthropics/claude-code-action/blob/239e3a730883eeb5c53db12b0fc9573b3024b126/docs/usage.md#structured-outputs.
+#     https://github.com/anthropics/claude-code-action/blob/d40ddef4c030e508327d6e35a9c45f3368482c50/docs/usage.md#structured-outputs.
 #     This is a materially better mechanism than the old "extract trailing JSON from raw text"
 #     approach the now-deleted vendored action/review.yml used to rely on (issue #36) — the
 #     schema is enforced by the upstream action itself, not just hoped for in a persona's
@@ -199,6 +200,42 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # Mechanical enforcement of the rule this file's own header (and SECURITY.md's "Fork pull
+    # requests") states in prose: NEVER wire this gate to `pull_request_target` or `workflow_run`.
+    # Both give the job running THIS action's own steps (checkout, prompt-building, the model
+    # invocation) access to the BASE repository's secrets while reviewing content that, on a fork
+    # PR, is 100% attacker-controlled — `pull_request_target` runs the base repo's own workflow
+    # file but can still be pointed at a fork's checkout/diff by the calling workflow, and
+    # `workflow_run` inherits its triggering workflow's privileged context over whatever that
+    # workflow's own artifacts/checkout hold. The FIRST step, no `if:` gate, no
+    # `continue-on-error` — a bare comment saying "don't do this" is prose a misconfigured caller
+    # workflow can still ship; this is the mechanical backstop. Deliberately NOT the same code
+    # path as the fork-PR skip below (the "Assert exactly one auth input is set" step's own
+    # `IS_FORK` exit-0): that path is a LEGITIMATE, expected skip for an ordinary `pull_request`
+    # run from a fork (GitHub withholds secrets from it by design, so there is nothing dangerous
+    # to gate against — reviewing is simply impossible, not unsafe). This step is the opposite
+    # case — a run that DOES have secrets in scope, over content it structurally should not — and
+    # it hard-fails rather than skips.
+    - name: Require the pull_request trigger
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+      run: |
+        set -euo pipefail
+        # ALLOWLIST, not a blacklist of the events that happen to be dangerous. An earlier
+        # draft refused two named triggers; review pointed out that
+        # `pull_request_review_comment` and `pull_request_review` also run from the BASE
+        # repository with secrets while carrying a populated `github.event.pull_request`
+        # payload — so they passed the blacklist, received the credential, and would have
+        # driven a model over fork-controlled content. Enumerating the unsafe events means
+        # being wrong every time GitHub adds one. Every step below reads the PR number and
+        # base/head SHAs from `github.event.pull_request`, so `pull_request` is the only
+        # context this action is built for; everything else fails closed, by construction.
+        if [ "$EVENT_NAME" != "pull_request" ]; then
+          echo "::error::review-pantheon: refusing to run under the '$EVENT_NAME' trigger. This action is built for the plain pull_request context only — every step reads the PR number and base/head SHAs from github.event.pull_request, and the privileged triggers that still populate that payload run with this repository's secrets over content a fork can control. Wire the gate on pull_request, as examples/review-gate.yml and install.sh Way A do: fork PRs are then correctly reported NOT GATED rather than reviewed unsafely. See SECURITY.md, 'Fork pull requests cannot be gated by this action'."
+          exit 1
+        fi
+
     # No scrub step for `.claude`/`.mcp.json`/CLAUDE.md here: `anthropics/claude-code-action`'s
     # own pinned source (`src/entrypoints/run.ts`'s `restoreConfigFromBase`) already restores
     # those sensitive paths from the PR's base branch, unconditionally, before the CLI's own
@@ -326,12 +363,21 @@ runs:
         # `Bash($GIT_WRAPPER *)`, so no PYTHONPATH is embedded in it (execution.py imports
         # nothing from the `pantheon` package itself).
         GIT_WRAPPER="python3 $ACTION_PATH/pantheon/execution.py wrapper"
+        # DENIED_TOOLS is the deny-list companion to ALLOWED_TOOLS, and it is generated by
+        # pantheon/execution.py's disallowed_tools_for() rather than duplicated here — that
+        # function is the ONE source for the tier->deny decision, exactly as allowed_tools_for()
+        # is for the allow decision. Hand-copying the list into shell is how the two surfaces
+        # would drift; tests/test_workflow_shape.py's test_action_tool_policy_is_asserted_for_both_tiers
+        # asserts the generated claude_args for both tiers (an earlier version of this comment named
+        # a test that never inspected these values at all).
         case "$EXECUTION" in
           readonly)
             ALLOWED_TOOLS="Read,Grep,Glob,Bash($GIT_WRAPPER *)"
+            DENIED_TOOLS="$(python3 "$ACTION_PATH/pantheon/execution.py" disallowed-tools readonly)"
             ;;
           trusted)
             ALLOWED_TOOLS='Read,Grep,Glob,Bash'
+            DENIED_TOOLS=""
             ;;
           *)
             echo "::error::review-pantheon: unknown execution tier '$EXECUTION' (must be 'readonly' or 'trusted')"
@@ -498,6 +544,10 @@ runs:
         CLAUDE_ARGS="--allowedTools \"$ALLOWED_TOOLS\"
         --permission-mode dontAsk
         --json-schema '$JSON_SCHEMA'"
+        if [ -n "$DENIED_TOOLS" ]; then
+          CLAUDE_ARGS="$CLAUDE_ARGS
+        --disallowedTools \"$DENIED_TOOLS\""
+        fi
         if [ -n "$MODEL" ]; then
           CLAUDE_ARGS="$CLAUDE_ARGS
         --model $MODEL"
@@ -570,7 +620,7 @@ runs:
       id: run-agent-artemis
       if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
+      uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
@@ -640,7 +690,7 @@ runs:
       id: run-agent-apollo
       if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
+      uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
@@ -704,7 +754,7 @@ runs:
       id: run-agent-socrates
       if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
+      uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
@@ -763,7 +813,7 @@ runs:
       id: run-agent-diogenes
       if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
+      uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
@@ -822,7 +872,7 @@ runs:
       id: run-agent-plato
       if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
-      uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.191
+      uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         anthropic_api_key: ${{ inputs.anthropic_api_key }}
@@ -863,6 +913,24 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         GH_TOKEN: ${{ github.token }}
+        # REDACTION-ONLY — pantheon.render never uses this to authenticate anything; it exists
+        # solely so its literal-value credential pass (pantheon.render._redact_credentials) can
+        # SEE the token a reviewer step actually held. Every `Run <agent>` step above hands the
+        # reviewer model the `github_token` input (e.g. the "Run plato" step's own `with:` block,
+        # a few lines up), but THIS step only received
+        # `${{ github.token }}` as GH_TOKEN above — the two are the same value under the default
+        # setup, which is exactly why this was missed, but a consumer workflow that overrides the
+        # `github_token` input (a GitHub App installation token, a PAT, a GHES token) hands the
+        # reviewer a DIFFERENT token than this step could see, and a literal-value redaction pass
+        # can only ever redact a value that is present in ITS OWN process environment. This looks
+        # backwards at a glance — a secret deliberately injected into a step whose whole job is
+        # producing PUBLIC output — but it is the fix, not the hole: it is read exactly once, by
+        # the redaction pass, and is never itself written to the comment. Do not remove this
+        # thinking it is unused or redundant with GH_TOKEN above; removing it silently reopens the
+        # gap where an overridden reviewer token can never be literally redacted (Codex P1, PR
+        # #75) — see pantheon/render.py's _CREDENTIAL_ENV_KEYS comment on
+        # PANTHEON_REVIEWER_GITHUB_TOKEN for the redactor-side half of this fix.
+        PANTHEON_REVIEWER_GITHUB_TOKEN: ${{ inputs.github_token }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         POST_COMMENT: ${{ inputs.post_comment }}
         APOLLO_DOCS_SKIPPED: ${{ steps.docs-check.outputs.docs_only }}

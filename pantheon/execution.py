@@ -521,6 +521,68 @@ def allowed_tools_for(tier: str, wrapper_path: str = "") -> str:
     return f"Read,Grep,Glob,Bash({wrapper_path} *)"
 
 
+# Claude Code documents a small, built-in set of Bash commands that run WITHOUT ever consulting
+# --allowedTools/--disallowedTools, in every permission mode including dontAsk — bare, unflagged
+# invocations of these read commands are auto-approved before the allowlist is even checked. Under
+# `readonly`, that is a second, unaudited path back to the repo checkout alongside the wrapper:
+# `git diff`/`show`/`log`/`status` (no flags) bypass build_readonly_argv()'s validation entirely,
+# and every non-git entry here is a live command an agent's own Bash tool could reach for on its
+# own initiative, none of it going through this module's argv gate. Docs are explicit this default
+# set is overridable by adding an EXPLICIT deny (or ask) rule for a command — that rule beats an
+# allow rule in Claude Code's own precedence, so listing a command here forces every invocation of
+# it, bare or flagged, back through the ordinary permission decision (which --allowedTools then
+# fails closed on, `readonly` never naming any of these). "git" is included deliberately: the
+# wrapper this module resolves is invoked by its OWN ABSOLUTE PATH (or, in the dev-checkout
+# fallback, `<python> -m pantheon.execution wrapper`) — never a bareword "git" — so a
+# ``Bash(git *)`` deny entry can never shadow the wrapper's own ``Bash(<wrapper path> *)`` allow
+# entry; the two prefixes are disjoint by construction. Not scoped to any per-subcommand allowlist
+# the way READONLY_SUBCOMMANDS/SAFE_FLAGS_FOR_SUBCOMMAND are (issue #26's finer-grained posture) —
+# these are commands this module never wants reachable AT ALL under `readonly`, wrapper or not.
+DENIED_BUILTIN_BASH_COMMANDS: tuple[str, ...] = (
+    "ls",
+    "cat",
+    "echo",
+    "pwd",
+    "head",
+    "tail",
+    "grep",
+    "find",
+    "wc",
+    "which",
+    "diff",
+    "stat",
+    "du",
+    "cd",
+    "git",
+)
+
+
+def disallowed_tools_for(tier: str) -> str:
+    """Prints (returns) the --disallowedTools value for <tier> — the deny-list companion to
+    :func:`allowed_tools_for`, same tier-resolution seam and same fail-safe posture (any tier that
+    is not literally "trusted" resolves to the readonly-shaped value: a caller that skips
+    validate_execution() still fails safe, not open). "trusted" returns "" (no deny list — full
+    Bash is the explicit, documented opt-in that tier grants; DESIGN.md's "Security posture" is
+    the sole rationale, not this function). "readonly" returns one comma-joined deny entry per
+    :data:`DENIED_BUILTIN_BASH_COMMANDS`, each shaped ``Bash(<command> *)`` — matching this
+    module's own established prefix-rule shape (:func:`allowed_tools_for`'s ``Bash({wrapper_path}
+    *)``) and, per Claude Code's own documented precedence, evaluated BEFORE that built-in
+    always-approved set — see :data:`DENIED_BUILTIN_BASH_COMMANDS`'s own comment for why this
+    closes a real gap the wrapper's argv validation alone does not."""
+    if tier == "trusted":
+        return ""
+    # The prefix form alone, VERIFIED EMPIRICALLY rather than read off the docs. An earlier
+    # draft emitted an exact-match ``Bash(cmd)`` entry beside each prefix entry, hedging against
+    # the docs not working the zero-argument case explicitly — the case that matters most here,
+    # since a bare unflagged invocation is exactly what the built-in auto-approve set covers.
+    # A live probe settled it, with a negative control:
+    #   claude -p "run: pwd" --permission-mode dontAsk  (no deny rule)  -> pwd RUNS
+    #   ... --disallowedTools "Bash(pwd *)"                             -> REFUSED
+    # so the trailing-wildcard form already matches the bare command. The exact-match half was
+    # dead weight; a disproven hedge left in place is worse than one never written.
+    return ",".join(f"Bash({command} *)" for command in DENIED_BUILTIN_BASH_COMMANDS)
+
+
 def validate_execution(value: str) -> bool:
     """True if <value> is "readonly" or "trusted", False otherwise. Mirrors the retired bash
     CLI's ``execution.sh`` pantheon_validate_execution exactly (removed in #29; case-sensitive,
@@ -723,8 +785,22 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "wrapper":
         return _wrapper_cli(argv[1:])
+    # Read-only query subcommand: lets action.yml source the deny list from THIS module rather
+    # than hand-copying it into shell, keeping one source for the tier->deny decision across
+    # both surfaces (the drift this repo keeps closing elsewhere).
+    if len(argv) == 2 and argv[0] == "disallowed-tools":
+        if not validate_execution(argv[1]):
+            print(
+                f"pantheon.execution: unknown execution tier '{argv[1]}' (must be 'readonly' or 'trusted')",
+                file=sys.stderr,
+            )
+            return 2
+        print(disallowed_tools_for(argv[1]))
+        return 0
     print(
-        "usage: python -m pantheon.execution wrapper [--repo-root <path>] <diff|show|log|status> [args...]",
+        "usage: python -m pantheon.execution wrapper [--repo-root <path>] "
+        "<diff|show|log|status> [args...]\n"
+        "       python -m pantheon.execution disallowed-tools <readonly|trusted>",
         file=sys.stderr,
     )
     return 2
