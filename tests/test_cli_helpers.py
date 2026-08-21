@@ -281,7 +281,9 @@ def test_run_agent_uses_neutral_cwd_under_readonly_execution(tmp_path, monkeypat
 
     captured: dict = {}
 
-    def fake_provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None):
+    def fake_provider_run(
+        provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None, disallowed_tools=None
+    ):
         captured["neutral_cwd"] = neutral_cwd
         return '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"ok"}'
 
@@ -305,7 +307,7 @@ def test_run_agent_uses_neutral_cwd_under_readonly_execution(tmp_path, monkeypat
         spec_file="",
     )
     cli_module._run_agent(
-        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash(x *)", 60.0, str(neutral)
+        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash(x *)", 60.0, str(neutral), ""
     )
 
     assert captured["neutral_cwd"] == str(neutral)
@@ -321,7 +323,9 @@ def test_run_agent_uses_repo_root_as_cwd_under_trusted_execution(tmp_path, monke
 
     captured: dict = {}
 
-    def fake_provider_run(provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None):
+    def fake_provider_run(
+        provider, model, prompt_file, allowed_tools, timeout, repo_root=None, neutral_cwd=None, disallowed_tools=None
+    ):
         captured["neutral_cwd"] = neutral_cwd
         return '{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findings":[],"summary":"ok"}'
 
@@ -345,7 +349,7 @@ def test_run_agent_uses_repo_root_as_cwd_under_trusted_execution(tmp_path, monke
         spec_file="",
     )
     cli_module._run_agent(
-        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash", 60.0, str(neutral)
+        "artemis", ctx, str(workdir), False, False, "claude", "", "Read,Grep,Glob,Bash", 60.0, str(neutral), ""
     )
 
     # Under trusted mode, the provider's own cwd must be the REAL checkout -- _build_prompt's own
@@ -638,6 +642,45 @@ def test_run_gate_never_calls_tempfile_temporarydirectory_without_an_explicit_tr
         "run_gate() no longer verifies neutral_cwd resolves outside every trusted root after "
         "creating it — the last-line-of-defense check for a trusted-base choice that still "
         "collides with the checkout"
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# The wiring gap the checks above don't close: run_gate() computes and containment-checks
+# neutral_cwd (asserted above), but nothing yet proves that VERIFIED value is what actually
+# reaches _run_agent()'s own neutral_cwd parameter at the call site — they're 11 positional
+# arguments, and test_run_agent_uses_neutral_cwd_under_readonly_execution drives _run_agent()
+# directly with an explicit neutral_cwd argument, so it never exercises run_gate()'s own call.
+# A future edit that reorders _run_agent's parameters, or this call site's argument list, or
+# substitutes the wrong identifier (e.g. `workdir`) in the neutral_cwd slot would silently
+# reopen CRITICAL-1 (readonly-tier providers launched with the repo checkout as their cwd again)
+# with no test failing — this closes that gap the same "grep the source for the call shape" way
+# as the guards above, deriving the expected position from _run_agent's own live signature
+# rather than hardcoding an argument index.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_run_gate_passes_its_own_verified_neutral_cwd_to_run_agent() -> None:
+    import inspect
+
+    params = list(inspect.signature(cli_module._run_agent).parameters)
+    assert "neutral_cwd" in params, "_run_agent() no longer has a neutral_cwd parameter — update this guard"
+    neutral_cwd_index = params.index("neutral_cwd")
+
+    source = inspect.getsource(cli_module.run_gate)
+    call_start = source.index("agent_data[agent] = _run_agent(")
+    call_text = source[call_start : source.index(")", call_start) + 1]
+    positional_args = [line.strip().rstrip(",") for line in call_text.splitlines()[1:-1]]
+
+    assert len(positional_args) > neutral_cwd_index, (
+        "run_gate()'s _run_agent(...) call no longer has enough positional arguments to reach "
+        "the neutral_cwd slot — update this guard to match its new shape"
+    )
+    assert positional_args[neutral_cwd_index] == "neutral_cwd", (
+        f"run_gate()'s _run_agent(...) call passes {positional_args[neutral_cwd_index]!r} in the "
+        "neutral_cwd positional slot, not the verified `neutral_cwd` variable computed and "
+        "containment-checked above it (see the guards above this one) — this is the exact "
+        "wiring that would silently reopen CRITICAL-1 if it ever drifted"
     )
 
 

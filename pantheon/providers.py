@@ -410,6 +410,16 @@ def default_allowed_tools(repo_root: str | None = None) -> str:
     return f"Read,Grep,Glob,Bash({fallback_cmd} *)"
 
 
+def default_disallowed_tools() -> str:
+    """The readonly-tier fallback ``--disallowedTools`` value — the deny-list companion to
+    :func:`default_allowed_tools`, used the same way (a caller, or a standalone ``python -m
+    pantheon.providers run`` invocation, that gives no explicit deny list at all). Unlike
+    :func:`default_allowed_tools`, this has no wrapper-path/repo-root shape to resolve — it is
+    ``pantheon.execution.disallowed_tools_for("readonly")`` verbatim, the ONE place that deny
+    list's content is defined (see that function's own docstring)."""
+    return execution.disallowed_tools_for("readonly")
+
+
 def _read_prompt(prompt_file: str) -> str:
     with open(prompt_file, encoding="utf-8", errors="replace") as fh:
         return fh.read()
@@ -868,6 +878,7 @@ def _claude(
     timeout: float | None,
     repo_root: str | None,
     neutral_cwd: str | None,
+    disallowed_tools: str | None = None,
 ) -> str:
     """Provider lane: Claude Code CLI. Default lane — the only one integration-tested (mirrors
     the retired bash CLI's ``claude.sh`` provider script, removed in #29). ``--permission-mode
@@ -942,14 +953,46 @@ def _claude(
     :func:`pantheon.verdict.extract_last_json`'s own trailing-scan, discarding a perfectly valid
     verdict — see :func:`_run`'s own docstring for the full finding and fix; this lane is the
     ONE caller that opts into the separated-stream path, since it's the only lane whose output is
-    a single, machine-readable JSON envelope in the first place."""
+    a single, machine-readable JSON envelope in the first place.
+
+    ``--disallowedTools`` (``disallowed_tools``, default ``None`` — falls back to
+    :func:`default_disallowed_tools`, mirroring ``allowed_tools``'s own ``or
+    default_allowed_tools(repo_root)`` fallback one line below) closes a gap
+    ``--allowedTools`` alone leaves open under ``readonly``: Claude Code's own docs disclose a
+    small, built-in set of Bash commands (bare ``ls``/``cat``/``echo``/``pwd``/``head``/``tail``/
+    ``grep``/``find``/``wc``/``which``/``diff``/``stat``/``du``/``cd``, and read-only forms of
+    ``git``) that run WITHOUT ever consulting ``--allowedTools``, in every permission mode
+    including ``dontAsk`` — a second, unaudited path back to the repo checkout alongside the
+    readonly wrapper, since a bare ``git diff``/``show``/``log``/``status`` never reaches
+    ``pantheon.execution``'s argv validation at all. Docs say that default set is overridable by
+    an explicit deny (or ask) rule, which beats an allow rule in Claude Code's own precedence —
+    see ``pantheon.execution.disallowed_tools_for``'s own docstring for the full list and the
+    ``git`` entry's own non-collision proof against the wrapper's absolute-path invocation. Empty
+    for ``trusted`` (an explicit ``""`` from ``pantheon.cli``, never falling back here — see that
+    function's own tier-resolution)."""
     claude_bin = _resolve_cli("claude", repo_root)
     if claude_bin is None:
         raise ProviderError("'claude' CLI not found on PATH")
 
     prompt = _read_prompt(prompt_file)
     tools = allowed_tools or default_allowed_tools(repo_root)
-    argv = [claude_bin, "-p", prompt, "--allowedTools", tools, "--permission-mode", "dontAsk"]
+    # The two defaults are COUPLED on purpose. Inferring the readonly deny list while the caller
+    # supplied its own allowed_tools produced a contradictory invocation: an explicit full-Bash
+    # caller (the documented `python -m pantheon.providers run` shim, or any standalone
+    # provider_run) passed `Read,Grep,Glob,Bash` and still had git/pwd/cat refused out from under
+    # it, because the deny side defaulted to readonly regardless. A caller who states its own tool
+    # policy owns BOTH halves of it; only a caller that took the allowed_tools default — i.e. one
+    # that expressed no policy at all — gets the readonly deny list inferred to match.
+    if disallowed_tools is not None:
+        deny_tools = disallowed_tools
+    elif allowed_tools:
+        deny_tools = ""
+    else:
+        deny_tools = default_disallowed_tools()
+    argv = [claude_bin, "-p", prompt, "--allowedTools", tools]
+    if deny_tools:
+        argv += ["--disallowedTools", deny_tools]
+    argv += ["--permission-mode", "dontAsk"]
     if model:
         argv += ["--model", model]
     argv += ["--output-format", "json", "--json-schema", VERDICT_JSON_SCHEMA]
@@ -964,6 +1007,7 @@ def _codex(
     timeout: float | None,
     repo_root: str | None,
     neutral_cwd: str | None,
+    disallowed_tools: str | None = None,
 ) -> str:
     """Provider lane: Codex CLI. Best-effort — mirrors the retired bash CLI's ``codex.sh``
     provider script's ``codex exec -`` invocation (removed in #29), prompt piped via stdin. No
@@ -1003,6 +1047,7 @@ def _gemini(
     timeout: float | None,
     repo_root: str | None,
     neutral_cwd: str | None,
+    disallowed_tools: str | None = None,
 ) -> str:
     """Provider lane: Gemini CLI. Best-effort — mirrors the retired bash CLI's ``gemini.sh``
     provider script's ``gemini -p <prompt> [-m <model>]`` invocation (removed in #29). No
@@ -1028,6 +1073,7 @@ def _cursor(
     timeout: float | None,
     repo_root: str | None,
     neutral_cwd: str | None,
+    disallowed_tools: str | None = None,
 ) -> str:
     """Provider lane: Cursor CLI (``cursor-agent``). Best-effort — mirrors the retired bash
     CLI's ``cursor.sh`` provider script's ``cursor-agent -p <prompt> [--model <model>]``
@@ -1059,6 +1105,7 @@ def provider_run(
     timeout: float | None = None,
     repo_root: str | None = None,
     neutral_cwd: str | None = None,
+    disallowed_tools: str | None = None,
 ) -> str:
     """Dispatches to the named provider lane and returns its raw stdout (merged with stderr, see
     :func:`_run`). ``provider`` must be one of :data:`KNOWN_PROVIDERS` — an unrecognized name is
@@ -1082,11 +1129,17 @@ def provider_run(
     process's own cwd unmodified — acceptable for genuinely standalone, operator-invoked use
     (this module's own ``python -m pantheon.providers run ...`` CLI below, run at the operator's
     own discretion, not as part of reviewing untrusted PR content) but never how
-    ``pantheon.cli``'s own gate run invokes this function."""
+    ``pantheon.cli``'s own gate run invokes this function.
+
+    ``disallowed_tools`` (default ``None``) is consumed only by the ``claude`` lane too — see
+    :func:`_claude`'s own docstring for the built-in-Bash-bypass gap this closes and its
+    ``None``-means-"fall back to the readonly deny list" contract (never conflated with an
+    explicit ``""``, which ``pantheon.cli`` passes for ``trusted`` and which must stay a true
+    no-deny-list run, not silently reacquire the readonly one)."""
     fn = _DISPATCH.get(provider)
     if fn is None:
         raise ProviderError(f"unknown provider lane '{provider}' (known: {', '.join(KNOWN_PROVIDERS)})")
-    return fn(model, prompt_file, allowed_tools, timeout, repo_root, neutral_cwd)
+    return fn(model, prompt_file, allowed_tools, timeout, repo_root, neutral_cwd, disallowed_tools)
 
 
 # ---------------------------------------------------------------------------------------------

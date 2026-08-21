@@ -15,7 +15,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "review-pantheon"  # PyPI dist name ("pantheon" is taken upstream); import package + console command stay `pantheon`
-version = "0.2.3"
+version = "0.3.0"
 description = "review-pantheon's Python CLI"
 readme = "README.md"
 license = { text = "MIT" }

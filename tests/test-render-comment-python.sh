@@ -752,6 +752,69 @@ assert_contains "repo-root-redaction-fallback-escaped" "the redaction placeholde
 rm -f "$FALLBACK_ROOT_FILE"
 
 # ---------------------------------------------------------------------------
+# Fixture: credential redaction (security hardening — the upstream action places the workflow
+# token into the reviewer model's own process env; if a reviewer model ever echoes a credential
+# value/shape back in a verdict field, this renderer must not publish it). Injects BOTH a literal
+# env-configured credential value AND a credential-SHAPED token this process's env never held,
+# into EVERY field a model can control (top/summary/issue/scenario), and asserts neither survives
+# ANYWHERE in the FULL rendered comment -- deliberately checked against the whole `$out`, not the
+# `$human_readable` slice the "hostile-content" fixture above uses: that slice ends at the
+# `<summary>Raw verdict JSON` marker, so an assertion against it alone would be green by
+# construction and prove nothing about the machine tail, which prints model output verbatim and
+# is this renderer's highest-risk surface for exactly this leak.
+reset_agent_env
+old_github_token="${GITHUB_TOKEN:-}"
+had_github_token=0
+[[ -n "${GITHUB_TOKEN+set}" ]] && had_github_token=1
+# Obviously-fake filler -- never a real credential -- long enough to clear the literal-value
+# redaction floor.
+FIXTURE_LITERAL_CREDENTIAL="not-a-real-secret-fixture-0123456789abcdef"
+export GITHUB_TOKEN="$FIXTURE_LITERAL_CREDENTIAL"
+# A GitHub-PAT-shaped token this process's env never held under any key -- exercises the
+# shape-based pass, independent of the literal-value pass above.
+FIXTURE_SHAPE_CREDENTIAL="ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+ARTEMIS_COLOR=yellow ARTEMIS_VERDICT=FIX_FIRST
+ARTEMIS_TOP="leaked in top: $FIXTURE_LITERAL_CREDENTIAL"
+ARTEMIS_FINDINGS="$(python3 -c "
+import json
+literal = '$FIXTURE_LITERAL_CREDENTIAL'
+shaped = '$FIXTURE_SHAPE_CREDENTIAL'
+print(json.dumps({
+    'agent': 'artemis', 'verdict': 'FIX_FIRST', 'has_blocker': False,
+    'findings': [{'severity': 'should_fix', 'file': 'a', 'line': 1,
+                  'issue': 'leaked literal credential in issue: ' + literal,
+                  'scenario': 'leaked shape-based credential in scenario: ' + shaped}],
+    'summary': 'leaked literal: ' + literal + ' and shaped: ' + shaped,
+}))
+")"
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+out="$(render "$HEAD_SHA" artemis)"
+if [[ "$had_github_token" -eq 1 ]]; then
+  export GITHUB_TOKEN="$old_github_token"
+else
+  unset GITHUB_TOKEN
+fi
+assert_not_contains "credential-redaction" "the literal env-configured credential does not leak anywhere in the full output" "$out" "$FIXTURE_LITERAL_CREDENTIAL"
+assert_not_contains "credential-redaction" "the shape-based credential does not leak anywhere in the full output" "$out" "$FIXTURE_SHAPE_CREDENTIAL"
+assert_contains "credential-redaction" "the redaction placeholder appears in the human-readable section" "$out" "<redacted-credential>"
+machine_tail="${out#*<summary>Raw verdict JSON}"
+assert_not_contains "credential-redaction" "the literal credential does not leak in the machine tail specifically" "$machine_tail" "$FIXTURE_LITERAL_CREDENTIAL"
+assert_not_contains "credential-redaction" "the shape-based credential does not leak in the machine tail specifically" "$machine_tail" "$FIXTURE_SHAPE_CREDENTIAL"
+assert_contains "credential-redaction" "the redaction placeholder appears in the machine tail specifically" "$machine_tail" "<redacted-credential>"
+
+# --- Sub-case: no credential configured/present -- must not crash, must not over-redact --------
+# The normal LOCAL case (`pantheon gate` run with no GITHUB_TOKEN set at all): ordinary text that
+# merely resembles a short gh-prefixed identifier must survive untouched, and a totally unset
+# credential env var must never be treated as a redaction target.
+reset_agent_env
+unset GITHUB_TOKEN GH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+ARTEMIS_COLOR=green ARTEMIS_VERDICT=CLEAN ARTEMIS_TOP="no findings"
+ARTEMIS_FINDINGS='{}'
+export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
+out="$(render "$HEAD_SHA" artemis)"
+assert_not_contains "credential-redaction-absent" "unset credential env vars never crash the renderer or spuriously redact" "$out" "<redacted-credential>"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

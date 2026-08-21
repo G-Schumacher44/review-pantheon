@@ -88,6 +88,73 @@ else
   fail "allowed_tools_for trusted: unexpected value '$trusted_tools'"
 fi
 
+# --- deny list: the built-in read commands that bypass the wrapper entirely ---
+deny_readonly="$(pycall "execution.disallowed_tools_for('readonly')")"
+
+# Every documented built-in must be denied. The trailing-wildcard form is sufficient on its
+# own: a live probe (with a no-deny-rule control proving bare `pwd` otherwise runs) confirmed
+# `Bash(pwd *)` refuses the bare zero-argument invocation, so the exact-match form an earlier
+# draft also emitted was dead weight. See disallowed_tools_for()'s comment for the probe.
+# The command list itself is pulled from the live DENIED_BUILTIN_BASH_COMMANDS constant, not
+# hand-copied here — a hand-copy is exactly the drift class issue #78 closed (the same list was
+# independently hand-restated a third time in SECURITY.md; see test_security_md_denied_commands.py).
+denied_commands="$(pycall "'\n'.join(execution.DENIED_BUILTIN_BASH_COMMANDS)")"
+# A pycall failure (e.g. the constant renamed/removed) leaves $denied_commands empty via plain
+# command-substitution capture — set -o pipefail alone does not abort a bare assignment, so an
+# unguarded empty-string read loop below would silently iterate zero commands and report a false
+# PASS. Fail loud instead of trusting emptiness means "nothing to check."
+if [[ -z "$denied_commands" ]]; then
+  fail "disallowed_tools_for readonly: could not read DENIED_BUILTIN_BASH_COMMANDS from pantheon.execution (pycall produced no output — see stderr above for the real error)"
+else
+  missing=""
+  while IFS= read -r cmd; do
+    [[ -z "$cmd" ]] && continue
+    [[ "$deny_readonly" == *"Bash($cmd *)"* ]] || missing="$missing $cmd"
+  done <<<"$denied_commands"
+  if [[ -z "$missing" ]]; then
+    pass "disallowed_tools_for readonly: every built-in bypass command denied"
+  else
+    fail "disallowed_tools_for readonly: missing deny entries:$missing"
+  fi
+fi
+
+if [[ "$deny_readonly" != *"Bash(ls),"* ]]; then
+  pass "disallowed_tools_for readonly: no redundant exact-match entries (prefix form covers bare)"
+else
+  fail "disallowed_tools_for readonly: exact-match entries returned — the probe showed they are redundant"
+fi
+
+# THE critical property: deny beats allow in Claude Code's precedence, so a deny entry that
+# shadowed the wrapper's own allow entry would silently disable the gate's only sanctioned
+# path to the diff — the exact way this hardening could break the thing it protects.
+wrapper_shadowed=""
+while IFS= read -r entry; do
+  [[ -z "$entry" ]] && continue
+  prefix="${entry#Bash(}"; prefix="${prefix%)}"; prefix="${prefix% \*}"
+  case "$WRAPPER_PATH" in
+    "$prefix"|"$prefix "*) wrapper_shadowed="$entry" ;;
+  esac
+done <<<"$(tr ',' '\n' <<<"$deny_readonly")"
+if [[ -z "$wrapper_shadowed" ]]; then
+  pass "disallowed_tools_for readonly: no deny entry shadows the wrapper's own allow entry"
+else
+  fail "disallowed_tools_for readonly: '$wrapper_shadowed' shadows the wrapper path — deny beats allow, the gate would lose its only sanctioned git path"
+fi
+
+deny_trusted="$(pycall "execution.disallowed_tools_for('trusted')")"
+if [[ -z "$deny_trusted" ]]; then
+  pass "disallowed_tools_for trusted: empty — full Bash is that tier's documented, explicit opt-in"
+else
+  fail "disallowed_tools_for trusted: expected empty, got '$deny_trusted'"
+fi
+
+deny_fallback="$(pycall "execution.disallowed_tools_for('bogus-tier')")"
+if [[ "$deny_fallback" == "$deny_readonly" ]]; then
+  pass "disallowed_tools_for <unrecognized>: fails safe to the readonly deny list, not open"
+else
+  fail "disallowed_tools_for <unrecognized>: did not fail safe to readonly"
+fi
+
 fallback_tools="$(pycall "execution.allowed_tools_for('bogus-tier', '$WRAPPER_PATH')")"
 if [[ "$fallback_tools" == "$readonly_tools" ]]; then
   pass "allowed_tools_for <unrecognized>: fails safe to the readonly value, not open"

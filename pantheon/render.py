@@ -26,8 +26,11 @@ output — verdict, summary, and each finding's severity/file/line/issue/scenari
 through :func:`sanitize_inline` (or a stricter variant, e.g. the line-number-or-"?" coercion in
 :func:`_finding_line_or_placeholder`) before it reaches the human-readable section of the
 comment. The one deliberate exception is the machine tail (the nested "Raw verdict JSON" block
-near the end of :func:`render_comment`) — it prints the untouched JSON on purpose, because that's
-the whole point of keeping a machine-readable copy.
+near the end of :func:`render_comment`) — it skips ``sanitize_inline``'s markdown-escaping steps
+and prints the JSON as-is otherwise, because that's the whole point of keeping a machine-readable
+copy. It is NOT exempt from :func:`redact_paths` itself, though (see that function's own
+docstring) — repo-path AND credential redaction apply to the machine tail exactly as they do to
+the human-readable sections, via :func:`_machine_tail_text`'s own direct calls to it.
 
 Every JSON parse and every JSON serialize in this module goes through ``pantheon.jqjson``, not
 Python's own json module's parse/serialize entry points directly — see that module's own
@@ -168,6 +171,99 @@ def _home_directory_redaction_targets(repo_root: str) -> set[str]:
 # coordinator finding.
 _PATH_BOUNDARY = r"(?=/|[^A-Za-z0-9_.\-]|$)"
 
+_REDACTED_CREDENTIAL = "<redacted-credential>"
+
+# Minimum length a candidate literal-value credential must clear before it's treated as a
+# redaction target. Guards the short-value failure mode: a 3-4 character stub some local shim or
+# test fixture happens to set for one of these vars would otherwise mangle ordinary prose that
+# coincidentally contains that substring (an empty value is already harmless — `str.replace("",
+# X, text)` never matches — but a short-and-real one is a genuine corruption risk). Every
+# credential this module actually expects (GitHub PATs, Anthropic API keys, AWS keys, ...) is far
+# longer than this floor in real use.
+_MIN_CREDENTIAL_LITERAL_LEN = 16
+
+# Fixed, ordered tuple — iterated in THIS order, never via a live `for k in os.environ` walk — so
+# output stays deterministic regardless of the process env's own iteration order. Every key here
+# is documented, in pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS's own per-key audit
+# comments, as an OPAQUE CREDENTIAL VALUE — GOOGLE_APPLICATION_CREDENTIALS and AWS_PROFILE are
+# deliberately excluded even though they're on that list: the former is a path TO a credentials
+# file (redact_paths's own containment logic is the right tool for a path, not this one), the
+# latter a profile NAME, neither is itself a secret value this renderer could leak verbatim.
+# GH_TOKEN/GITHUB_TOKEN/GH_ENTERPRISE_TOKEN aren't on pantheon.providers's list at all (that
+# module never launches `gh`) — they're pantheon.cli's own git/gh allowlist (`gh`'s own three
+# supported auth-token variables, `gh help environment` — GH_ENTERPRISE_TOKEN authenticates a
+# GitHub Enterprise Server host the same way GH_TOKEN/GITHUB_TOKEN authenticate github.com), the
+# credential this repo's *own* `gh pr comment` call authenticates with, and exactly the one a
+# compromised reviewer run has the clearest incentive to exfiltrate through a posted comment.
+# Omitting GH_ENTERPRISE_TOKEN specifically was a real gap (Codex P1, PR #75): it IS forwarded by
+# pantheon.cli, so on a GHES install it WAS present in the reviewer's own env, and it was never a
+# redaction target — `test_every_credential_shaped_forwarded_env_key_is_redacted` in
+# tests/test_render.py now enforces mechanically, from the real allowlist constants (not a
+# hand-copied name list), that this class of gap can't reopen silently.
+#
+# PANTHEON_REVIEWER_GITHUB_TOKEN is NOT a forwarded auth credential at all — it exists solely so
+# this module's literal-value pass can see the reviewer token action.yml's separate "Build and
+# post combined comment" step would otherwise never observe (see that step's own env-block
+# comment for the full reasoning): each `Run <agent>` step gets `${{ inputs.github_token }}`, but
+# that render/post step only gets `${{ github.token }}` as GH_TOKEN — the two coincide under the
+# default setup but diverge the moment a consumer workflow overrides the `github_token` input
+# (a GitHub App installation token, a PAT, a GHES token), and a literal-value pass can only ever
+# redact a value it can actually see in ITS OWN process env.
+_CREDENTIAL_ENV_KEYS: tuple[str, ...] = (
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "PANTHEON_REVIEWER_GITHUB_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "CURSOR_API_KEY",
+)
+
+# Known credential-SHAPE prefixes — catches a token this PROCESS's own env never held (a
+# reviewer model can echo back a credential string for a different identity/run than this one,
+# e.g. one it read out of PR content), not just this run's own literal env values. GitHub's five
+# token-type prefixes (ghp_ personal, gho_ oauth, ghu_ user-to-server, ghs_
+# server-to-server/installation, ghr_ refresh — GitHub's own docs enumerate exactly these five)
+# plus the newer github_pat_-prefixed fine-grained PAT, and Anthropic's sk-ant- API-key prefix.
+# The trailing-character-count floor (20) is well under every real token's actual length for all
+# of these formats, so it only ever UNDER-matches (consumes more of a long token, never rejects a
+# real one for being "too short") — chosen to avoid false positives on short, unrelated
+# alnum/underscore/hyphen runs that happen to start with one of these prefixes.
+_CREDENTIAL_SHAPE_RE = re.compile(r"(?:gh[psour]_|github_pat_|sk-ant-)[A-Za-z0-9_-]{20,}")
+
+
+def _redact_credentials(text: str) -> str:
+    """Redacts credential VALUES from ``text`` — the companion half of this module's one
+    redaction chokepoint (see :func:`redact_paths`, which calls this directly at the top of its
+    own body; nothing else in this module calls it). Two passes, literal-value first:
+
+      1. Every env var in :data:`_CREDENTIAL_ENV_KEYS` that is actually SET in this process's own
+         environment, and whose value clears :data:`_MIN_CREDENTIAL_LITERAL_LEN` — an unset var
+         (the normal case for a local ``pantheon gate`` run with no ``GITHUB_TOKEN``) is skipped
+         silently: never a crash, never a spurious redaction target.
+      2. :data:`_CREDENTIAL_SHAPE_RE` — catches a credential-shaped token this process's own env
+         never held at all (see that pattern's own docstring for why that's a distinct case worth
+         covering).
+
+    Literal-value first, shape-based second: a literal value that also happens to match the shape
+    regex is already gone by the time the regex pass runs (idempotent — not a double-redaction
+    concern), and the shape pass still needs to run afterward regardless, to catch a token this
+    process's env never had a matching key for in the first place. Neither pass can re-expose or
+    corrupt the other's output: both only ever replace matched text with the same
+    ``<redacted-credential>`` placeholder, which contains no characters either pass's own pattern
+    could re-match."""
+    for key in _CREDENTIAL_ENV_KEYS:
+        value = os.environ.get(key)
+        if value and len(value) >= _MIN_CREDENTIAL_LITERAL_LEN:
+            text = text.replace(value, _REDACTED_CREDENTIAL)
+    return _CREDENTIAL_SHAPE_RE.sub(_REDACTED_CREDENTIAL, text)
+
 
 def _json_escaped_variant(target: str) -> str | None:
     """The JSON-string-escaped spelling of ``target`` (``\\`` -> ``\\\\``, then ``"`` -> ``\\"``
@@ -181,18 +277,34 @@ def _json_escaped_variant(target: str) -> str | None:
 
 
 def redact_paths(text: str, repo_root: str | None) -> str:
-    """Replaces every occurrence of ``repo_root`` (an absolute filesystem path) — AND every other
-    spelling that identifies the same user/location — in ``text`` with the stable placeholder
-    ``<repo>``. THE single redaction chokepoint for this module (adversarial review, round 5,
-    coordinator finding, closing five straight rounds of instance-by-instance patching — too
-    narrow, then partial variants, then escape ordering, then unanchored substitution and a
-    missed fallback path): every place in this module that can carry model text or a path —
-    human-readable sections (:func:`sanitize_inline`), the machine tail's pretty-printed JSON
-    AND its raw-text fallback (:func:`_machine_tail_text`) — calls THIS function, and nothing
-    else in this module performs its own ad hoc path matching. ``tests/test_render.py``'s
+    """THE single redaction chokepoint for this module: every place in this module that can
+    carry model text or a path — human-readable
+    sections (:func:`sanitize_inline`), the machine tail's pretty-printed JSON AND its raw-text
+    fallback (:func:`_machine_tail_text`) — calls THIS function, and nothing else in this module
+    performs its own ad hoc redaction. ``tests/test_render.py``'s
     ``test_redact_paths_is_the_only_redaction_chokepoint_in_this_module`` mechanically enforces
     that a sixth call site can't add its own bespoke logic instead of routing through here (the
     same enumeration-test pattern ``tests/test-json-boundary.sh`` uses for ``pantheon.jqjson``).
+
+    Two, unconditionally-ordered, passes:
+
+      1. :func:`_redact_credentials` — credential VALUES (an env-configured secret this process
+         itself holds, e.g. the ``GITHUB_TOKEN`` a compromised reviewer run has every incentive to
+         exfiltrate through the very comment it's rendering) and credential-SHAPED tokens (a
+         GitHub/Anthropic token whose value this process's own env never held at all). Runs FIRST,
+         and unconditionally — before the ``repo_root`` falsy-check below, and regardless of its
+         outcome — because a credential leak has nothing to do with whether path redaction happens
+         to be configured for this call; a local ``pantheon gate`` run with no ``repo_root`` passed
+         must still never publish a credential it can see.
+      2. Path redaction (the original responsibility this function name describes) — replaces
+         every occurrence of ``repo_root`` (an absolute filesystem path) — AND every other
+         spelling that identifies the same user/location — with the stable placeholder ``<repo>``.
+         A no-op when ``repo_root`` is falsy.
+
+    Order between the two passes can't re-expose or corrupt either one's output: a credential
+    value/shape and a filesystem path are disjoint text shapes (a token never looks like a path
+    and vice versa), and each pass's own replacement placeholder (``<redacted-credential>`` /
+    ``<repo>``) contains no characters the OTHER pass's pattern could go on to match.
 
     Originally a fix for a real information-disclosure regression CRITICAL-1's own fix
     (adversarial review) introduced: that fix exposes the repo's absolute path to the reviewing
@@ -245,8 +357,10 @@ def redact_paths(text: str, repo_root: str | None) -> str:
     thing to ``<repo>``, not just its home-directory prefix, leaving the rest dangling
     unredacted next to a stray ``<repo>``), each followed by the shared boundary lookahead.
 
-    A no-op when ``repo_root`` is falsy (the common case for every caller that hasn't opted into
-    this — the two-runtime env-var bridge below, older callers)."""
+    Path redaction is a no-op when ``repo_root`` is falsy (the common case for every caller that
+    hasn't opted into this — the two-runtime env-var bridge below, older callers); credential
+    redaction is never gated on ``repo_root`` at all."""
+    text = _redact_credentials(text)
     if not repo_root:
         return text
     raw_targets = _path_redaction_variants(repo_root) | _home_directory_redaction_targets(repo_root)
@@ -431,13 +545,42 @@ def _top_finding_text(verdict_obj: Any) -> str:
     return jqjson.subst(jqjson.jq_text(_or_default(sorted_findings[0].get("issue"), "")))
 
 
-def _table_top_cell(verdict: str, top_text: str, verdict_obj: Any) -> str:
-    """Mirrors ``_pantheon_table_top_cell``."""
+def _table_top_cell(verdict: str, top_text: str, verdict_obj: Any, repo_root: str | None = None) -> str:
+    """Mirrors ``_pantheon_table_top_cell``, plus one Python-port-only step ``best`` needs that
+    bash's original never did (bash's own ``_pantheon_table_top_cell`` has no credential-
+    redaction concept at all — this is a deliberate, security-motivated deviation from the
+    otherwise byte-identical-to-bash contract, same category as :func:`redact_paths`'s own
+    repo-root redaction).
+
+    :func:`redact_paths` runs on ``best`` HERE, before :func:`truncate` — not left to the
+    caller's later ``sanitize_inline(_table_top_cell(...), repo_root)`` call to handle after the
+    fact. ``truncate`` slices on a raw character count with no awareness of what it's cutting
+    through: a credential landing across that cut point survives redaction two different ways —
+    the literal-value pass no longer sees the value as one contiguous run to match, and the
+    shape-regex pass's trailing-character floor (``{20,}``) can fail once the tail past the cut is
+    gone. Left uncorrected, an attacker who controls the finding text controls the padding before
+    a credential too, and can walk the truncation window across repeated runs to read the whole
+    secret out in fragments. Redacting first means there is nothing contiguous left for
+    ``truncate`` to split.
+
+    Calling :func:`redact_paths` here does NOT double-redact anything: it is the module's one
+    redaction PRIMITIVE (see its own docstring), not the full :func:`sanitize_inline` pipeline —
+    it only ever replaces a matched credential/path with a fixed placeholder
+    (``<redacted-credential>`` / ``<repo>``) that contains none of the characters either of its
+    own two passes matches on, so a second pass over already-redacted text is a verified no-op,
+    not a corruption risk (see ``tests/test_render.py``'s idempotence coverage). This is safe
+    specifically BECAUSE it is ``redact_paths`` and not ``sanitize_inline`` — ``sanitize_inline``
+    additionally does markdown/HTML escaping (``<`` -> ``&lt;`` et al.), which is NOT idempotent
+    (a second pass over already-escaped text mangles it further, e.g. ``&lt;`` -> ``&amp;lt;``),
+    so calling that a second time here instead would be wrong. The caller's own
+    ``sanitize_inline(_table_top_cell(...), repo_root)`` call still runs afterward exactly once,
+    unchanged — it's what applies the markdown escaping this function itself never needs to do.
+    """
     if verdict == "SKIPPED":
         return f"skipped — {top_text}"
     best = _top_finding_text(verdict_obj)
     if best:
-        return truncate(best, 90)
+        return truncate(redact_paths(best, repo_root), 90)
     if top_text and top_text != "no findings":
         return top_text
     return "—"
@@ -619,7 +762,7 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
         # Sanitize the raw verdict value FIRST, then wrap it in our own backticks — sanitizing an
         # already-backtick-wrapped string would treat those backticks as hostile content too.
         vcell = f"`{sanitize_inline(d.verdict, repo_root)}` — {d.color}"
-        topcell = sanitize_inline(_table_top_cell(d.verdict, d.top, findings_obj), repo_root)
+        topcell = sanitize_inline(_table_top_cell(d.verdict, d.top, findings_obj, repo_root), repo_root)
         lines.append(f"| {agent} | {vcell} | {topcell} |")
 
     lines.append("")

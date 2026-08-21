@@ -394,7 +394,7 @@ history, not here — a contract describes what's true now, not how it got that 
   exits 0 with a NOT-GATED notice instead of failing (`action.yml`'s "Assert exactly one auth
   input is set" step; disclosed in SECURITY.md/SETUP.md, not a silent skip of the general rule).
   It pins `anthropics/claude-code-action` to a full commit
-  SHA — `239e3a730883eeb5c53db12b0fc9573b3024b126` (v1.0.191) — read directly from that
+  SHA — `d40ddef4c030e508327d6e35a9c45f3368482c50` (v1.0.195) — read directly from that
   release's own `action.yml`, not assumed or copied from an older version's docs (a moving
   tag, or an unpinned `uses:`, is the thing to avoid here). If you re-pin to a newer release
   yourself, that's step one of the install checklist (`install.sh`'s printed output and the
@@ -405,6 +405,50 @@ history, not here — a contract describes what's true now, not how it got that 
   (`github_token: ${{ inputs.github_token }}`), so consumers never need to grant
   `id-token: write` — that permission is only needed for claude-code-action's internal
   OIDC-token-exchange fallback, which it skips entirely once a `github_token` input is supplied.
+- **Credential redaction at render time — closes the render's own link in a three-link chain,
+  honestly, not completely.** `anthropics/claude-code-action`'s own pinned source copies its
+  entire `process.env` — the workflow token included — into the SDK options for the process that
+  runs the reviewer model (deleting only two OIDC-related vars first); the reviewer model then
+  reads untrusted PR content. Neither of those first two links is something this repo controls.
+  The third link — rendering that model's verdict fields into the PR comment we post — is: even
+  if a compromised reviewer emits a credential in a `file`/`issue`/`scenario`/`summary` field,
+  `pantheon.render.redact_paths` (the module's single redaction chokepoint, extended — see that
+  function's own docstring) strips it before the comment is ever posted, in both the
+  human-readable sections and the machine tail (the raw-JSON echo, this control's highest-risk
+  surface since it prints model output verbatim). Two passes: literal env-configured credential
+  VALUES the RENDERER's own process can see (`GITHUB_TOKEN`/`GH_TOKEN`/`GH_ENTERPRISE_TOKEN`,
+  `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, the AWS/OpenAI/Gemini/Google/Cursor keys — every
+  opaque-credential entry on `pantheon.providers._PROVIDER_ENV_PASSTHROUGH_KEYS`, plus
+  `GH_TOKEN`/`GITHUB_TOKEN`/`GH_ENTERPRISE_TOKEN` from `pantheon.cli`'s own git/gh allowlist — a
+  mechanical test, `test_every_credential_shaped_forwarded_env_key_is_redacted`, enforces that
+  every credential-shaped name on either real allowlist is on this redaction list too, so this
+  can't silently drift out of sync the way `GH_ENTERPRISE_TOKEN`'s own omission did — Codex P1,
+  PR #75), and known credential-SHAPED prefixes (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`,
+  `sk-ant-`) for a token this process's own env never held at all.
+
+  **This literal-value pass has an unstated precondition worth naming: it can only redact a value
+  present in the RENDERING process's OWN environment — nothing guarantees that's a superset of
+  what the REVIEWING process's environment held.** The published action's own composite-action
+  steps are a concrete instance: each `Run <agent>` step hands the reviewer model
+  `${{ inputs.github_token }}`, but the separate "Build and post combined comment" step that
+  renders and posts the result only received `${{ github.token }}` — identical under the default
+  setup, which is why this went unnoticed, but a consumer workflow that overrides the
+  `github_token` input (a GitHub App installation token, a PAT, a GHES token) hands the reviewer a
+  DIFFERENT token than the render step could see, and the shape-based pass doesn't cover every
+  legacy/GHES/App token format either. Fixed by forwarding the reviewer's own token into that
+  step's environment as a dedicated, REDACTION-ONLY variable
+  (`PANTHEON_REVIEWER_GITHUB_TOKEN` — see `action.yml`'s "Build and post combined comment" step
+  and `pantheon.render._CREDENTIAL_ENV_KEYS`'s own comment) purely so the literal pass can see it —
+  never used to authenticate anything itself (Codex P1, PR #75).
+
+  **The honest limit, restated precisely: literal redaction covers credential VALUES the
+  renderer's own process can see (now including the reviewer's actual token, forwarded
+  redaction-only, not just this repo's own git/gh credential); shape redaction covers
+  credential-SHAPED formats this module knows about. Neither pass can catch a credential the
+  model transforms** — split across characters, base64-encoded, paraphrased, or otherwise never
+  appearing verbatim/shape-matched in the rendered text. That's a real, disclosed gap, not a
+  claim of completeness; the mitigation this control provides is closing the links in the chain
+  that were ours to close, not eliminating the class.
 - **Tiered tool execution — read-only by default.** Every provider invocation's tool set is
   scoped by an `execution` setting: `readonly` (the default — `gate.conf`'s `execution=`, the
   CLI's `--execution` flag, or `action.yml`'s `execution` input) restricts Bash to exactly one
@@ -415,6 +459,38 @@ history, not here — a contract describes what's true now, not how it got that 
   arbitrary shell command is a code-execution primitive, not a review gate, so `readonly` is the
   default on every surface that invokes a provider — `trusted` is an explicit, documented opt-in
   for own-repo/trusted-author use only, never for reviewing a fork PR you don't control.
+  - **The allowlist is only half of it: the built-in bypass is denied too.** Claude Code
+    auto-approves a small built-in set of read commands — `ls`, `cat`, `echo`, `pwd`, `head`,
+    `tail`, `grep`, `find`, `wc`, `which`, `diff`, `stat`, `du`, `cd`, and read-only forms of
+    `git` — *before* `--allowedTools` is consulted, in every permission mode including `dontAsk`.
+    Under `readonly` that is a second path to the checkout that never reaches the wrapper's argv
+    validation. `pantheon.execution.disallowed_tools_for()` emits a deny rule per entry in
+    `DENIED_BUILTIN_BASH_COMMANDS`, and deny beats allow in Claude Code's own precedence, so each
+    of those commands is forced back through a permission decision that `readonly`'s allowlist
+    then fails closed on. `git` is denied deliberately, which forces every git read through the
+    wrapper; the wrapper is invoked by its own absolute path, never a bareword `git`, so the two
+    prefixes are disjoint by construction and a fixture asserts no deny entry shadows the
+    wrapper's own allow entry. Both surfaces read this list from that one function —
+    `action.yml` shells out to `pantheon/execution.py disallowed-tools <tier>` rather than
+    duplicating it in YAML. `trusted` emits no deny list; full Bash is that tier's explicit opt-in.
+    The rule shape is the trailing-wildcard form only (`Bash(cmd *)`), verified empirically with a
+    negative control rather than read off the docs: with no deny rule a bare `pwd` runs, and under
+    `Bash(pwd *)` it is refused — so the wildcard form already covers the zero-argument
+    invocation and an exact-match companion entry would be dead weight.
+  - **Only `pull_request` is permitted, enforced at runtime.** `action.yml`'s first step hard-fails
+    (exit 1, no `if:`, before any checkout-dependent work or model invocation) unless
+    `github.event_name` is exactly `pull_request`. This is an allowlist by design: an earlier
+    draft named the two obviously-dangerous triggers, and review pointed out that
+    `pull_request_review_comment` and `pull_request_review` also run from the base repository
+    with secrets while carrying a populated `github.event.pull_request` payload — so they passed
+    a blacklist. Enumerating unsafe events means being wrong whenever a new one appears; every
+    step here reads the PR number and base/head SHAs from `github.event.pull_request`, so that
+    context is the only one this action is built for. This is deliberately NOT the same path as the fork-PR NOT-GATED exit, which
+    remains a legitimate exit-0 skip: an ordinary `pull_request` run from a fork has no secrets to
+    protect (GitHub withholds them), so review is impossible rather than unsafe. This step covers
+    the opposite case — a run that *does* hold secrets over content it should not. See
+    SECURITY.md's "Fork pull requests cannot be gated by this action" for why the `workflow_run`
+    shape this refuses is not a working path here regardless of the trigger question.
   - The CLI surface's wrapper ships as part of the `pantheon` package and is resolved via its
     installed console script (`pantheon-git-readonly`) — `pantheon.cli._wrapper_invocation()`
     resolves that script's own absolute path via `pantheon.execution.resolve_console_script`,
@@ -447,7 +523,10 @@ history, not here — a contract describes what's true now, not how it got that 
     vector → neutralization → verification status). Read that module directly rather than
     duplicating the table here.
 - **Provider processes launch from a neutral cwd, never the repo checkout — the CLI (Python)
-  lane.** (The Action surface gets the identical protection through a DIFFERENT mechanism,
+  lane.** *(It is a config-discovery boundary, NOT a read boundary: `Read`/`Grep`/`Glob` are not
+  path-scoped and the prompt deliberately hands the agent the checkout's absolute path to reach
+  the repo with. Reading it as a read confinement is the wrong inference and SECURITY.md once
+  made it.)* (The Action surface gets the identical protection through a DIFFERENT mechanism,
   since a `uses:` step can't be cwd-relocated — see "The Action surface closes the identical
   vector too" below.) `--allowedTools`/the read-only wrapper scope what a provider CLI's *tool
   calls* can do, but a provider CLI's own STARTUP also auto-discovers repo-local configuration

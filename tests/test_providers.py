@@ -250,6 +250,32 @@ def test_claude_omits_model_flag_when_empty(monkeypatch, prompt_file) -> None:
     assert "--model" not in captured["argv"]
 
 
+def test_explicit_allowed_tools_does_not_get_an_inferred_deny_list(monkeypatch, prompt_file) -> None:
+    """Codex PR #76 — the deny default is coupled to the allow default.
+
+    Inferring the readonly deny list while the caller supplied its own allowed_tools built a
+    contradictory invocation: an explicit full-Bash caller (the `python -m pantheon.providers
+    run` shim, or any standalone provider_run) passed `Read,Grep,Glob,Bash` and still had
+    git/pwd/cat refused out from under it. A caller that states a tool policy owns both halves.
+    """
+    monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    captured = _install_fake_popen(monkeypatch, stdout='{"ok":true}')
+    providers.provider_run("claude", "sonnet", prompt_file, "Read,Grep,Glob,Bash")
+    assert "--disallowedTools" not in captured["argv"], (
+        "an explicit allowed_tools caller must not have a readonly deny list inferred — that "
+        "refuses git/pwd/cat under a nominally full-Bash invocation"
+    )
+
+    captured = _install_fake_popen(monkeypatch, stdout='{"ok":true}')
+    providers.provider_run("claude", "sonnet", prompt_file, "")
+    assert "--disallowedTools" in captured["argv"], (
+        "a caller expressing no tool policy still gets both defaults, deny list included"
+    )
+
+
 def test_claude_falls_back_to_default_allowed_tools_when_empty(monkeypatch, prompt_file) -> None:
     monkeypatch.setattr(providers, "_resolve_cli", _fake_resolve_present("claude"))
     captured = _install_fake_popen(monkeypatch)
