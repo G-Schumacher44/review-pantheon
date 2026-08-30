@@ -196,6 +196,19 @@ inputs:
       DESIGN.md's "Security posture".
     required: false
     default: "readonly"
+  mode:
+    description: >-
+      "gate" (the default) is the enforcing twin panel documented above — unchanged, byte-for-
+      byte, by this input's own addition. "counsel" instead runs the three counsel personas
+      (socrates diogenes plato — the `agents` input is ignored in this mode, same as the CLI's
+      `pantheon counsel` subcommand it mirrors) and posts ONE advisory comment under a clear
+      "advisory, not a gate" banner. Counsel mode NEVER fails this job — a counsel-side error
+      surfaces in the log/comment, never as a red check; see DESIGN.md's "counsel mode" section.
+      Counsel mode is also the only mode that accepts a `workflow_dispatch` trigger (no PR
+      exists yet in that context, so the verdict prints to the job log/step summary instead of
+      posting a comment) — a `pull_request` trigger works in both modes.
+    required: false
+    default: "gate"
 
 runs:
   using: "composite"
@@ -216,10 +229,11 @@ runs:
     # to gate against — reviewing is simply impossible, not unsafe). This step is the opposite
     # case — a run that DOES have secrets in scope, over content it structurally should not — and
     # it hard-fails rather than skips.
-    - name: Require the pull_request trigger
+    - name: Require an allowed trigger
       shell: bash
       env:
         EVENT_NAME: ${{ github.event_name }}
+        MODE: ${{ inputs.mode }}
       run: |
         set -euo pipefail
         # ALLOWLIST, not a blacklist of the events that happen to be dangerous. An earlier
@@ -228,13 +242,33 @@ runs:
         # repository with secrets while carrying a populated `github.event.pull_request`
         # payload — so they passed the blacklist, received the credential, and would have
         # driven a model over fork-controlled content. Enumerating the unsafe events means
-        # being wrong every time GitHub adds one. Every step below reads the PR number and
-        # base/head SHAs from `github.event.pull_request`, so `pull_request` is the only
-        # context this action is built for; everything else fails closed, by construction.
-        if [ "$EVENT_NAME" != "pull_request" ]; then
-          echo "::error::review-pantheon: refusing to run under the '$EVENT_NAME' trigger. This action is built for the plain pull_request context only — every step reads the PR number and base/head SHAs from github.event.pull_request, and the privileged triggers that still populate that payload run with this repository's secrets over content a fork can control. Wire the gate on pull_request, as examples/review-gate.yml and install.sh Way A do: fork PRs are then correctly reported NOT GATED rather than reviewed unsafely. See SECURITY.md, 'Fork pull requests cannot be gated by this action'."
-          exit 1
+        # being wrong every time GitHub adds one. Every gate-only step below reads the PR
+        # number and base/head SHAs from `github.event.pull_request`, so `pull_request` is the
+        # only context gate mode is built for; everything else fails closed, by construction.
+        #
+        # `mode: counsel` additionally allows `workflow_dispatch` (issue #95) — that trigger
+        # carries NO `github.event.pull_request` at all (there may be no PR yet — "run counsel
+        # on a branch on demand" is the whole point) and, unlike a PR event, cannot be forced
+        # onto this job by an outside contributor: only a principal with write/triage access to
+        # THIS repository can dispatch it, over a ref THEY chose, so there is no fork-controlled
+        # content in scope the way there is for every OTHER non-pull_request trigger this
+        # allowlist still refuses (see SECURITY.md's "Fork pull requests" section for exactly
+        # which ones, and why — deliberately not re-spelled here; tests/check_action_expressions
+        # .py's check_no_pull_request_target's own docstring is why this file names no forbidden
+        # trigger literally, not even in a comment or an error string). This carve-out is
+        # intentionally NOT extended to gate mode (`mode` still defaults to "gate", so this
+        # branch is unreachable there) — see this step's own continue-on-error-free status: a
+        # misconfigured trigger is a security control, not a review outcome, and DESIGN.md's
+        # "counsel mode" section is explicit that the never-fails-the-job carve-out does not
+        # reach this check.
+        if [ "$EVENT_NAME" = "pull_request" ]; then
+          exit 0
         fi
+        if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$MODE" = "counsel" ]; then
+          exit 0
+        fi
+        echo "::error::review-pantheon: refusing to run under the '$EVENT_NAME' trigger in '$MODE' mode. Gate mode is built for the plain pull_request context only. Counsel mode additionally allows workflow_dispatch. Every other trigger is refused in both modes, including any privileged one that still populates github.event.pull_request while running with this repository's secrets over content a fork can control. See SECURITY.md, 'Fork pull requests cannot be gated by this action', and DESIGN.md's 'counsel mode' section."
+        exit 1
 
     # No scrub step for `.claude`/`.mcp.json`/CLAUDE.md here: `anthropics/claude-code-action`'s
     # own pinned source (`src/entrypoints/run.ts`'s `restoreConfigFromBase`) already restores
@@ -284,8 +318,9 @@ runs:
               echo "GitHub withholds repository secrets from fork runs by design, so the gate had"
               echo "no credential to authenticate with."
               echo
-              echo "**This PR has not been reviewed by Artemis or Apollo.** A green check here means"
-              echo "the gate skipped, not that the change passed. Review it manually before merging."
+              echo "**This PR has not been reviewed.** A green check here means review-pantheon"
+              echo "skipped, not that the change passed (or, in counsel mode, that it was weighed)."
+              echo "Review it manually before merging."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "gated=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -303,7 +338,7 @@ runs:
     # step that touches either SHA in a shell command; a failure here fails the whole composite
     # action closed (no continue-on-error on this step) before anything downstream executes.
     - name: Validate PR base/head SHAs
-      if: ${{ steps.auth.outputs.gated != 'false' }}
+      if: ${{ steps.auth.outputs.gated != 'false' && github.event_name == 'pull_request' }}
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -320,9 +355,54 @@ runs:
           exit 1
         fi
 
+    # counsel mode's workflow_dispatch lane has no `github.event.pull_request` at all (issue
+    # #95) — there is no PR yet, that's the point ("run counsel on a branch on demand"). This
+    # step resolves the same base/head SHA shape every downstream step below expects, straight
+    # from the checked-out working tree instead: safe to do here (unlike the base-pinned reads
+    # elsewhere in this file) because workflow_dispatch cannot be triggered by a fork or an
+    # outside contributor — only a principal with write/triage access dispatches it, over a ref
+    # THEY chose, so there is no attacker-controlled content in scope the way a PR head is.
+    #
+    # `continue-on-error: true` unconditionally (this step only ever runs in counsel mode, gated
+    # below) — a merge-base resolution failure here (e.g. the caller's checkout used a shallow
+    # `fetch-depth` instead of the `0` this needs) must degrade to an all-UNVERIFIED counsel
+    # comment, never a failed job: see this action's `mode` input description and DESIGN.md's
+    # "counsel mode" section for the fail-closed carve-out this is part of.
+    - name: Resolve workflow_dispatch context (counsel mode)
+      id: wd-context
+      if: ${{ inputs.mode == 'counsel' && github.event_name == 'workflow_dispatch' && steps.auth.outputs.gated != 'false' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -euo pipefail
+        HEAD_SHA="$(git rev-parse HEAD)"
+        DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+        if [ -z "$DEFAULT_BRANCH" ]; then
+          DEFAULT_BRANCH="main"
+        fi
+        BASE_SHA="$(git merge-base "origin/${DEFAULT_BRANCH}" "$HEAD_SHA")"
+        SHA_RE='^[0-9a-f]{7,40}$'
+        if ! [[ "$HEAD_SHA" =~ $SHA_RE ]]; then
+          echo "::error::review-pantheon: unsafe resolved head SHA '$HEAD_SHA' — refusing to use it in any git command."
+          exit 1
+        fi
+        if ! [[ "$BASE_SHA" =~ $SHA_RE ]]; then
+          echo "::error::review-pantheon: unsafe resolved base SHA '$BASE_SHA' — refusing to use it in any git command."
+          exit 1
+        fi
+        echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+        echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+        echo "base_ref=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+
     - name: Resolve gate configuration
       id: resolve
       if: ${{ steps.auth.outputs.gated != 'false' }}
+      # false for the default mode ("gate") — byte-identical, this step still hard-fails the
+      # whole action on a bad config exactly as before. true only for counsel mode: this step's
+      # failure (e.g. a refused base-pinned read) must degrade to an all-UNVERIFIED counsel
+      # comment, never a failed job — the fail-closed carve-out documented on the `mode` input
+      # and in DESIGN.md's "counsel mode" section.
+      continue-on-error: ${{ inputs.mode == 'counsel' }}
       shell: bash
       env:
         PERSONAS_PATH: ${{ inputs.personas_path }}
@@ -331,7 +411,13 @@ runs:
         MODEL: ${{ inputs.model }}
         EXECUTION: ${{ inputs.execution }}
         ACTION_PATH: ${{ github.action_path }}
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # workflow_dispatch (counsel mode only) has no github.event.pull_request at all — its
+        # base SHA comes from the "Resolve workflow_dispatch context" step above instead. For
+        # every pull_request run (gate mode always; counsel mode's PR+label lane) this ternary
+        # resolves to exactly the same github.event.pull_request.base.sha as before mode existed
+        # — byte-identical for gate mode, which never sees any other event (enforced by the
+        # "Require an allowed trigger" step).
+        BASE_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_sha || github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
 
@@ -562,7 +648,11 @@ runs:
 
     - name: Detect docs-only diff
       id: docs-check
-      if: ${{ steps.auth.outputs.gated != 'false' }}
+      # Gated out of counsel mode entirely: this result only ever feeds apollo's docs-only skip
+      # (below), and apollo never runs in counsel mode (see the socrates/diogenes/plato section's
+      # own header comment) — and counsel mode's workflow_dispatch lane has no
+      # github.event.pull_request to diff from in the first place.
+      if: ${{ steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       shell: bash
       env:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -589,7 +679,7 @@ runs:
     # -------------------------------------------------------------------------------------
     - name: Build prompt (artemis)
       id: build-prompt-artemis
-      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -618,7 +708,7 @@ runs:
 
     - name: Run artemis
       id: run-agent-artemis
-      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
@@ -630,7 +720,7 @@ runs:
 
     - name: Save raw output (artemis)
       id: save-raw-artemis
-      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       continue-on-error: true
       shell: bash
       env:
@@ -639,7 +729,7 @@ runs:
 
     - name: Decide verdict (artemis)
       id: decide-artemis
-      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'artemis')) && steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       continue-on-error: true
       shell: bash
       env:
@@ -650,13 +740,13 @@ runs:
     # apollo — the docs-only exception: skips loudly instead of running (DESIGN.md)
     # -------------------------------------------------------------------------------------
     - name: Log docs-only skip (apollo)
-      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only == 'true') && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only == 'true') && steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       shell: bash
       run: echo "::notice::docs-only diff — skipping apollo loudly (nothing but docs changed)."
 
     - name: Build prompt (apollo)
       id: build-prompt-apollo
-      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -688,7 +778,7 @@ runs:
 
     - name: Run apollo
       id: run-agent-apollo
-      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
@@ -700,7 +790,7 @@ runs:
 
     - name: Save raw output (apollo)
       id: save-raw-apollo
-      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       continue-on-error: true
       shell: bash
       env:
@@ -709,7 +799,7 @@ runs:
 
     - name: Decide verdict (apollo)
       id: decide-apollo
-      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'apollo') && steps.docs-check.outputs.docs_only != 'true') && steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       continue-on-error: true
       shell: bash
       env:
@@ -717,23 +807,35 @@ runs:
       run: PYTHONPATH="$ACTION_PATH" python3 "$ACTION_PATH/pantheon/verdict.py" apollo "$RUNNER_TEMP/apollo-raw.txt"
 
     # -------------------------------------------------------------------------------------
-    # socrates / diogenes / plato — counsel agents. Not part of the default `agents` panel;
-    # only run when explicitly named in the `agents` input (see that input's own description
-    # for why running them as an enforcing gate leg is the exception, not the norm).
+    # socrates / diogenes / plato — counsel agents. Not part of the default `agents` panel for
+    # GATE mode; there they only run when explicitly named in the `agents` input (see that
+    # input's own description for why running them as an enforcing gate leg is the exception,
+    # not the norm). COUNSEL mode (`mode: counsel`, issue #95) always forces exactly this trio
+    # — `agents` is ignored, mirroring the CLI's `pantheon counsel` subcommand, which is sugar
+    # for `gate --agents "socrates diogenes plato"` the same way.
+    #
+    # PR_NUMBER/PR_TITLE/BASE_SHA/HEAD_SHA/BASE_REF below are ternaries on `github.event_name`,
+    # not `inputs.mode` — a pull_request run (gate mode always; counsel mode's PR+label lane)
+    # resolves to exactly `github.event.pull_request.*`, byte-identical to before this input
+    # existed. Only a workflow_dispatch run (counsel-only — see the "Require an allowed trigger"
+    # step) takes the other branch, sourced from the "Resolve workflow_dispatch context" step.
     # -------------------------------------------------------------------------------------
     - name: Build prompt (socrates)
       id: build-prompt-socrates
-      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'socrates') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
+      # See the "Resolve gate configuration" step's own continue-on-error comment — same
+      # fail-closed-carve-out rationale, false (unchanged) for gate mode.
+      continue-on-error: ${{ inputs.mode == 'counsel' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
         PERSONAS_DIR: ${{ steps.resolve.outputs.personas_dir }}
         REPO_NAME: ${{ github.repository }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        PR_TITLE: ${{ github.event.pull_request.title }}
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && '' || github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.title }}
+        BASE_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_sha || github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.head_sha || github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_ref || github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
@@ -752,7 +854,7 @@ runs:
 
     - name: Run socrates
       id: run-agent-socrates
-      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'socrates') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
@@ -764,7 +866,7 @@ runs:
 
     - name: Save raw output (socrates)
       id: save-raw-socrates
-      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'socrates') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -773,7 +875,7 @@ runs:
 
     - name: Decide verdict (socrates)
       id: decide-socrates
-      if: ${{ (contains(inputs.agents, 'socrates')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'socrates') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -782,17 +884,18 @@ runs:
 
     - name: Build prompt (diogenes)
       id: build-prompt-diogenes
-      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'diogenes') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
+      continue-on-error: ${{ inputs.mode == 'counsel' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
         PERSONAS_DIR: ${{ steps.resolve.outputs.personas_dir }}
         REPO_NAME: ${{ github.repository }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        PR_TITLE: ${{ github.event.pull_request.title }}
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && '' || github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.title }}
+        BASE_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_sha || github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.head_sha || github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_ref || github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
@@ -811,7 +914,7 @@ runs:
 
     - name: Run diogenes
       id: run-agent-diogenes
-      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'diogenes') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
@@ -823,7 +926,7 @@ runs:
 
     - name: Save raw output (diogenes)
       id: save-raw-diogenes
-      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'diogenes') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -832,7 +935,7 @@ runs:
 
     - name: Decide verdict (diogenes)
       id: decide-diogenes
-      if: ${{ (contains(inputs.agents, 'diogenes')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'diogenes') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -841,17 +944,18 @@ runs:
 
     - name: Build prompt (plato)
       id: build-prompt-plato
-      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'plato') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
+      continue-on-error: ${{ inputs.mode == 'counsel' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
         PERSONAS_DIR: ${{ steps.resolve.outputs.personas_dir }}
         REPO_NAME: ${{ github.repository }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        PR_TITLE: ${{ github.event.pull_request.title }}
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && '' || github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.title }}
+        BASE_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_sha || github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.head_sha || github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_ref || github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
         RULES_PRESENT: ${{ steps.resolve.outputs.rules_present }}
         RULES_CONTENT_PATH: ${{ steps.resolve.outputs.rules_content_path }}
@@ -870,7 +974,7 @@ runs:
 
     - name: Run plato
       id: run-agent-plato
-      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'plato') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
@@ -882,7 +986,7 @@ runs:
 
     - name: Save raw output (plato)
       id: save-raw-plato
-      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'plato') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -891,7 +995,7 @@ runs:
 
     - name: Decide verdict (plato)
       id: decide-plato
-      if: ${{ (contains(inputs.agents, 'plato')) && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'plato') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
       env:
@@ -908,10 +1012,19 @@ runs:
     - name: Build and post combined comment
       id: combine
       if: ${{ steps.auth.outputs.gated != 'false' }}
+      # See the "Resolve gate configuration" step's own continue-on-error comment. In practice
+      # combine_verdicts.sh has no exit-nonzero path of its own (`set -uo pipefail`, no `set -e`,
+      # no explicit `exit 1`) — this is belt-and-suspenders for a future change to that script,
+      # not a currently-load-bearing carve-out.
+      continue-on-error: ${{ inputs.mode == 'counsel' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        # No PR exists under workflow_dispatch (counsel mode only) — combine_verdicts.sh already
+        # treats an empty PR_NUMBER as "nothing to post to", printing the comment to the job log
+        # instead (its own `${PR_NUMBER:-}` check), the identical behavior `pantheon counsel
+        # --branch` has always had on the CLI side for the same reason.
+        PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && '' || github.event.pull_request.number }}
         GH_TOKEN: ${{ github.token }}
         # REDACTION-ONLY — pantheon.render never uses this to authenticate anything; it exists
         # solely so its literal-value credential pass (pantheon.render._redact_credentials) can
@@ -931,8 +1044,9 @@ runs:
         # #75) — see pantheon/render.py's _CREDENTIAL_ENV_KEYS comment on
         # PANTHEON_REVIEWER_GITHUB_TOKEN for the redactor-side half of this fix.
         PANTHEON_REVIEWER_GITHUB_TOKEN: ${{ inputs.github_token }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.head_sha || github.event.pull_request.head.sha }}
         POST_COMMENT: ${{ inputs.post_comment }}
+        MODE: ${{ inputs.mode }}
         APOLLO_DOCS_SKIPPED: ${{ steps.docs-check.outputs.docs_only }}
         ARTEMIS_COLOR: ${{ steps.decide-artemis.outputs.color }}
         ARTEMIS_VERDICT: ${{ steps.decide-artemis.outputs.verdict }}
@@ -964,11 +1078,15 @@ runs:
         PLATO_FINDINGS: ${{ steps.decide-plato.outputs.findings_json }}
         PLATO_INVARIANT: ${{ steps.decide-plato.outputs.invariant_fired }}
         PLATO_REASON: ${{ steps.decide-plato.outputs.reason }}
-        AGENTS: ${{ inputs.agents }}
+        # "socrates diogenes plato" is a literal, not a reference to the `agents` input — counsel
+        # mode always runs exactly that trio (see the socrates/diogenes/plato section's header
+        # comment above) regardless of what `agents` holds, mirroring `pantheon counsel`'s own
+        # forced-agents behavior on the CLI side (COUNSEL_AGENTS in pantheon/cli.py).
+        AGENTS: ${{ inputs.mode == 'counsel' && 'socrates diogenes plato' || inputs.agents }}
       run: bash "$ACTION_PATH/action/lib/combine_verdicts.sh" "$AGENTS"
 
     - name: Enforce gate result
-      if: ${{ steps.auth.outputs.gated != 'false' }}
+      if: ${{ steps.auth.outputs.gated != 'false' && inputs.mode != 'counsel' }}
       shell: bash
       env:
         OVERALL_COLOR: ${{ steps.combine.outputs.overall_color }}
@@ -979,3 +1097,19 @@ runs:
           red) echo "::error::review-pantheon: blocked (a gate agent returned a red verdict, or the blocker invariant fired)"; exit 1 ;;
           *) echo "::error::review-pantheon: NOT GATED (unverified result) — fail-closed, not a pass"; exit 1 ;;
         esac
+
+    # The fail-closed carve-out (issue #95): counsel is advisory, never enforcing — this step
+    # NEVER exits nonzero, whatever OVERALL_COLOR says, and is the only "enforcement" counsel
+    # mode gets. `continue-on-error: true` unconditionally (not the `${{ inputs.mode ==
+    # 'counsel' }}` ternary used above) because this step only ever RUNS in counsel mode — it
+    # is pure belt-and-suspenders alongside the script's own unconditional `exit 0`, for the
+    # same reason the combine step's comment above gives.
+    - name: Counsel result (advisory — never fails this job)
+      if: ${{ steps.auth.outputs.gated != 'false' && inputs.mode == 'counsel' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        OVERALL_COLOR: ${{ steps.combine.outputs.overall_color }}
+      run: |
+        echo "::notice::review-pantheon counsel: overall signal '${OVERALL_COLOR:-unverified}' — advisory only, this check never fails on it."
+        exit 0

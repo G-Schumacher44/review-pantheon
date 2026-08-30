@@ -752,7 +752,7 @@ calling this file; that duplicate is gone.
   tradeoff was made on purpose.
 - **The `anthropics/claude-code-action` pin is now real**, not a placeholder — see the
   "Security posture" section above for the SHA, the release, and where it was verified.
-- **Fail-closed still applies.** Every agent step in `action.yml` runs with
+- **Fail-closed still applies — to gate mode.** Every agent step in `action.yml` runs with
   `continue-on-error: true` (so a provider failure or a red/unverified verdict never halts the
   action before it can post a comment and report the result), and the action's own final step
   fails the job on red or unverified — same posture as the CLI's exit code, just phrased for a
@@ -760,7 +760,53 @@ calling this file; that duplicate is gone.
   allowed to hard-fail in the first place — see `action.yml`'s own header comment for the
   composite-action mechanics this relies on and what was verified about them, including that
   `steps.<id>.outcome` inside a composite action was historically broken and has since been
-  fixed upstream).
+  fixed upstream). Counsel mode (below) is a deliberate exception to this bullet, not a
+  contradiction of it: fail-closed is a property of the *gate*, and counsel mode is not one.
+
+### Counsel mode (the Action)
+
+`mode: gate` (the default) is everything above, unchanged. `mode: counsel` instead runs the
+Action through the same channel the CLI's `pantheon counsel` subcommand already gives a human —
+Socrates, Diogenes, and Plato against the PR/branch diff — reachable from wherever an adopter
+already has the Action wired, not just a local `claude` CLI session.
+
+- **Forced agents, not a fifth `agents` value.** Counsel mode always runs exactly `socrates
+  diogenes plato`, ignoring whatever the `agents` input holds — the same forcing
+  `pantheon counsel` already does on the CLI side (`COUNSEL_AGENTS` in `pantheon/cli.py`). Artemis
+  and Apollo never run in counsel mode; Socrates/Diogenes/Plato still remain reachable as an
+  *enforcing* gate leg the ordinary way too, via `mode: gate` (the default) plus `agents:` naming
+  them — that combination is unchanged by this input's existence, and is still the documented
+  exception described earlier in this file, not counsel mode's own behavior.
+- **One comment, advisory banner.** The posted comment is `pantheon.render`'s ordinary combined
+  comment (no new review logic — the same renderer every lane calls) with one addition: a leading
+  banner stating the run is advisory, not a gate, and cannot fail a check. This is presentation,
+  not a second vocabulary — the verdict table, findings fold, and machine-readable tail underneath
+  the banner are identical in shape to a gate-mode comment.
+- **Two triggers.** `pull_request` (typically gated on a label by the calling workflow, e.g.
+  `design` — the Action itself does not check for a label; that is a job-level `if:` in the
+  consumer's own workflow, the same pattern draft-PR skipping already uses) behaves like gate
+  mode's own `pull_request` context: PR number and base/head SHAs come from
+  `github.event.pull_request.*`, and the comment posts to that PR. `workflow_dispatch` — counsel
+  mode only, refused under `mode: gate` — has no PR at all ("run counsel on a branch on demand" is
+  the point): base/head SHAs are resolved directly from the checked-out working tree (merge-base
+  against the repository's default branch) instead of a base-pinned read, and the verdict prints
+  to the job log/step summary instead of posting a comment, mirroring `pantheon counsel --branch`'s
+  own print-only behavior when no PR exists. Safe to skip base-pinning there specifically because
+  `workflow_dispatch` cannot be triggered by a fork or an outside contributor — only a principal
+  with write/triage access dispatches it, over a ref they chose.
+- **The fail-closed carve-out.** Counsel is advisory by definition — a required check that can
+  turn red from an advisory opinion is a design violation, not a stricter gate. Every step counsel
+  mode runs between the trigger/auth checks and the final comment is either already
+  `continue-on-error: true` (the per-agent run/save/decide steps, unconditionally, in both modes)
+  or additionally gated `continue-on-error: ${{ inputs.mode == 'counsel' }}` (config resolution,
+  the counsel agents' own prompt-building) — so an internal error degrades to an all-UNVERIFIED
+  advisory comment, never a failed job. The one thing this carve-out does NOT reach is the
+  trigger-allowlist step itself: refusing a dangerous trigger (anything that is not `pull_request`,
+  or `workflow_dispatch` under counsel mode) is a security control, not a review outcome, and stays
+  a hard failure in both modes — softening it would reopen exactly the fork-secret-exposure class
+  the rest of this file's "Security posture" section exists to close. Where gate mode's own final
+  step still fails the job on red/unverified, counsel mode's equivalent step only logs the overall
+  signal and always exits 0.
 
 **Honest limitation:** this action can't be integration-tested end-to-end — a real `uses:
 G-Schumacher44/review-pantheon@v1` invocation against a real PR — until this repo is public on
@@ -835,7 +881,9 @@ action.yml                 the published composite action (see "Published action
                            comparably thin SHA-pinned caller of this same file
 examples/review-gate.yml   the consumer stub for action.yml; the entire footprint of
                            the published-action surface in a target repo
-tests/                     15 bash fixture-test scripts (black-box against the CLI, or unit
+examples/review-counsel.yml the consumer stub for `mode: counsel` — workflow_dispatch plus a
+                           label-gated pull_request trigger; see "Counsel mode (the Action)" above
+tests/                     16 bash fixture-test scripts (black-box against the CLI, or unit
                            tests for install.sh/bootstrap.sh/release.yml's own logic) plus the
                            pytest files (tests/test_*.py) — tests/README.md is the canonical,
                            complete list (verified against `git ls-tree -r tests/`; CI asserts the
