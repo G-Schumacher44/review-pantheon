@@ -793,14 +793,28 @@ already has the Action wired, not just a local `claude` CLI session.
   to the job log/step summary instead of posting a comment, mirroring `pantheon counsel --branch`'s
   own print-only behavior when no PR exists. Safe to skip base-pinning there specifically because
   `workflow_dispatch` cannot be triggered by a fork or an outside contributor — only a principal
-  with write/triage access dispatches it, over a ref they chose.
+  with write/triage access dispatches it, over a ref they chose. The default branch itself is
+  resolved most-trustworthy-first — `github.event.repository.default_branch` (the same `github`
+  context every other step in this file reads, no input plumbing needed), then
+  `refs/remotes/origin/HEAD` if that was empty, then `git remote show origin`'s "HEAD branch:"
+  line — and this step fails loud rather than guessing "main" if all three come up empty
+  (Codex P2, PR #98): a repo whose default branch isn't literally "main" would otherwise get
+  silently reviewed against the wrong ref.
 - **The fail-closed carve-out.** Counsel is advisory by definition — a required check that can
   turn red from an advisory opinion is a design violation, not a stricter gate. Every step counsel
   mode runs between the trigger/auth checks and the final comment is either already
   `continue-on-error: true` (the per-agent run/save/decide steps, unconditionally, in both modes)
   or additionally gated `continue-on-error: ${{ inputs.mode == 'counsel' }}` (config resolution,
   the counsel agents' own prompt-building) — so an internal error degrades to an all-UNVERIFIED
-  advisory comment, never a failed job. The one thing this carve-out does NOT reach is the
+  advisory comment, never a failed job. Degrading to UNVERIFIED means the provider must not launch
+  at all on a failed setup (Codex P1, PR #98): a `continue-on-error` step that failed partway
+  through can still have written some of its outputs before erroring, and a launch condition that
+  only checked auth would fire the provider on that partial/stale context instead of skipping it.
+  The config-resolution and counsel per-agent prompt-building steps each write an explicit
+  `resolve_ok`/`build_ok` flag as the LAST line of their own script (unreachable if anything above
+  it failed, since every step runs under `set -euo pipefail`); each `Run <agent>` step's `if:`
+  requires both flags literally equal `'true'`, not just that auth succeeded. The one thing this
+  carve-out does NOT reach is the
   trigger-allowlist step itself: refusing a dangerous trigger (anything that is not `pull_request`,
   or `workflow_dispatch` under counsel mode) is a security control, not a review outcome, and stays
   a hard failure in both modes — softening it would reopen exactly the fork-secret-exposure class

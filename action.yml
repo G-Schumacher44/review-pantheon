@@ -363,22 +363,45 @@ runs:
     # outside contributor — only a principal with write/triage access dispatches it, over a ref
     # THEY chose, so there is no attacker-controlled content in scope the way a PR head is.
     #
-    # `continue-on-error: true` unconditionally (this step only ever runs in counsel mode, gated
-    # below) — a merge-base resolution failure here (e.g. the caller's checkout used a shallow
-    # `fetch-depth` instead of the `0` this needs) must degrade to an all-UNVERIFIED counsel
-    # comment, never a failed job: see this action's `mode` input description and DESIGN.md's
-    # "counsel mode" section for the fail-closed carve-out this is part of.
+    # Default-branch resolution (Codex P2, PR #98): `refs/remotes/origin/HEAD` is an OPTIONAL
+    # symbolic ref (git's own docs say so — it is set by `git clone`/`git remote set-head`, never
+    # guaranteed by a checkout action's `fetch-depth`) and a repo whose default branch isn't
+    # literally "main" would silently review against the wrong ref if this ever fell through to a
+    # hardcoded guess. Three-deep, most-trustworthy-first, no silent guess at the end:
+    #   1. `github.event.repository.default_branch` — the SAME `github` context every other step
+    #      in this file already reads (composite-action steps share the calling job's context
+    #      wholesale; no input plumbing needed), populated by GitHub itself for every event that
+    #      carries a `repository` payload, workflow_dispatch included.
+    #   2. `refs/remotes/origin/HEAD`, if GitHub's own event payload was somehow empty.
+    #   3. `git remote show origin`'s "HEAD branch:" line — queries the remote directly rather
+    #      than relying on a local symref at all.
+    # If all three come up empty, this step FAILS LOUD (`::error::` + `exit 1`) instead of
+    # defaulting to "main" — reviewing against a wrong ref silently would be worse than not
+    # reviewing. `continue-on-error: true` unconditionally (this step only ever runs in counsel
+    # mode, gated below) still means that failure degrades the OVERALL run to an all-UNVERIFIED
+    # counsel comment, never a failed job: see this action's `mode` input description, this file's
+    # "resolve_ok" comment on the "Resolve gate configuration" step, and DESIGN.md's "counsel
+    # mode" section for the fail-closed carve-out this is part of.
     - name: Resolve workflow_dispatch context (counsel mode)
       id: wd-context
       if: ${{ inputs.mode == 'counsel' && github.event_name == 'workflow_dispatch' && steps.auth.outputs.gated != 'false' }}
       continue-on-error: true
       shell: bash
+      env:
+        REPO_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
         set -euo pipefail
         HEAD_SHA="$(git rev-parse HEAD)"
-        DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+        DEFAULT_BRANCH="$REPO_DEFAULT_BRANCH"
         if [ -z "$DEFAULT_BRANCH" ]; then
-          DEFAULT_BRANCH="main"
+          DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+        fi
+        if [ -z "$DEFAULT_BRANCH" ]; then
+          DEFAULT_BRANCH="$(git remote show origin 2>/dev/null | sed -n 's/^ *HEAD branch: //p')"
+        fi
+        if [ -z "$DEFAULT_BRANCH" ]; then
+          echo "::error::review-pantheon: could not resolve this repository's default branch — github.event.repository.default_branch was empty, refs/remotes/origin/HEAD is unset, and 'git remote show origin' returned nothing. Counsel mode's workflow_dispatch lane needs a base to diff against; refusing to guess one."
+          exit 1
         fi
         BASE_SHA="$(git merge-base "origin/${DEFAULT_BRANCH}" "$HEAD_SHA")"
         SHA_RE='^[0-9a-f]{7,40}$'
@@ -646,6 +669,18 @@ runs:
           echo "$delim"
         } >> "$GITHUB_OUTPUT"
 
+        # resolve_ok — written ONLY if every line above ran (set -euo pipefail means any earlier
+        # failure — a refused base-pinned read, an unknown execution tier — already exited this
+        # script before reaching here). Counsel mode's "Run <agent>" steps below gate their own
+        # launch on this being literally "true" (Codex P1): this step's own continue-on-error
+        # (set above, counsel-mode only) means a failure here does NOT stop the job, so without
+        # this flag a launch step whose `if:` only checks auth would still fire the provider on
+        # whatever partial/stale outputs (claude_args, personas_dir, rules_content_path) this
+        # step managed to write before failing — an incomplete or missing prompt context, not the
+        # all-UNVERIFIED degrade the fail-closed carve-out promises. See DESIGN.md's "counsel
+        # mode" section.
+        echo "resolve_ok=true" >> "$GITHUB_OUTPUT"
+
     - name: Detect docs-only diff
       id: docs-check
       # Gated out of counsel mode entirely: this result only ever feeds apollo's docs-only skip
@@ -851,10 +886,15 @@ runs:
           cat "$PROMPT_FILE"
           echo "$delim"
         } >> "$GITHUB_OUTPUT"
+        # build_ok — see the "Resolve gate configuration" step's own resolve_ok comment; same
+        # reasoning, one step later in the pipeline (a missing persona or empty $PERSONAS_DIR
+        # from an upstream resolve failure fails build_prompt.sh's own `[ -f "$PERSONA" ]` check
+        # above, so this line is unreached and "Run socrates" below stays gated off).
+        echo "build_ok=true" >> "$GITHUB_OUTPUT"
 
     - name: Run socrates
       id: run-agent-socrates
-      if: ${{ (contains(inputs.agents, 'socrates') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'socrates') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' && steps.resolve.outputs.resolve_ok == 'true' && steps.build-prompt-socrates.outputs.build_ok == 'true' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
@@ -911,10 +951,12 @@ runs:
           cat "$PROMPT_FILE"
           echo "$delim"
         } >> "$GITHUB_OUTPUT"
+        # build_ok — see the "Resolve gate configuration" step's own resolve_ok comment.
+        echo "build_ok=true" >> "$GITHUB_OUTPUT"
 
     - name: Run diogenes
       id: run-agent-diogenes
-      if: ${{ (contains(inputs.agents, 'diogenes') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'diogenes') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' && steps.resolve.outputs.resolve_ok == 'true' && steps.build-prompt-diogenes.outputs.build_ok == 'true' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:
@@ -971,10 +1013,12 @@ runs:
           cat "$PROMPT_FILE"
           echo "$delim"
         } >> "$GITHUB_OUTPUT"
+        # build_ok — see the "Resolve gate configuration" step's own resolve_ok comment.
+        echo "build_ok=true" >> "$GITHUB_OUTPUT"
 
     - name: Run plato
       id: run-agent-plato
-      if: ${{ (contains(inputs.agents, 'plato') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' }}
+      if: ${{ (contains(inputs.agents, 'plato') || inputs.mode == 'counsel') && steps.auth.outputs.gated != 'false' && steps.resolve.outputs.resolve_ok == 'true' && steps.build-prompt-plato.outputs.build_ok == 'true' }}
       continue-on-error: true
       uses: anthropics/claude-code-action@d40ddef4c030e508327d6e35a9c45f3368482c50 # v1.0.195 — https://github.com/anthropics/claude-code-action/releases/tag/v1.0.195
       with:

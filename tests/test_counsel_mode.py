@@ -150,3 +150,68 @@ def test_resolve_step_and_counsel_build_prompts_degrade_instead_of_failing() -> 
         assert re.search(r"^\s*continue-on-error:\s*\$\{\{\s*inputs\.mode == 'counsel'\s*\}\}\s*$", step, re.M), (
             f"action.yml: 'Build prompt ({agent})' must set continue-on-error: ${{{{ inputs.mode == 'counsel' }}}}"
         )
+
+
+def test_counsel_agent_launch_gated_on_setup_success() -> None:
+    """Codex P1 (PR #98): under the continue-on-error carve-out above, a step that fails partway
+    through can still have written SOME of its outputs before erroring — a launch condition that
+    only checks auth would fire the provider on that partial/stale prompt/claude_args instead of
+    degrading to UNVERIFIED. Each counsel agent's 'Run <agent>' step must additionally require the
+    config-resolution step's own resolve_ok flag AND that agent's own build-prompt step's build_ok
+    flag, both literally 'true' — flags each step writes only as its OWN LAST output line, so a
+    `set -euo pipefail` failure anywhere earlier in that same script leaves the flag unset."""
+    action = _action()
+    resolve = _step_named(action, "Resolve gate configuration")
+    assert re.search(r'^\s*echo "resolve_ok=true" >> "\$GITHUB_OUTPUT"\s*$', resolve, re.M), (
+        "action.yml: 'Resolve gate configuration' must write resolve_ok=true as its own last "
+        "output line, so a continue-on-error failure under counsel mode never looks like success "
+        "to a downstream step's if: condition"
+    )
+    for agent in ("socrates", "diogenes", "plato"):
+        build_step = _step_named(action, f"Build prompt ({agent})")
+        assert re.search(r'^\s*echo "build_ok=true" >> "\$GITHUB_OUTPUT"\s*$', build_step, re.M), (
+            f"action.yml: 'Build prompt ({agent})' must write build_ok=true as its own last output line"
+        )
+        run_step = _step_named(action, f"Run {agent}")
+        if_line = re.search(r"^\s*if:\s*(.*)$", run_step, re.M)
+        assert if_line, f"action.yml: 'Run {agent}' has no if: condition"
+        assert "steps.resolve.outputs.resolve_ok == 'true'" in if_line.group(1), (
+            f"action.yml: 'Run {agent}' must require steps.resolve.outputs.resolve_ok == 'true' "
+            f"before launching the provider — auth succeeding is not enough: {if_line.group(1)}"
+        )
+        assert f"steps.build-prompt-{agent}.outputs.build_ok == 'true'" in if_line.group(1), (
+            f"action.yml: 'Run {agent}' must require its own build-prompt step's build_ok == "
+            f"'true' before launching the provider: {if_line.group(1)}"
+        )
+
+
+def test_workflow_dispatch_default_branch_resolution_is_robust() -> None:
+    """Codex P2 (PR #98): `refs/remotes/origin/HEAD` is an OPTIONAL git ref (git's own docs say
+    so), not guaranteed by `fetch-depth: 0` — a hardcoded 'main' fallback would silently review the
+    wrong ref in a repo whose default branch is anything else. Resolution must prefer
+    `github.event.repository.default_branch` (the same `github` context every other step in this
+    file already reads), fall back to `origin/HEAD` then `git remote show origin`, and fail loud —
+    never guess "main" — if every source comes up empty."""
+    step = _step_named(_action(), "Resolve workflow_dispatch context (counsel mode)")
+    assert re.search(
+        r"^\s*REPO_DEFAULT_BRANCH:\s*\$\{\{\s*github\.event\.repository\.default_branch\s*\}\}\s*$",
+        step,
+        re.M,
+    ), (
+        "action.yml: the wd-context step must bind REPO_DEFAULT_BRANCH from "
+        "github.event.repository.default_branch in its own env:"
+    )
+    assert "git remote show origin" in step, (
+        "action.yml: the wd-context step must fall back to querying the remote directly "
+        "('git remote show origin') when both github.event.repository.default_branch and "
+        "refs/remotes/origin/HEAD are empty"
+    )
+    assert 'DEFAULT_BRANCH="main"' not in step, (
+        "action.yml: the wd-context step must not silently default to 'main' when no source "
+        "resolves the default branch — that reviews the wrong ref for any repo whose default "
+        "branch isn't literally 'main'"
+    )
+    assert "could not resolve this repository's default branch" in step, (
+        "action.yml: the wd-context step must fail loud with a clear ::error:: message when the "
+        "default branch cannot be resolved from any source, rather than guessing"
+    )
