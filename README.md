@@ -106,12 +106,28 @@ pantheon counsel --branch
 ```
 
 Prints each agent's verdict to stdout and posts nothing — no PR required, no comment left
-anywhere. One prerequisite the Action path doesn't have: the default lane invokes the
+anywhere. One prerequisite the Action path below doesn't have: this local CLI lane invokes the
 [Claude Code CLI](https://claude.com/claude-code), so `claude` must be installed and
 authenticated on your machine (the same login you minted the Actions token from — that secret
 lives in GitHub and doesn't reach a local shell). Setup detail:
 [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/SETUP.md) ·
 every flag: [docs/CLI.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/CLI.md).
+
+**Via the Action.** Same three counsel agents, reachable through the same install as the gate
+above — no local `claude` CLI needed, since the Action invokes `anthropics/claude-code-action`
+the same way the gate does. Add `mode: counsel` to the Action step and it posts one advisory
+comment (never a failing check) instead of enforcing:
+
+```yaml
+- uses: G-Schumacher44/review-pantheon@v1
+  with:
+    mode: counsel
+    claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+```
+
+Whole install: [examples/review-counsel.yml](https://github.com/G-Schumacher44/review-pantheon/blob/dev/examples/review-counsel.yml)
+— `workflow_dispatch` (run it on a branch on demand) and/or `pull_request` gated on a label
+(e.g. `design`), your choice.
 
 ### Trust capsule — what you're wiring in
 
@@ -151,7 +167,9 @@ Reviewing untrusted content runs read-only by default; the full model and its ho
 
 **Gate agents** (Artemis, Apollo) enforce — they run on every PR and can block a merge.
 **Counsel agents** (Socrates, Diogenes, Plato) inform — a human weighs their verdict; they never
-gate, whatever they're pointed at (spec, design doc, proposal, code, or a diff).
+gate, whatever they're pointed at (spec, design doc, proposal, code, or a diff). Via the Action,
+that split is `mode: gate` (default, Artemis + Apollo) vs. `mode: counsel` (Socrates + Diogenes +
+Plato, posts advisory, never fails a check) — see "The other half" above.
 
 | Agent | Tier | Role |
 |---|---|---|

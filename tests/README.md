@@ -9,7 +9,7 @@ rather than re-listing, per DESIGN.md rule 5.
 ## Bash fixture suites
 
 Black-box tests against the CLI, or unit tests for `install.sh` / `bootstrap.sh` / `release.yml`'s
-own logic. Each is a self-contained script (15 files; verified against `git ls-tree -r tests/*.sh`):
+own logic. Each is a self-contained script (16 files; verified against `git ls-tree -r tests/*.sh`):
 
 | Script | Covers |
 |---|---|
@@ -28,6 +28,7 @@ own logic. Each is a self-contained script (15 files; verified against `git ls-t
 | `tests/test-bootstrap-release.sh` | `bootstrap.sh`'s `--version`/release-fetch, unit-level: URL builders, checksum verify (happy + mismatch), offline flag validation. |
 | `tests/test-bootstrap-release-e2e.sh` | The same `--version` path, integration-level: a real stubbed-`curl` checksum-verified fetch through extraction and a working `install.sh` run, plus the `pantheon` package venv installing and running from the fetched prefix. |
 | `tests/test-release-tag-gates.sh` | `.github/workflows/release.yml`'s two tag gates: strict-semver validation and the `origin/main`-ancestry check. |
+| `tests/test-counsel-mode-fail-closed.sh` | `action/lib/combine_verdicts.sh`'s `mode: counsel` carve-out (issue #95) — the negative control proving it exits 0 on a fully-failed panel and on a red verdict alike, the advisory banner appears exactly once, and gate-mode (`MODE` unset) output is byte-for-byte unchanged. |
 
 Run one, or the ones relevant to your change:
 
@@ -46,13 +47,14 @@ directly (argv/PATH/environment construction, temp-file placement, `gate.conf` p
 console-script resolution, and similar). **No 1:1 duplication of the black-box exams** — a pytest
 file that would just re-run scenarios a `tests/test-*-python.sh` suite already covers as a black box
 doesn't get written; each file's own docstring states what black-box coverage it complements, not
-repeats (12 files, `tests/test_*.py`; verified against `git ls-tree -r tests/test_*.py`):
+repeats (13 files, `tests/test_*.py`; verified against `git ls-tree -r tests/test_*.py`):
 
 | Script | Covers |
 |---|---|
 | `tests/test_action_guard.py` | `tests/check_action_expressions.py` itself — one planted violation per YAML syntax form (block-scalar `run:`, single-line `run:`, `pull_request_target`, missing `env:` binding) plus the clean counterparts. The guard is CI's only enforcement of three SECURITY.md claims, so it needs a test that proves it can fail. |
 | `tests/test_cli_agents_dir.py` | `pantheon.cli._agents_dir()`'s fallback-selection logic (mocked) — persona resolution from a real, non-editable `pip`/`pipx` install vs. a dev-checkout sibling directory. |
 | `tests/test_cli_helpers.py` | `pantheon.cli`'s pure-function seams no black-box suite drives directly — `_parse_conf_text` (the `gate.conf` key=value parser) — plus `_build_prompt`'s per-mode header shape and `_resolve_branch_context` against real git fixtures (both fail-closed refusals, the base-tip policy anchor, detached HEAD, dirty-tree warning). |
+| `tests/test_counsel_mode.py` | `action.yml`'s `mode: counsel` wiring (issue #95) — the `mode` input's default, that `Enforce gate result` is the only step gated off in counsel mode, the never-fails `Counsel result` step, the gate/counsel agent-selection carve-outs, and the `continue-on-error` carve-out on the steps between auth and the combine step. |
 | `tests/test_docs_pin_drift.py` | `action.yml`'s upstream `claude-code-action` full-SHA pin vs. the pin SECURITY.md and DESIGN.md restate in prose — every doc naming a pin must name the LIVE one. The same hand-restated-value drift class as `tests/test_security_md_denied_commands.py`. |
 | `tests/test_execution.py` | `pantheon.execution.resolve_console_script`, the shared function behind both `pantheon.cli`'s and `pantheon.providers`' own console-script resolution. |
 | `tests/test_jqjson.py` | `pantheon.jqjson`'s four functions directly and in isolation, parametrized across the JSON-boundary edge-case matrix. |
