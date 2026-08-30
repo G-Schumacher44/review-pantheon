@@ -91,8 +91,11 @@ the CLI only? Full walkthrough for every path: [docs/SETUP.md](https://github.co
 
 Before you hand it a token, here's the whole footprint:
 
-- **What it reads:** your PR's diff (`git diff <base>...<head>`) and the reviewer personas + verdict
-  decider, read base-pinned from your own checkout. It does not read or need your other secrets.
+- **What it reads:** your PR's diff (`git diff <base>...<head>`); plus two kinds of review input —
+  the bundled personas and verdict decider ship *inside the pinned action itself*
+  (`github.action_path`), so the commit-SHA pin below is what fixes their revision; your repo's own
+  `REVIEW_RULES.md`, `DESIGN.md`, and any custom personas (`personas_path`) are optional and, when
+  present, read base-pinned from your PR's base commit. It does not read or need your other secrets.
 - **What it can post:** exactly one PR comment — the combined verdict. No commits, no branches, no
   releases, no settings.
 - **The permissions ceiling** is the `permissions:` block in the Quick start YAML above:

@@ -396,7 +396,10 @@ jobs:
           # matching exclusion) — this fails the build if fix-round narrative creeps back into any
           # of them. Deliberately narrow, case-insensitive markers rather than a broad
           # "history"/"before"/"used to" sweep, which would false-positive on ordinary present-tense
-          # prose — these four are the actual shapes a round-by-round retelling takes.
+          # prose — these four are the actual shapes a round-by-round retelling takes. `-i` so
+          # capitalization variants ("Round 1", "First attempt", "Previously we") are caught too —
+          # prose capitalizes the start of a sentence/heading, and a case-sensitive pattern would
+          # miss exactly that common case.
           # `|| true` is load-bearing, not decoration: GitHub Actions runs `run:` blocks under
           # `bash -e` by default (`shell: bash` resolves to `bash --noprofile --norc -eo
           # pipefail {0}`), and grep exits 1 when it finds NO match — the everyday clean case.
@@ -404,7 +407,7 @@ jobs:
           # runs, so the check could never go green on any input.
           status=0
           for doc in DESIGN.md SECURITY.md CONTRIBUTING.md; do
-            hits="$(grep -noE 'Round [0-9]+|first attempt|the fix was|previously we' "$doc" || true)"
+            hits="$(grep -noiE 'Round [0-9]+|first attempt|the fix was|previously we' "$doc" || true)"
             if [[ -n "$hits" ]]; then
               echo "::error::$doc contains fix-round narrative marker(s) — a current-state doc describes behavior now; fix-round history belongs in git (commit messages, PR descriptions), never the doc. See CONTRIBUTING.md's design-constraints section."
               echo "$hits"
