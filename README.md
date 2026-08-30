@@ -106,8 +106,12 @@ pantheon counsel --branch
 ```
 
 Prints each agent's verdict to stdout and posts nothing — no PR required, no comment left
-anywhere. Same token, same env var (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`), no extra
-setup. Every flag: [docs/CLI.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/CLI.md).
+anywhere. One prerequisite the Action path doesn't have: the default lane invokes the
+[Claude Code CLI](https://claude.com/claude-code), so `claude` must be installed and
+authenticated on your machine (the same login you minted the Actions token from — that secret
+lives in GitHub and doesn't reach a local shell). Setup detail:
+[docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/SETUP.md) ·
+every flag: [docs/CLI.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/CLI.md).
 
 ### Trust capsule — what you're wiring in
 
