@@ -37,8 +37,10 @@ contract — renames only ride a major version bump, with a deprecation note.
 
 ## Quick start
 
-Zero footprint — drop this into `.github/workflows/review-gate.yml` (this is the whole install;
-gated on a repo variable so adding the file never silently starts gating PRs):
+No GitHub App, no signup, no third-party access grant — this file plus your own token is the
+entire footprint. Three steps, no app:
+
+**1. Add the workflow file** — `.github/workflows/review-gate.yml`:
 
 ```yaml
 name: review-pantheon
@@ -62,8 +64,13 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
-Set the `REVIEW_GATE_ENABLED` repo variable to `true` once the token secret is in place. Full
-recipe with comments explaining every line: [examples/review-gate.yml](https://github.com/G-Schumacher44/review-pantheon/blob/dev/examples/review-gate.yml).
+**2. Add the token secret** — mint one with `claude setup-token`, then add it as the
+`CLAUDE_CODE_OAUTH_TOKEN` repo Actions secret.
+
+**3. Arm it** — set the `REVIEW_GATE_ENABLED` repo variable to `true`. Until then, the workflow
+file sits inert; adding it never silently starts gating PRs.
+
+Full recipe with comments explaining every line: [examples/review-gate.yml](https://github.com/G-Schumacher44/review-pantheon/blob/dev/examples/review-gate.yml).
 
 *(`@v1` tracks the latest release — it moves when a new one is cut (see
 [RELEASING.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/RELEASING.md)). Prefer updates on your own schedule? Pin a full commit SHA
@@ -86,6 +93,21 @@ pantheon gate --pr <number> --dry-run
 runs the real thing — real diff, real prompts — right up to calling a provider, then prints
 exactly what it *would* post. `pantheon` is the CLI (docs/CLI.md). Prefer a vendored install, or
 the CLI only? Full walkthrough for every path: [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/SETUP.md).
+
+### The other half — counsel before you build
+
+The gate above enforces after the fact. The same install (`pip install review-pantheon` or
+`brew install g-schumacher44/tap/review-pantheon`) also ships `pantheon counsel` — three advisory
+agents (Socrates on options and go/no-go, Diogenes on excess, Plato on coherence) run against a
+branch diff *before* it's a PR:
+
+```bash
+pantheon counsel --branch
+```
+
+Prints each agent's verdict to stdout and posts nothing — no PR required, no comment left
+anywhere. Same token, same env var (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`), no extra
+setup. Every flag: [docs/CLI.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/CLI.md).
 
 ### Trust capsule — what you're wiring in
 
