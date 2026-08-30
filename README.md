@@ -25,12 +25,12 @@ once and forgotten: `DESIGN.md` in this repo is itself that contract.
 review has become the bottleneck, who want a second opinion that can't be talked out of a red
 verdict by a confident-sounding PR description.
 
-**Why this instead of CodeRabbit/Copilot code review:** a missing or malformed verdict can never
-render green — the fail-closed rule below is mechanical, not a review-quality promise. Two
-independent agents (Artemis, Apollo) split "does the diff look right" from "did the PR actually
-do what it claims," instead of one reviewer doing both jobs. `DESIGN.md` is a spec-as-contract —
-Apollo gates against what YOU wrote down, not a generic checklist. And it's bring-your-own Claude
-subscription (`claude_code_oauth_token`), not a per-seat SaaS.
+**Why this instead of CodeRabbit/Copilot code review:** two independent agents (Artemis, Apollo)
+split "does the diff look right" from "did the PR actually do what it claims," instead of one
+reviewer doing both jobs. `DESIGN.md` is a spec-as-contract — Apollo gates against what YOU wrote
+down, not a generic checklist. The verdict is [fail-closed](#how-the-gate-stays-honest), not a
+review-quality promise. And it's bring-your-own Claude subscription (`claude_code_oauth_token`),
+not a per-seat SaaS.
 
 **Stability.** Within v1, the action's input names, `gate.conf` keys, and CLI flags are a stable
 contract — renames only ride a major version bump, with a deprecation note.
@@ -87,6 +87,30 @@ runs the real thing — real diff, real prompts — right up to calling a provid
 exactly what it *would* post. `pantheon` is the CLI (docs/CLI.md). Prefer a vendored install, or
 the CLI only? Full walkthrough for every path: [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/SETUP.md).
 
+### Trust capsule — what you're wiring in
+
+Before you hand it a token, here's the whole footprint:
+
+- **What it reads:** your PR's diff (`git diff <base>...<head>`) and the reviewer personas + verdict
+  decider, read base-pinned from your own checkout. It does not read or need your other secrets.
+- **What it can post:** exactly one PR comment — the combined verdict. No commits, no branches, no
+  releases, no settings.
+- **The permissions ceiling** is the `permissions:` block in the Quick start YAML above:
+  `contents: read` and `pull-requests: write`, nothing more. GitHub enforces whatever the calling
+  workflow grants, so keep that block as shown — widening it widens a compromised run's reach
+  ([SECURITY.md → Blast radius](https://github.com/G-Schumacher44/review-pantheon/blob/dev/SECURITY.md#blast-radius)).
+- **The reviewer is SHA-pinned.** The action pins `anthropics/claude-code-action` to a full commit
+  SHA, not a floating tag. Verify the pin yourself before adopting — resolve the pinned version's
+  tag to its commit and confirm it matches `action.yml`:
+
+  ```bash
+  gh api repos/anthropics/claude-code-action/commits/v1.0.195 --jq .sha
+  # → d40ddef4c030e508327d6e35a9c45f3368482c50   (must equal the SHA action.yml pins)
+  ```
+
+Reviewing untrusted content runs read-only by default; the full model and its honest limits are in
+[SECURITY.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/SECURITY.md).
+
 ## The panel
 
 **Gate agents** (Artemis, Apollo) enforce — they run on every PR and can block a merge.
@@ -107,26 +131,24 @@ Full persona definitions, verdict vocabulary, and the gate-flow diagram: [DESIGN
 
 | I want to... | Go to |
 |---|---|
-| Decide whether to adopt this | This page, plus the security TL;DR below |
 | Install it | [docs/SETUP.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/SETUP.md) — three ways, zero-token demo |
 | Use the CLI | [docs/CLI.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/CLI.md) — every flag, `gate.conf`, worked examples |
-| Use it inside Claude Code | [skills/](https://github.com/G-Schumacher44/review-pantheon/tree/dev/skills) — `/gate` and `/counsel` commands plus the `gate`/`counsel`/`spec-driven`/`design-contract` skills, installed via `install.sh --claude` |
-| Understand the design contract | [DESIGN.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/DESIGN.md) — the binding spec |
 | Review security | [SECURITY.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/SECURITY.md) — scope, reporting, honest limits |
 | Contribute | [CONTRIBUTING.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/CONTRIBUTING.md) — ground rules, dev setup |
-| Cut a release (operator) | [RELEASING.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/RELEASING.md) |
-| See the full doc index | [docs/README.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/README.md) |
+
+Also here: the binding spec ([DESIGN.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/DESIGN.md)),
+the Claude Code skills ([skills/](https://github.com/G-Schumacher44/review-pantheon/tree/dev/skills),
+`/gate` + `/counsel`), the release ceremony ([RELEASING.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/RELEASING.md)),
+and the full doc index ([docs/README.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/README.md)).
 
 ## How the gate stays honest
 
-- Reviewing untrusted PR content runs read-only by default (`execution=readonly`).
-- That tool-scoping covers both surfaces — the CLI and the published action — which invoke
-  Claude; non-Claude provider lanes aren't covered.
-- Nothing here eliminates a fully-compromised agent handing back a deceptive-but-schema-valid
-  verdict — cross-review by a second agent is the real backstop, not a guarantee.
-
-Full technical detail, honestly scoped: [SECURITY.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/SECURITY.md) and DESIGN.md's ["Security
-posture"](https://github.com/G-Schumacher44/review-pantheon/blob/dev/DESIGN.md#security-posture).
+A missing, empty, or unparseable verdict can never render green — it degrades to `UNVERIFIED`,
+mechanically, so the one failure mode worse than an honest red can't happen quietly. Cross-review by
+a second agent is the real backstop against a compromised agent's deceptive-but-schema-valid
+verdict, not a guarantee. Full model, honestly scoped:
+[SECURITY.md](https://github.com/G-Schumacher44/review-pantheon/blob/dev/SECURITY.md) and DESIGN.md's
+["Security posture"](https://github.com/G-Schumacher44/review-pantheon/blob/dev/DESIGN.md#security-posture).
 
 ## Works with Conductor
 
@@ -137,24 +159,12 @@ pressure-tests the plan before it's built.
 ---
 
 <a name="on-generative-ai-use"></a>
-**On generative AI use.** Claude agents built this repo — a from-scratch public rebuild of a
-private review system the author runs, no code copied over, with `DESIGN.md` as the binding
-contract and a human coordinator directing the work.
-
-It couldn't gate itself into existence: of the first 44 commits, half went straight to `dev`,
-because there was no gate yet to stop them — the original CLI, the Action, and the installers
-among them. Branch protection landed 2026-07-31; since then everything goes through the gate
-on a pull request, fail-closed — Artemis on every diff, Apollo wherever there's a claim of
-work to verify (docs-only changes skip him, loudly) — with one disclosed exception that used
-the admin hatch and was re-landed through the gate after (CONTRIBUTING.md's "Ground rules"
-covers the hatch).
-The history shows which is which — that's the point of keeping it.
-
-Fittingly, one of the gate's first real catches was in this repo's own pre-gate code: PR text
-could reach a shell string in a vendored CI workflow — the classic Actions injection. It was
-caught and closed while the repo was still private, days before the first public release, and
-the published action itself never carried it. Built by AI, directed by a human, gated by
-itself — and honest about the order those happened in.
+**On generative AI use.** Claude agents built this repo — a from-scratch public rebuild of a private
+review system the author runs, no code copied over, `DESIGN.md` as the binding contract, a human
+coordinator directing. It has gated its own PRs since branch protection landed 2026-07-31 (one
+disclosed pre-gate exception used the admin hatch and was re-landed through the gate after —
+CONTRIBUTING.md's "Ground rules" covers it). The git history shows what landed before the gate and
+what after; that's the point of keeping it. See DESIGN.md for the design story.
 
 ## License
 
