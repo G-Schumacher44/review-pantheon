@@ -89,22 +89,29 @@ the CLI only? Full walkthrough for every path: [docs/SETUP.md](https://github.co
 
 ### Trust capsule — what you're wiring in
 
-Before you hand it a token, here's the whole footprint:
+Before you hand it a token, here's what you're wiring in:
 
-- **What it reads:** your PR's diff (`git diff <base>...<head>`); plus two kinds of review input —
-  the bundled personas and verdict decider ship *inside the pinned action itself*
-  (`github.action_path`), so the commit-SHA pin below is what fixes their revision; your repo's own
-  `REVIEW_RULES.md`, `DESIGN.md`, and any custom personas (`personas_path`) are optional and, when
-  present, read base-pinned from your PR's base commit. It does not read or need your other secrets.
+- **What it sends to the reviewer:** your PR's diff (`git diff <base>...<head>`); plus two kinds of
+  review input — the bundled personas and verdict decider ship *inside the action itself*
+  (`github.action_path`), so their revision is fixed by the ref your workflow calls — `@v1` in the
+  Quick start is a moving major tag; call a release tag or full commit SHA instead to freeze them;
+  your repo's own `REVIEW_RULES.md`, `DESIGN.md`, and any custom personas (`personas_path`) are
+  optional and, when present, read base-pinned from your PR's base commit. It does not read or need
+  your other secrets.
+- **What it could reach:** the reviewer's `Read`/`Grep`/`Glob` tools are not path-scoped — they can
+  open any file the runner process can read ([SECURITY.md → Execution
+  tiers](https://github.com/G-Schumacher44/review-pantheon/blob/dev/SECURITY.md#execution-tiers)).
+  The list above is what a review *uses*; this line is the honest ceiling on what it *could* read.
 - **What it can post:** exactly one PR comment — the combined verdict. No commits, no branches, no
   releases, no settings.
 - **The permissions ceiling** is the `permissions:` block in the Quick start YAML above:
   `contents: read` and `pull-requests: write`, nothing more. GitHub enforces whatever the calling
   workflow grants, so keep that block as shown — widening it widens a compromised run's reach
   ([SECURITY.md → Blast radius](https://github.com/G-Schumacher44/review-pantheon/blob/dev/SECURITY.md#blast-radius)).
-- **The reviewer is SHA-pinned.** The action pins `anthropics/claude-code-action` to a full commit
-  SHA, not a floating tag. Verify the pin yourself before adopting — resolve the pinned version's
-  tag to its commit and confirm it matches `action.yml`:
+- **The inner reviewer is SHA-pinned.** Inside the action, `anthropics/claude-code-action` is
+  pinned to a full commit SHA, not a floating tag (this pin covers the reviewer engine — the outer
+  ref your workflow calls is governed by the bullet above). Verify the pin yourself before
+  adopting — resolve the pinned version's tag to its commit and confirm it matches `action.yml`:
 
   ```bash
   gh api repos/anthropics/claude-code-action/commits/v1.0.195 --jq .sha
