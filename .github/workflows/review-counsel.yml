@@ -1,19 +1,22 @@
-# .github/workflows/review-counsel.yml — this repo's OWN counsel install (dogfood). Unlike the
-# consumer stub it was copied from (examples/review-counsel.yml, which pins `@v1`), this copy
-# runs `uses: ./` — the action at THIS commit — so counsel here always exercises the current
-# head, not the last release. (The v0.4.0 release demo proved why: `@v1` at v0.3.0 has no
-# `mode:` input, and GitHub silently ignores unknown inputs — the run degraded to a gate with
-# only a warning annotation.) See DESIGN.md's "Counsel mode (the Action)" for the contract.
+# .github/workflows/review-counsel.yml — this repo's OWN counsel install (dogfood), split into
+# two jobs on the self-test artemis's blocker (PR #99):
+#
+#   - `counsel-label` (pull_request: labeled `design`) runs the PINNED `@v1` — never `./`. On a
+#     labeled PR, `uses: ./` would execute the PR's OWN copy of the action code (action.yml,
+#     pantheon/verdict.py) with this repo's secret and write permission — a same-repo PR could
+#     tamper with the verdict path and be run at the exact moment it is least vetted. The pin
+#     keeps executed code independent of the reviewed diff, same trust boundary as SECURITY.md's
+#     fork-PR posture and action.yml's base-pinned `personas_path`.
+#   - `counsel-dispatch` (workflow_dispatch) runs `uses: ./` — the action at the CHOSEN ref. A
+#     dispatch is a maintainer-initiated act on a ref they deliberately picked, so head-dogfood
+#     belongs here and only here.
+#
+# Consumers: copy examples/review-counsel.yml (all-@v1), not this file. Contract: DESIGN.md's
+# "Counsel mode (the Action)".
 name: review-pantheon-counsel
 
 on:
-  # Run counsel on demand against whichever branch you pick in the Actions UI ("Run workflow") —
-  # there is no PR yet at this point, that's the point. The verdict prints to this run's job
-  # log/step summary; nothing is posted anywhere, because there's nowhere to post it.
   workflow_dispatch: {}
-  # Run counsel on a PR only when explicitly asked for — a `design` label, not every PR. The
-  # action itself does not check for the label; that's this job's own `if:` below, the same
-  # pattern the draft-PR skip in examples/review-gate.yml uses. Rename the label to taste.
   pull_request:
     types: [labeled]
 
@@ -22,19 +25,28 @@ permissions:
   pull-requests: write
 
 jobs:
-  counsel:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'design' }}
+  counsel-label:
+    if: ${{ github.event_name == 'pull_request' && github.event.label.name == 'design' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          fetch-depth: 0 # full history: workflow_dispatch needs it to resolve a merge-base
+          fetch-depth: 0
+      - uses: G-Schumacher44/review-pantheon@v1
+        with:
+          mode: counsel
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
+  counsel-dispatch:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history: dispatch needs it to resolve a merge-base
       - uses: ./
         with:
           mode: counsel
-          # Set exactly one of these two — it fails loud otherwise. Same secret review-gate.yml
-          # uses; counsel mode needs no separate token.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
