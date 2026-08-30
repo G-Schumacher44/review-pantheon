@@ -1,10 +1,9 @@
-# examples/review-counsel.yml — the consumer stub for `mode: counsel` (issue #95). Copy to
-# .github/workflows/review-counsel.yml alongside (or instead of) examples/review-gate.yml — the
-# two are independent installs of the same action.yml, one enforcing, one advisory. See
-# DESIGN.md's "Counsel mode (the Action)" section for the full contract.
-#
-# `uses: G-Schumacher44/review-pantheon@v1` tracks the latest release, same as review-gate.yml —
-# see that file's own header comment for the SHA-pin alternative.
+# .github/workflows/review-counsel.yml — this repo's OWN counsel install (dogfood). Unlike the
+# consumer stub it was copied from (examples/review-counsel.yml, which pins `@v1`), this copy
+# runs `uses: ./` — the action at THIS commit — so counsel here always exercises the current
+# head, not the last release. (The v0.4.0 release demo proved why: `@v1` at v0.3.0 has no
+# `mode:` input, and GitHub silently ignores unknown inputs — the run degraded to a gate with
+# only a warning annotation.) See DESIGN.md's "Counsel mode (the Action)" for the contract.
 name: review-pantheon-counsel
 
 on:
@@ -32,7 +31,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0 # full history: workflow_dispatch needs it to resolve a merge-base
 
-      - uses: G-Schumacher44/review-pantheon@v1
+      - uses: ./
         with:
           mode: counsel
           # Set exactly one of these two — it fails loud otherwise. Same secret review-gate.yml
