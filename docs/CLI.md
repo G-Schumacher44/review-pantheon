@@ -146,8 +146,8 @@ command refused under `readonly` that you expected to work, this is why, and it 
 remain allowed and are **not path-scoped** — the neutral working directory is not a read
 boundary, and the prompt deliberately hands the agent the checkout's absolute path to reach the
 repo with. What the neutral cwd buys is config isolation, not read confinement. See
-[SECURITY.md](../SECURITY.md#scope-notes--read-before-assuming-a-finding-is-new) for the full
-scope note and remaining limits.
+[SECURITY.md's "Execution tiers"](../SECURITY.md#execution-tiers) for the full scope note and
+remaining limits.
 
 **Provider-lane caveat.** This tiering is Claude-specific. `pantheon.providers`' codex/gemini/
 cursor lanes invoke their own CLIs directly and never consume the wrapper — Codex, Gemini, and

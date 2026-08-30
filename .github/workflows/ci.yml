@@ -293,30 +293,33 @@ jobs:
           # docs/DESIGN.template.md, so the rewritten blob URL must carry the docs/ segment.
           grep -qF '(https://github.com/G-Schumacher44/review-pantheon/blob/dev/docs/DESIGN.template.md' "$smoke/Home.md" || { echo "::error::rewrite_links resolved a docs-relative link against the wrong base"; exit 1; }
 
-      - name: Assert CONTRIBUTING.md's canonical test tables + prose counts match tests/* exactly
+      - name: Assert tests/README.md's canonical test tables + prose counts match tests/* exactly
         run: |
           set -euo pipefail
           status=0
 
+          # The canonical per-file test map lives in tests/README.md (CONTRIBUTING.md points there);
+          # this check keeps both tables and their prose counts honest against the real tree.
+
           # -- bash fixture-suite table vs tests/*.sh --
-          sh_table="$(grep -oE '^\| `tests/test-[a-z0-9-]+\.sh`' CONTRIBUTING.md | sed -E 's/^\| `(tests\/[a-z0-9-]+\.sh)`/\1/')"
+          sh_table="$(grep -oE '^\| `tests/test-[a-z0-9-]+\.sh`' tests/README.md | sed -E 's/^\| `(tests\/[a-z0-9-]+\.sh)`/\1/')"
           for f in tests/*.sh; do
-            grep -qxF "$f" <<<"$sh_table" || { echo "::error::$f is missing from CONTRIBUTING.md's bash test table (a prose mention elsewhere doesn't count)"; status=1; }
+            grep -qxF "$f" <<<"$sh_table" || { echo "::error::$f is missing from tests/README.md's bash test table (a prose mention elsewhere doesn't count)"; status=1; }
           done
           while IFS= read -r entry; do
             [[ -z "$entry" ]] && continue
-            [[ -f "$entry" ]] || { echo "::error::CONTRIBUTING.md's bash test table lists $entry, which no longer exists"; status=1; }
+            [[ -f "$entry" ]] || { echo "::error::tests/README.md's bash test table lists $entry, which no longer exists"; status=1; }
           done <<<"$sh_table"
 
           # -- pytest unit-layer table vs tests/*.py (same shape, so it can't drift silently the
           # same way the bash table's row-vs-tree check used to be the only thing enforced) --
-          py_table="$(grep -oE '^\| `tests/test_[a-z0-9_]+\.py`' CONTRIBUTING.md | sed -E 's/^\| `(tests\/test_[a-z0-9_]+\.py)`/\1/')"
+          py_table="$(grep -oE '^\| `tests/test_[a-z0-9_]+\.py`' tests/README.md | sed -E 's/^\| `(tests\/test_[a-z0-9_]+\.py)`/\1/')"
           for f in tests/test_*.py; do
-            grep -qxF "$f" <<<"$py_table" || { echo "::error::$f is missing from CONTRIBUTING.md's pytest test table (a prose mention elsewhere doesn't count)"; status=1; }
+            grep -qxF "$f" <<<"$py_table" || { echo "::error::$f is missing from tests/README.md's pytest test table (a prose mention elsewhere doesn't count)"; status=1; }
           done
           while IFS= read -r entry; do
             [[ -z "$entry" ]] && continue
-            [[ -f "$entry" ]] || { echo "::error::CONTRIBUTING.md's pytest test table lists $entry, which no longer exists"; status=1; }
+            [[ -f "$entry" ]] || { echo "::error::tests/README.md's pytest test table lists $entry, which no longer exists"; status=1; }
           done <<<"$py_table"
 
           # -- prose counts vs the real tree — a table can be complete while the SENTENCE next to
@@ -328,18 +331,17 @@ jobs:
           # Those coincided until the first non-test .py landed here, at which point counting all
           # .py made the check demand a number the sentence does not describe.
           py_count_tree=$(git ls-tree -r --name-only HEAD tests/ | grep -c '/test_.*\.py$')
-          # sort -u: the count sentence is deliberately allowed to appear more than once (the
-          # table intro and its own subsection heading both cite it) — dedupe identical repeats,
-          # but a genuine mismatch between two citations still surfaces as more than one line,
-          # which the single-value check below correctly rejects.
-          sh_count_prose="$(grep -oE '\([0-9]+ files; verified against `git ls-tree -r tests/\*\.sh`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
-          py_count_prose="$(grep -oE '\([0-9]+ files, `tests/test_\*\.py`; verified against `git ls-tree -r tests/test_\*\.py`\)' CONTRIBUTING.md | grep -oE '[0-9]+' | sort -u)"
-          [[ -n "$sh_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's bash-suite prose count sentence — did its wording change? update this check's regex to match"; status=1; }
-          [[ -n "$py_count_prose" ]] || { echo "::error::couldn't find CONTRIBUTING.md's pytest prose count sentence — did its wording change? update this check's regex to match"; status=1; }
-          [[ "$(wc -l <<<"$sh_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct bash-suite count across its mentions: $sh_count_prose"; status=1; }
-          [[ "$(wc -l <<<"$py_count_prose")" -eq 1 ]] || { echo "::error::CONTRIBUTING.md cites more than one distinct pytest count across its mentions: $py_count_prose"; status=1; }
-          [[ "$sh_count_prose" == "$sh_count_tree" ]] || { echo "::error::CONTRIBUTING.md's bash-suite prose count ($sh_count_prose) != actual tests/*.sh count ($sh_count_tree)"; status=1; }
-          [[ "$py_count_prose" == "$py_count_tree" ]] || { echo "::error::CONTRIBUTING.md's pytest prose count ($py_count_prose) != actual tests/test_*.py count ($py_count_tree)"; status=1; }
+          # sort -u: the count sentence is deliberately allowed to appear more than once — dedupe
+          # identical repeats, but a genuine mismatch between two citations still surfaces as more
+          # than one line, which the single-value check below correctly rejects.
+          sh_count_prose="$(grep -oE '\([0-9]+ files; verified against `git ls-tree -r tests/\*\.sh`\)' tests/README.md | grep -oE '[0-9]+' | sort -u)"
+          py_count_prose="$(grep -oE '\([0-9]+ files, `tests/test_\*\.py`; verified against `git ls-tree -r tests/test_\*\.py`\)' tests/README.md | grep -oE '[0-9]+' | sort -u)"
+          [[ -n "$sh_count_prose" ]] || { echo "::error::couldn't find tests/README.md's bash-suite prose count sentence — did its wording change? update this check's regex to match"; status=1; }
+          [[ -n "$py_count_prose" ]] || { echo "::error::couldn't find tests/README.md's pytest prose count sentence — did its wording change? update this check's regex to match"; status=1; }
+          [[ "$(wc -l <<<"$sh_count_prose")" -eq 1 ]] || { echo "::error::tests/README.md cites more than one distinct bash-suite count across its mentions: $sh_count_prose"; status=1; }
+          [[ "$(wc -l <<<"$py_count_prose")" -eq 1 ]] || { echo "::error::tests/README.md cites more than one distinct pytest count across its mentions: $py_count_prose"; status=1; }
+          [[ "$sh_count_prose" == "$sh_count_tree" ]] || { echo "::error::tests/README.md's bash-suite prose count ($sh_count_prose) != actual tests/*.sh count ($sh_count_tree)"; status=1; }
+          [[ "$py_count_prose" == "$py_count_tree" ]] || { echo "::error::tests/README.md's pytest prose count ($py_count_prose) != actual tests/test_*.py count ($py_count_tree)"; status=1; }
 
           exit "$status"
 
@@ -386,23 +388,35 @@ jobs:
           done
           exit "$status"
 
-      - name: DESIGN.md contains no fix-round narrative markers
+      - name: Contract docs contain no fix-round narrative markers
         run: |
           set -uo pipefail
+          # DESIGN.md, SECURITY.md, and CONTRIBUTING.md are current-state docs, not changelogs
+          # (CONTRIBUTING.md's design-constraints section, skills/design-contract/SKILL.md's
+          # matching exclusion) — this fails the build if fix-round narrative creeps back into any
+          # of them. Deliberately narrow, case-insensitive markers rather than a broad
+          # "history"/"before"/"used to" sweep, which would false-positive on ordinary present-tense
+          # prose — these four are the actual shapes a round-by-round retelling takes. `-i` so
+          # capitalization variants ("Round 1", "First attempt", "Previously we") are caught too —
+          # prose capitalizes the start of a sentence/heading, and a case-sensitive pattern would
+          # miss exactly that common case.
           # `|| true` is load-bearing, not decoration: GitHub Actions runs `run:` blocks under
           # `bash -e` by default (`shell: bash` resolves to `bash --noprofile --norc -eo
-          # pipefail {0}`), and grep exits 1 when it finds NO match — the everyday "DESIGN.md is
-          # clean" case. Without this, the clean case aborts the step right here, before the
-          # `if` below ever runs, so the check could never go green on any input (planted-marker
-          # AND clean both "fail," just for different reasons) — caught by the coordinator after
-          # a real CI run on this exact step failed with zero markers actually present.
-          hits="$(grep -noE 'Round [0-9]+|first attempt|the fix was|previously we' DESIGN.md || true)"
-          if [[ -n "$hits" ]]; then
-            echo "::error::DESIGN.md contains fix-round narrative marker(s) — a contract describes current-state behavior only; fix-round history belongs in git (commit messages, PR descriptions), never the doc. See CONTRIBUTING.md's design-constraints section."
-            echo "$hits"
-            exit 1
-          fi
-          echo "DESIGN.md: no fix-round narrative markers found"
+          # pipefail {0}`), and grep exits 1 when it finds NO match — the everyday clean case.
+          # Without this, the clean case aborts the step right here, before the `if` below ever
+          # runs, so the check could never go green on any input.
+          status=0
+          for doc in DESIGN.md SECURITY.md CONTRIBUTING.md; do
+            hits="$(grep -noiE 'Round [0-9]+|first attempt|the fix was|previously we' "$doc" || true)"
+            if [[ -n "$hits" ]]; then
+              echo "::error::$doc contains fix-round narrative marker(s) — a current-state doc describes behavior now; fix-round history belongs in git (commit messages, PR descriptions), never the doc. See CONTRIBUTING.md's design-constraints section."
+              echo "$hits"
+              status=1
+            else
+              echo "$doc: no fix-round narrative markers found"
+            fi
+          done
+          exit "$status"
 
   setup-smoke:
     # Clean-machine, real-Linux run of the setup story (see Dockerfile.smoke's header): required

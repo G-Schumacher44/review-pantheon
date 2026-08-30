@@ -1,6 +1,6 @@
 """tests/test_security_md_denied_commands.py — SECURITY.md's prose list vs. the live source.
 
-SECURITY.md's "The built-in bypass, and what now closes it" section hand-restates, in prose, the
+SECURITY.md's "Built-in read commands denied under `readonly`" section hand-restates, in prose, the
 same 15 command names that live as code in ``pantheon.execution.DENIED_BUILTIN_BASH_COMMANDS`` —
 docs need to stay readable prose, so the enumeration itself is not derived at doc-render time, but
 nothing PREVIOUSLY asserted the two stayed in sync (issue #78's third instance of the same drift
@@ -29,10 +29,10 @@ SECURITY_MD = REPO_ROOT / "SECURITY.md"
 
 # The command list lives in one sentence under this heading, as a run of backtick-wrapped, single
 # lowercase words — anchored to exactly that sentence (not the whole paragraph, let alone the
-# whole file) so unrelated backtick terms nearby (`--allowedTools` two sentences earlier, and
-# `readonly` — a TIER name, not a command — in the very next sentence) can never be mistaken for a
-# denied-command name.
-_SECTION_HEADING = "### The built-in bypass, and what now closes it"
+# whole file) so unrelated backtick terms nearby (`--allowedTools` in the same sentence, and
+# `readonly` — a TIER name, not a command — in the sentence the end-anchor opens) can never be
+# mistaken for a denied-command name.
+_SECTION_HEADING = "### Built-in read commands denied under `readonly`"
 _LIST_SENTENCE_END = "Under `readonly`"
 
 

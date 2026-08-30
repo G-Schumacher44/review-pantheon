@@ -103,3 +103,23 @@ with a permissions error, that's the ruleset doing its job, not a bug.
       (`curl -s https://pypi.org/pypi/review-pantheon/json` → the sdist entry's URL + digest —
       wait for the PyPI publish job above to finish first). Without this, `brew install` keeps
       serving the previous release indefinitely.
+
+## Migrating a pre-#36 installed workflow
+
+Issue #36 deleted the vendored `action/review.yml` reimplementation, so every install method is now
+a thin caller of `action.yml`. A repo whose `.github/workflows/review.yml` still carries the OLD
+vendored copy behaves differently on fork PRs — a separate `fork-notice` job with the `review` job
+skipped at *job* level, so the check reports **skipped**, not **success** — and needs a one-time
+migration.
+
+- **Reinstall the generated workflow.** Delete the old `.github/workflows/review.yml`, then re-run
+  `install.sh`. A bare re-run is not enough: the installer never overwrites a file lacking its
+  GENERATED marker (the old vendored copy has none), so it reports a skip with this same
+  delete-and-rerun instruction instead.
+- **Fix required checks (do this or every PR blocks).** The old matrix workflow reported per-agent
+  contexts — `review (artemis)`, `review (apollo)` — that the generated replacement does not emit;
+  it reports one `review` context. If you made the old contexts required, branch protection waits
+  forever for checks that can no longer report. Remove the old matrix contexts, require `review`.
+- **Customized personas keep working by default.** The generated workflow sets
+  `personas_path: .github/review-agents`, so persona copies the migration preserved stay in effect.
+  Only if you deleted that line from the generated stub does the gate fall back to the bundled set.

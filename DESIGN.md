@@ -782,6 +782,16 @@ pass `bash -n` and shellcheck.
   below) — that's this repo's docs-publishing job, not the shipped gate.
 - No review of draft PRs, on either surface — see "Surface differences" above for how each
   surface enforces that.
+- **No `workflow_run` fork-PR gating.** The two-stage pattern (a secretless `pull_request` job
+  uploads the diff as an artifact; a trusted `workflow_run` job reviews it) is GitHub's documented
+  answer to gating fork PRs, but it does not work here and the action refuses that trigger outright.
+  Two independent reasons: `action.yml` declares no `pr_number` / `base_sha` / `head_sha` inputs —
+  every step reads them from `github.event.pull_request.*`, which is absent under `workflow_run`,
+  and GitHub documents `workflow_run.pull_requests` as empty for fork-originated PRs — and the gate
+  requires `git diff <base>...<head>` to resolve, so the fork's commit objects must be fetched into
+  the runner regardless of whether its tree is checked out. Restoring the path would take explicit
+  `pr_number`/`base_sha`/`head_sha` inputs plus a diff-only resolution that never fetches fork
+  commits. SECURITY.md's "Fork pull requests" section states the operational consequence.
 
 ## Layout
 
@@ -826,11 +836,11 @@ action.yml                 the published composite action (see "Published action
 examples/review-gate.yml   the consumer stub for action.yml; the entire footprint of
                            the published-action surface in a target repo
 tests/                     15 bash fixture-test scripts (black-box against the CLI, or unit
-                           tests for install.sh/bootstrap.sh/release.yml's own logic) plus 9
-                           pytest files (tests/test_*.py) — CONTRIBUTING.md's dev-setup tables
-                           are the canonical, complete list (verified against `git ls-tree -r
-                           tests/`; CI asserts the two stay in sync). Don't re-list them here —
-                           that's exactly the forked-inventory shape rule 5 exists to prevent.
+                           tests for install.sh/bootstrap.sh/release.yml's own logic) plus the
+                           pytest files (tests/test_*.py) — tests/README.md is the canonical,
+                           complete list (verified against `git ls-tree -r tests/`; CI asserts the
+                           two stay in sync). Don't re-list them here — that's exactly the
+                           forked-inventory shape rule 5 exists to prevent.
 install.sh                 idempotent installer into a target repo (refuses to clobber
                            customized files); does not install gate.conf; --claude/--cursor/
                            --codex/--gemini generate per-tool projections of agents/*.md for
