@@ -185,7 +185,7 @@ ARTEMIS_FINDINGS='{"agent":"artemis","verdict":"SHIP","has_blocker":false,"findi
 export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
 
 out="$(render "$HEAD_SHA" artemis)"
-assert_contains "malformed-findings" "table top-finding cell degrades to em dash, not a crash" "$out" "| artemis | \`SHIP\` — green | — |"
+assert_contains "malformed-findings" "table top-finding cell degrades to em dash, not a crash" "$out" "| artemis | 🟢 SHIP | — |"
 assert_contains "malformed-findings" "fold count degrades to 0, not the string's character length" "$out" "<summary>Full findings (0)</summary>"
 assert_not_contains "malformed-findings" "no bogus non-zero count leaks through" "$out" "Full findings (4)"
 
@@ -222,7 +222,7 @@ assert_contains "hostile-content" "angle brackets in .file are HTML-escaped" "$o
 assert_contains "hostile-content" "angle brackets in .issue are HTML-escaped too" "$out" "&lt;b&gt;tag&lt;/b&gt;"
 assert_not_contains "hostile-content" "no raw HTML tag reaches the human-readable section" "$human_readable" "<script>"
 assert_not_contains "hostile-content" "no raw HTML tag from .issue reaches the human-readable section" "$human_readable" "<b>tag</b>"
-assert_contains "hostile-content" "the verdict table cell keeps its own code-span backticks" "$out" "| artemis | \`FIX_FIRST\` — yellow |"
+assert_contains "hostile-content" "the verdict table cell renders the colored dot + plain verdict" "$out" "| artemis | 🟡 FIX_FIRST |"
 assert_contains "hostile-content" "the identity line keeps its own SHA code-span backticks" "$out" "**artemis** @ \`$SHORT_SHA\` — 🟡 FIX_FIRST"
 
 # ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ export ARTEMIS_COLOR ARTEMIS_VERDICT ARTEMIS_TOP ARTEMIS_FINDINGS
 export APOLLO_COLOR APOLLO_VERDICT APOLLO_TOP APOLLO_FINDINGS
 
 out="$(render "$HEAD_SHA" artemis apollo)"
-assert_contains "one-skipped" "skipped row is loud in the table" "$out" "| apollo | \`SKIPPED\` — yellow | skipped — docs-only diff: apollo skipped by design |"
+assert_contains "one-skipped" "skipped row is loud in the table" "$out" "| apollo | 🟡 SKIPPED | skipped — docs-only diff: apollo skipped by design |"
 assert_contains "one-skipped" "skipped agent still gets an identity-lined section" "$out" "**apollo** @ \`$SHORT_SHA\` — 🟡 SKIPPED"
 
 # ---------------------------------------------------------------------------
@@ -283,7 +283,7 @@ out="$(render "$HEAD_SHA" artemis)"
 human_readable="${out%%<summary>Raw verdict JSON*}"
 
 assert_contains "completeness" "table header survives" "$human_readable" "| Agent | Verdict | Top finding |"
-assert_contains "completeness" "the agent's table row is present and 3-column" "$human_readable" "| artemis | \`"
+assert_contains "completeness" "the agent's table row is present and 3-column" "$human_readable" "| artemis | 🔴"
 assert_count "completeness" "exactly two real <details> tags in the human-readable section" "$human_readable" "<details" 2
 assert_contains "completeness" "outer fold forced open on red" "$human_readable" "<details open>"
 assert_contains "completeness" "the identity line and its SHA code span survive" "$human_readable" "**artemis** @ \`$SHORT_SHA\` —"
