@@ -125,8 +125,8 @@ RULES_SRC="$SCRIPT_DIR/REVIEW_RULES.example.md"
 # action.yml itself pins anthropics/claude-code-action (a tag's owner can move it, a commit SHA
 # cannot). To re-pin: resolve the new release tag's commit the same way, update BOTH constants
 # (RELEASING.md's post-release checklist carries this step), and run tests/test-install.sh.
-WAY_A_PIN_SHA="1b0cb3080f35aebf84f56de35339a8fd9f6f1d99"
-WAY_A_PIN_RELEASE="v0.3.0"
+WAY_A_PIN_SHA="23a527ca9b7a7a5965403cbcb49e5e8ef0dec3ce"
+WAY_A_PIN_RELEASE="v0.4.0"
 
 SKIPPED=()
 
