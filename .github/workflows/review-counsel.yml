@@ -1,0 +1,38 @@
+# .github/workflows/review-counsel.yml — this repo's OWN counsel install (dogfood),
+# workflow_dispatch ONLY, after two gate rounds on PR #99 established the real boundaries:
+#
+#   - A `pull_request`-triggered lane cannot be secured for this purpose at all: GitHub resolves
+#     the triggering workflow FILE from the PR's own head/merge commit (only `pull_request_target`
+#     reads it from the base), so any same-repo PR can rewrite this file's own `uses:` line in the
+#     same PR it wants reviewed — a pin written here binds nothing for PR-triggered runs. The
+#     label-summon flow is therefore for CONSUMER repos (examples/review-counsel.yml, pinned @v1,
+#     under their own trust model where workflow-editing collaborators are already trusted); this
+#     repo dogfoods via dispatch only.
+#   - `workflow_dispatch` is a maintainer-initiated act on a deliberately chosen ref — the one
+#     context where running `uses: ./` (the action at that ref) is the point, not a hole.
+#   - actions/checkout is SHA-pinned (Codex): it runs before `uses: ./` executes with the token
+#     in hand, so a retargeted mutable tag there would own the lane; same discipline as
+#     action.yml's own SHA-pinned claude-code-action.
+#
+# Contract: DESIGN.md's "Counsel mode (the Action)".
+name: review-pantheon-counsel
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  counsel-dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 — resolve: gh api repos/actions/checkout/commits/v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history: dispatch needs it to resolve a merge-base
+      - uses: ./
+        with:
+          mode: counsel
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

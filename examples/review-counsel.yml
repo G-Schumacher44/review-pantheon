@@ -1,0 +1,41 @@
+# examples/review-counsel.yml — the consumer stub for `mode: counsel` (issue #95). Copy to
+# .github/workflows/review-counsel.yml alongside (or instead of) examples/review-gate.yml — the
+# two are independent installs of the same action.yml, one enforcing, one advisory. See
+# DESIGN.md's "Counsel mode (the Action)" section for the full contract.
+#
+# `uses: G-Schumacher44/review-pantheon@v1` tracks the latest release, same as review-gate.yml —
+# see that file's own header comment for the SHA-pin alternative.
+name: review-pantheon-counsel
+
+on:
+  # Run counsel on demand against whichever branch you pick in the Actions UI ("Run workflow") —
+  # there is no PR yet at this point, that's the point. The verdict prints to this run's job
+  # log/step summary; nothing is posted anywhere, because there's nowhere to post it.
+  workflow_dispatch: {}
+  # Run counsel on a PR only when explicitly asked for — a `design` label, not every PR. The
+  # action itself does not check for the label; that's this job's own `if:` below, the same
+  # pattern the draft-PR skip in examples/review-gate.yml uses. Rename the label to taste.
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  counsel:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'design' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history: workflow_dispatch needs it to resolve a merge-base
+
+      - uses: G-Schumacher44/review-pantheon@v1
+        with:
+          mode: counsel
+          # Set exactly one of these two — it fails loud otherwise. Same secret review-gate.yml
+          # uses; counsel mode needs no separate token.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

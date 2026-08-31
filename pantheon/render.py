@@ -759,9 +759,10 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
         findings_obj = d.findings_json if isinstance(d.findings_json, dict) else {}
         total_findings += len(_safe_findings(findings_obj))
 
-        # Sanitize the raw verdict value FIRST, then wrap it in our own backticks — sanitizing an
-        # already-backtick-wrapped string would treat those backticks as hostile content too.
-        vcell = f"`{sanitize_inline(d.verdict, repo_root)}` — {d.color}"
+        # Colored-dot + plain text, matching the full-findings section below — no badge-style
+        # code chip, no literal color word (operator design call, 2026-08-30). Sanitize the raw
+        # verdict value before it enters the cell, same chokepoint as every other field here.
+        vcell = f"{emoji_for_color(d.color)} {sanitize_inline(d.verdict, repo_root)}"
         topcell = sanitize_inline(_table_top_cell(d.verdict, d.top, findings_obj, repo_root), repo_root)
         lines.append(f"| {agent} | {vcell} | {topcell} |")
 
