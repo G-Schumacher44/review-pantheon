@@ -283,7 +283,7 @@ out="$(render "$HEAD_SHA" artemis)"
 human_readable="${out%%<summary>Raw verdict JSON*}"
 
 assert_contains "completeness" "table header survives" "$human_readable" "| Agent | Verdict | Top finding |"
-assert_contains "completeness" "the agent's table row is present and 3-column" "$human_readable" "| artemis | 🟢"
+assert_contains "completeness" "the agent's table row is present and 3-column" "$human_readable" "| artemis | 🔴"
 assert_count "completeness" "exactly two real <details> tags in the human-readable section" "$human_readable" "<details" 2
 assert_contains "completeness" "outer fold forced open on red" "$human_readable" "<details open>"
 assert_contains "completeness" "the identity line and its SHA code span survive" "$human_readable" "**artemis** @ \`$SHORT_SHA\` —"
