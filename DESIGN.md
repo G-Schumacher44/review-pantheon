@@ -788,10 +788,10 @@ already has the Action wired, not just a local `claude` CLI session.
   mode's own `pull_request` context: PR number and base/head SHAs come from
   `github.event.pull_request.*`, and the comment posts to that PR. `workflow_dispatch` — counsel
   mode only, refused under `mode: gate` — has no PR at all ("run counsel on a branch on demand" is
-  the point): base/head SHAs are resolved directly from the checked-out working tree (merge-base
-  against the repository's default branch) instead of a base-pinned read, and the verdict prints
-  to the job log/step summary instead of posting a comment, mirroring `pantheon counsel --branch`'s
-  own print-only behavior when no PR exists. Safe to skip base-pinning there specifically because
+  the point): base/head SHAs are resolved directly from the checked-out working tree instead of a
+  base-pinned read, and the verdict is both printed to the job log and appended to
+  `$GITHUB_STEP_SUMMARY` instead of posting a comment, mirroring `pantheon counsel --branch`'s own
+  print-only behavior when no PR exists. Safe to skip base-pinning there specifically because
   `workflow_dispatch` cannot be triggered by a fork or an outside contributor — only a principal
   with write/triage access dispatches it, over a ref they chose. The default branch itself is
   resolved most-trustworthy-first — `github.event.repository.default_branch` (the same `github`
@@ -800,6 +800,18 @@ already has the Action wired, not just a local `claude` CLI session.
   line — and this step fails loud rather than guessing "main" if all three come up empty
   (Codex P2, PR #98): a repo whose default branch isn't literally "main" would otherwise get
   silently reviewed against the wrong ref.
+- **Diff base vs. policy anchor — the same split `--branch` makes, mirrored here (issue #102).**
+  This lane resolves TWO different SHAs from that default branch, not one: the DIFF base is the
+  merge-base of `HEAD` and the default branch (three-dot semantics — a review covers what the
+  branch changed, not what the base moved on to since), while the POLICY anchor — everything
+  `rules_file`/`spec_file`/`personas_path` base-pinned-reads resolve against — is the default
+  branch's current TIP, exactly the rule "Review modes" above states for `--branch`'s own
+  `base_sha` ("anchors to the base branch TIP on both lanes"). Anchoring policy to the merge-base
+  instead would review a branch cut before the default branch tightened `REVIEW_RULES.md`, a
+  custom persona, or `gate.conf`'s `execution=` tier under the stale, weaker policy in force when
+  it forked — the identical mistake that section already documents fixing for the CLI. The `pull_request`
+  trigger needs no split: `github.event.pull_request.base.sha` already IS the base branch's tip,
+  so it serves both roles unchanged.
 - **The fail-closed carve-out.** Counsel is advisory by definition — a required check that can
   turn red from an advisory opinion is a design violation, not a stricter gate. Every step counsel
   mode runs between the trigger/auth checks and the final comment is either already

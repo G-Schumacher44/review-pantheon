@@ -111,6 +111,59 @@ else
 fi
 
 # -------------------------------------------------------------------------------------------
+# Issue #102, finding 2: with no PR_NUMBER (every workflow_dispatch counsel run — there is no PR
+# to comment on), the rendered verdict must ALSO reach $GITHUB_STEP_SUMMARY, not just the raw
+# step log — the "job log/step summary" promise DESIGN.md's "counsel mode" section and this
+# action's own `mode` input description make.
+# -------------------------------------------------------------------------------------------
+run4="$WORKDIR/run4"
+mkdir -p "$run4"
+summary4="$WORKDIR/step-summary4.md"
+: > "$summary4"
+out4="$(
+  cd "$ROOT" && env -i \
+    PATH="$PATH" \
+    RUNNER_TEMP="$run4" \
+    GITHUB_STEP_SUMMARY="$summary4" \
+    MODE=counsel \
+    POST_COMMENT=true \
+    HEAD_SHA=deadbeefcafe \
+    SOCRATES_COLOR=green \
+    SOCRATES_VERDICT=CLEAN \
+    DIOGENES_COLOR=green \
+    DIOGENES_VERDICT=CLEAN \
+    PLATO_COLOR=yellow \
+    PLATO_VERDICT=ADVISORY \
+    PLATO_TOP='a step-summary-shaped finding marker' \
+    bash "$COMBINE" "socrates diogenes plato" 2>&1
+)"
+rc4=$?
+
+if [[ "$rc4" -eq 0 ]]; then
+  pass "combine_verdicts.sh exits 0 with PR_NUMBER unset and GITHUB_STEP_SUMMARY set"
+else
+  fail "combine_verdicts.sh exited $rc4 with PR_NUMBER unset and GITHUB_STEP_SUMMARY set"
+fi
+
+if grep -qF 'PR_NUMBER is not set' <<<"$out4"; then
+  pass "still warns that comment-posting was skipped (no PR to post to)"
+else
+  fail "expected the 'PR_NUMBER is not set' warning, got: $out4"
+fi
+
+if [[ -s "$summary4" ]] && grep -qF 'a step-summary-shaped finding marker' "$summary4"; then
+  pass "rendered verdict markdown was appended to \$GITHUB_STEP_SUMMARY when PR_NUMBER is empty"
+else
+  fail "\$GITHUB_STEP_SUMMARY is missing the rendered verdict — got: $(cat "$summary4" 2>/dev/null)"
+fi
+
+if grep -qF 'advisory, not a gate' "$summary4" 2>/dev/null; then
+  pass "the counsel advisory banner reached \$GITHUB_STEP_SUMMARY too, not just the job log"
+else
+  fail "\$GITHUB_STEP_SUMMARY is missing the counsel advisory banner"
+fi
+
+# -------------------------------------------------------------------------------------------
 # Regression pin: gate mode (MODE unset, matching every pre-#95 invocation of this script) gets
 # NO banner and is byte-for-byte what render_comment alone would have produced — mode's addition
 # must not touch existing gate-mode output at all.

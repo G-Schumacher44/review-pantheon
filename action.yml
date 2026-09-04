@@ -382,6 +382,22 @@ runs:
     # counsel comment, never a failed job: see this action's `mode` input description, this file's
     # "resolve_ok" comment on the "Resolve gate configuration" step, and DESIGN.md's "counsel
     # mode" section for the fail-closed carve-out this is part of.
+    #
+    # base_sha (DIFF) vs policy_sha (POLICY ANCHOR) — issue #102's first finding. This step used
+    # to output a single `base_sha`, the merge-base of the default branch and HEAD, and every
+    # downstream base-pinned read (rules_file/spec_file/personas_path) anchored to it too. That
+    # conflates two different questions the CLI's `--branch` lane already keeps separate (see
+    # DESIGN.md's "Review modes" section, "`base_sha` anchors to the base branch TIP on both
+    # lanes"): what changed (the DIFF, which correctly wants the merge-base — three-dot diff
+    # semantics cover exactly what this branch changed, not what the base moved on to since) vs.
+    # which policy governs the review (which must be the base's CURRENT tip — a branch cut before
+    # the default branch tightened REVIEW_RULES.md, a custom persona, or gate.conf's execution=
+    # tier must still be reviewed under today's policy, not the stale one in force when it forked;
+    # pinning policy to the merge-base would silently under-enforce exactly the branches oldest
+    # enough to predate a tightened rule). `base_sha` below keeps its prior diff-only meaning
+    # (merge-base); `policy_sha` is new — the base ref's own tip, via `git rev-parse`, never the
+    # merge-base — and is what the "Resolve gate configuration" step's own `BASE_SHA` env now
+    # anchors base-pinned reads to for this lane.
     - name: Resolve workflow_dispatch context (counsel mode)
       id: wd-context
       if: ${{ inputs.mode == 'counsel' && github.event_name == 'workflow_dispatch' && steps.auth.outputs.gated != 'false' }}
@@ -404,6 +420,7 @@ runs:
           exit 1
         fi
         BASE_SHA="$(git merge-base "origin/${DEFAULT_BRANCH}" "$HEAD_SHA")"
+        POLICY_SHA="$(git rev-parse "origin/${DEFAULT_BRANCH}")"
         SHA_RE='^[0-9a-f]{7,40}$'
         if ! [[ "$HEAD_SHA" =~ $SHA_RE ]]; then
           echo "::error::review-pantheon: unsafe resolved head SHA '$HEAD_SHA' — refusing to use it in any git command."
@@ -413,8 +430,13 @@ runs:
           echo "::error::review-pantheon: unsafe resolved base SHA '$BASE_SHA' — refusing to use it in any git command."
           exit 1
         fi
+        if ! [[ "$POLICY_SHA" =~ $SHA_RE ]]; then
+          echo "::error::review-pantheon: unsafe resolved policy-anchor SHA '$POLICY_SHA' — refusing to use it in any git command."
+          exit 1
+        fi
         echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
         echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+        echo "policy_sha=$POLICY_SHA" >> "$GITHUB_OUTPUT"
         echo "base_ref=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
 
     - name: Resolve gate configuration
@@ -434,13 +456,21 @@ runs:
         MODEL: ${{ inputs.model }}
         EXECUTION: ${{ inputs.execution }}
         ACTION_PATH: ${{ github.action_path }}
-        # workflow_dispatch (counsel mode only) has no github.event.pull_request at all — its
-        # base SHA comes from the "Resolve workflow_dispatch context" step above instead. For
-        # every pull_request run (gate mode always; counsel mode's PR+label lane) this ternary
-        # resolves to exactly the same github.event.pull_request.base.sha as before mode existed
-        # — byte-identical for gate mode, which never sees any other event (enforced by the
-        # "Require an allowed trigger" step).
-        BASE_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_sha || github.event.pull_request.base.sha }}
+        # This step's BASE_SHA is the POLICY anchor — every pantheon_base_pinned_read call below
+        # (personas_path, RULES_FILE, SPEC_FILE) resolves against it. workflow_dispatch (counsel
+        # mode only) has no github.event.pull_request at all, so it comes from the "Resolve
+        # workflow_dispatch context" step's `policy_sha` output — the default branch's current
+        # TIP, deliberately NOT that same step's `base_sha` (the merge-base, used only for the
+        # diff) — see that step's own comment and DESIGN.md's "Review modes" section for why the
+        # two must differ (issue #102): pinning policy to the merge-base would review a branch cut
+        # before the default branch tightened REVIEW_RULES.md/a persona/gate.conf's execution=
+        # tier under the stale, weaker policy in force when it forked. For every pull_request run
+        # (gate mode always; counsel mode's PR+label lane) this ternary resolves to exactly the
+        # same github.event.pull_request.base.sha as before mode existed — byte-identical for gate
+        # mode, which never sees any other event (enforced by the "Require an allowed trigger"
+        # step) — the PR's base SHA is already the base branch's tip at merge time, so no split is
+        # needed there.
+        BASE_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.policy_sha || github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
 
@@ -869,6 +899,13 @@ runs:
         PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && '' || github.event.pull_request.number }}
         PR_TITLE: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.title }}
         BASE_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_sha || github.event.pull_request.base.sha }}
+        # POLICY_SHA — issue #102: the base-pinned "Pinned to ... (${POLICY_SHA})" messaging in
+        # build_prompt.sh must name the commit rules/spec were ACTUALLY read from (the "Resolve
+        # gate configuration" step's own BASE_SHA, which is policy_sha here — the default branch's
+        # tip), never BASE_SHA above (the merge-base, correct for the diff range only). For a
+        # pull_request run the two are identical (github.event.pull_request.base.sha), so this
+        # changes nothing there.
+        POLICY_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.policy_sha || github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.head_sha || github.event.pull_request.head.sha }}
         BASE_REF: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_ref || github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
@@ -934,6 +971,13 @@ runs:
         PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && '' || github.event.pull_request.number }}
         PR_TITLE: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.title }}
         BASE_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_sha || github.event.pull_request.base.sha }}
+        # POLICY_SHA — issue #102: the base-pinned "Pinned to ... (${POLICY_SHA})" messaging in
+        # build_prompt.sh must name the commit rules/spec were ACTUALLY read from (the "Resolve
+        # gate configuration" step's own BASE_SHA, which is policy_sha here — the default branch's
+        # tip), never BASE_SHA above (the merge-base, correct for the diff range only). For a
+        # pull_request run the two are identical (github.event.pull_request.base.sha), so this
+        # changes nothing there.
+        POLICY_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.policy_sha || github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.head_sha || github.event.pull_request.head.sha }}
         BASE_REF: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_ref || github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
@@ -996,6 +1040,13 @@ runs:
         PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && '' || github.event.pull_request.number }}
         PR_TITLE: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.title }}
         BASE_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_sha || github.event.pull_request.base.sha }}
+        # POLICY_SHA — issue #102: the base-pinned "Pinned to ... (${POLICY_SHA})" messaging in
+        # build_prompt.sh must name the commit rules/spec were ACTUALLY read from (the "Resolve
+        # gate configuration" step's own BASE_SHA, which is policy_sha here — the default branch's
+        # tip), never BASE_SHA above (the merge-base, correct for the diff range only). For a
+        # pull_request run the two are identical (github.event.pull_request.base.sha), so this
+        # changes nothing there.
+        POLICY_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.policy_sha || github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.head_sha || github.event.pull_request.head.sha }}
         BASE_REF: ${{ github.event_name == 'workflow_dispatch' && steps.wd-context.outputs.base_ref || github.event.pull_request.base.ref }}
         RULES_FILE: ${{ steps.resolve.outputs.rules_file }}
