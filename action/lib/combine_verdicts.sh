@@ -24,7 +24,10 @@
 #   unverified, same fail-closed rule as everywhere else in this repo.
 # Also reads from env:
 #   PR_NUMBER        - the PR to comment on (skips posting, with a warning, if unset — the
-#                       shape a workflow_dispatch counsel run always takes, since there is no PR)
+#                       shape a workflow_dispatch counsel run always takes, since there is no PR).
+#                       When unset, the rendered comment is ALSO appended to $GITHUB_STEP_SUMMARY
+#                       (issue #102) — the job log alone left the "job log/step summary" promise
+#                       in DESIGN.md's "counsel mode" section false.
 #   GH_TOKEN          - passed through to `gh pr comment`
 #   HEAD_SHA          - the reviewed PR head SHA, shown (short) in each agent's identity line
 #   POST_COMMENT      - "true"/"false"; "false" computes the result and prints it but posts
@@ -119,6 +122,17 @@ if [ "${POST_COMMENT:-true}" = "true" ]; then
   fi
 else
   echo "::notice::post_comment is false — computed the verdict but did not post a comment."
+fi
+
+# No PR exists to comment on (every workflow_dispatch counsel run — PR_NUMBER is always empty
+# there, regardless of POST_COMMENT) — issue #102's second finding. Before this, the rendered
+# verdict only reached the raw step log (via the `cat "$comment_file"` below), never
+# $GITHUB_STEP_SUMMARY, contradicting the "job log/step summary" promise DESIGN.md's "counsel
+# mode" section and this action's own `mode` input description make. Appended, not overwritten
+# ($GITHUB_STEP_SUMMARY is a running file other steps may also write to across the job) — this is
+# the ONLY place in this file that writes to it.
+if [ -z "${PR_NUMBER:-}" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  cat "$comment_file" >> "$GITHUB_STEP_SUMMARY"
 fi
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then

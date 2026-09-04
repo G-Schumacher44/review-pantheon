@@ -215,3 +215,92 @@ def test_workflow_dispatch_default_branch_resolution_is_robust() -> None:
         "action.yml: the wd-context step must fail loud with a clear ::error:: message when the "
         "default branch cannot be resolved from any source, rather than guessing"
     )
+
+
+def test_workflow_dispatch_splits_diff_base_from_policy_anchor() -> None:
+    """Issue #102, finding 1: `pantheon counsel --branch`'s CLI lane keeps the diff base (merge-
+    base — what changed) and the policy anchor (the base's current tip — which REVIEW_RULES.md/
+    persona/gate.conf content governs the review) as two different SHAs; the Action's
+    workflow_dispatch lane must make the identical split rather than pinning both to the
+    merge-base, which would silently under-enforce a branch cut before the default branch's own
+    policy tightened."""
+    action = _action()
+
+    wd_context = _step_named(action, "Resolve workflow_dispatch context (counsel mode)")
+    assert re.search(
+        r'^\s*BASE_SHA="\$\(git merge-base "origin/\$\{DEFAULT_BRANCH\}" "\$HEAD_SHA"\)"\s*$', wd_context, re.M
+    ), (
+        "action.yml: wd-context's base_sha (the DIFF base) must stay the merge-base of the "
+        "default branch and HEAD — unchanged by this split"
+    )
+    assert re.search(r'^\s*POLICY_SHA="\$\(git rev-parse "origin/\$\{DEFAULT_BRANCH\}"\)"\s*$', wd_context, re.M), (
+        "action.yml: wd-context must resolve a POLICY_SHA via `git rev-parse` of the default "
+        "branch's own ref (its current TIP), distinct from the merge-base"
+    )
+    assert re.search(r'^\s*echo "policy_sha=\$POLICY_SHA" >> "\$GITHUB_OUTPUT"\s*$', wd_context, re.M), (
+        "action.yml: wd-context must output policy_sha alongside base_sha/head_sha/base_ref"
+    )
+    assert "unsafe resolved policy-anchor SHA" in wd_context, (
+        "action.yml: wd-context must validate policy_sha against the SHA allowlist before "
+        "outputting it, same as base_sha/head_sha"
+    )
+
+    resolve = _step_named(action, "Resolve gate configuration")
+    assert re.search(
+        r"^\s*BASE_SHA:\s*\$\{\{\s*github\.event_name == 'workflow_dispatch' && "
+        r"steps\.wd-context\.outputs\.policy_sha \|\| github\.event\.pull_request\.base\.sha\s*\}\}\s*$",
+        resolve,
+        re.M,
+    ), (
+        "action.yml: 'Resolve gate configuration' (the step that base-pinned-reads "
+        "personas_path/rules_file/spec_file) must anchor its BASE_SHA to wd-context's "
+        "policy_sha (the default branch's tip) on workflow_dispatch, NOT base_sha (the "
+        "merge-base) — anchoring policy to the merge-base is exactly the bug this test guards "
+        "against"
+    )
+    assert "steps.wd-context.outputs.base_sha || github.event.pull_request.base.sha" not in resolve, (
+        "action.yml: 'Resolve gate configuration' must not anchor its policy reads to the "
+        "diff-base (merge-base) output of wd-context"
+    )
+
+    for agent in ("socrates", "diogenes", "plato"):
+        step = _step_named(action, f"Build prompt ({agent})")
+        assert re.search(
+            r"^\s*POLICY_SHA:\s*\$\{\{\s*github\.event_name == 'workflow_dispatch' && "
+            r"steps\.wd-context\.outputs\.policy_sha \|\| github\.event\.pull_request\.base\.sha\s*\}\}\s*$",
+            step,
+            re.M,
+        ), (
+            f"action.yml: 'Build prompt ({agent})' must pass build_prompt.sh a POLICY_SHA env "
+            "anchored to wd-context's policy_sha on workflow_dispatch, so the persona is told the "
+            "commit rules/spec were actually read from, not the diff's merge-base"
+        )
+        # BASE_SHA (the diff range shown to the persona) must still resolve to the merge-base —
+        # this split must not have collapsed the diff-base concept into the policy one.
+        assert re.search(
+            r"^\s*BASE_SHA:\s*\$\{\{\s*github\.event_name == 'workflow_dispatch' && "
+            r"steps\.wd-context\.outputs\.base_sha \|\| github\.event\.pull_request\.base\.sha\s*\}\}\s*$",
+            step,
+            re.M,
+        ), (
+            f"action.yml: 'Build prompt ({agent})' must keep BASE_SHA (the diff range) anchored "
+            "to wd-context's base_sha (the merge-base) — only the policy anchor should have moved"
+        )
+
+
+def test_build_prompt_sh_uses_policy_sha_for_pinned_messaging() -> None:
+    """The base-pinned rules/spec 'Pinned to ... (SHA)' messaging in build_prompt.sh must name the
+    commit content was actually read from (POLICY_SHA), not the diff base (BASE_SHA) — those two
+    now differ on the workflow_dispatch lane (issue #102)."""
+    script = (ROOT / "action" / "lib" / "build_prompt.sh").read_text(encoding="utf-8")
+    assert 'POLICY_SHA="${POLICY_SHA:-$BASE_SHA}"' in script, (
+        "action/lib/build_prompt.sh: must default POLICY_SHA to BASE_SHA when unset, so callers "
+        "that never set it (artemis/apollo, which never run under workflow_dispatch) keep "
+        "identical behavior to before this variable existed"
+    )
+    assert "Pinned to the base's current commit (${POLICY_SHA})" in script, (
+        "action/lib/build_prompt.sh: the rules-present pinned-content message must reference POLICY_SHA, not BASE_SHA"
+    )
+    assert "not present at base ${POLICY_SHA}" in script, (
+        "action/lib/build_prompt.sh: the rules-absent message must also reference POLICY_SHA"
+    )
