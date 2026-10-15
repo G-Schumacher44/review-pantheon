@@ -378,6 +378,10 @@ _KNOWN_SAFE_BARE_IDENTIFIERS = {
     "badge",
     "f_field",
     "ln",
+    # tail: the output of _machine_tail_text(...), assigned on its own line just above use.
+    # fence: _fence_for(tail) -- backticks only, no model text.
+    "tail",
+    "fence",
 }
 
 # A lines.append(...) call is exempt entirely when its whole argument is a static string literal
@@ -575,3 +579,38 @@ def test_every_credential_shaped_forwarded_env_key_is_redacted() -> None:
         f"render._CREDENTIAL_ENV_KEYS, so they could never be literally redacted: {sorted(missing)} "
         "-- add each to render._CREDENTIAL_ENV_KEYS"
     )
+
+
+# ---------------------------------------------------------------------------
+# Machine-tail fence collision (#85)
+# ---------------------------------------------------------------------------
+
+
+def _machine_tail_block(comment: str) -> tuple[str, str]:
+    """(opening fence line, body) of the first fenced block after the Raw verdict JSON summary,
+    parsed the CommonMark way: it closes on the first line of >= as many backticks, nothing else."""
+    after = comment.split("<summary>Raw verdict JSON</summary>", 1)[1].splitlines()
+    start = next(i for i, ln in enumerate(after) if ln.startswith("```"))
+    opener = after[start]
+    ticks = len(opener) - len(opener.lstrip("`"))
+    body: list[str] = []
+    for ln in after[start + 1 :]:
+        if ln.startswith("`" * ticks) and not ln.strip("`"):
+            return opener, "\n".join(body)
+        body.append(ln)
+    raise AssertionError("machine-tail fence never closed")
+
+
+def test_machine_tail_fence_cannot_be_closed_by_model_text() -> None:
+    payload = "not json {\n```\n## injected heading\n````\n"
+    data = render.AgentRenderData(findings_raw=payload)
+    comment = render.render_comment("abc1234", ["artemis"], {"artemis": data})
+    opener, body = _machine_tail_block(comment)
+    assert "## injected heading" in body, "the whole payload must stay inside the block"
+    assert len(opener) - len(opener.lstrip("`")) >= 5
+
+
+def test_machine_tail_fence_is_plain_triple_backtick_for_ordinary_json() -> None:
+    comment = render.render_comment("abc1234", ["artemis"], {"artemis": render.AgentRenderData()})
+    opener, _ = _machine_tail_block(comment)
+    assert opener == "```json"

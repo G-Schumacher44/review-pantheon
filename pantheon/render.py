@@ -675,6 +675,16 @@ def _machine_tail_text(raw_text: str, repo_root: str | None = None) -> str:
     return redact_paths(jqjson.dumps(parsed, indent=2, ensure_ascii=False), repo_root)
 
 
+def _fence_for(text: str) -> str:
+    """A Markdown code-fence delimiter that ``text`` cannot terminate early: CommonMark closes a
+    fence only on a line of at least as many backticks as the opener, so one more backtick than
+    the longest run in ``text`` (minimum three) can never collide, whatever the model wrote. This
+    matters on the machine tail's raw-text FALLBACK branch, where unparseable model output keeps
+    its real newlines and could carry a line of backticks followed by injected markdown."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 def _escape_lone_surrogates(s: str) -> str:
     """A Python ``str`` can hold a lone (unpaired) surrogate code point (U+D800-U+DFFF) —
     reachable here via a JSON ``\\ud800``-style escape in an agent's raw output. ``pantheon.jqjson``
@@ -837,7 +847,6 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
         d = data_for(agent)
         lines.append(f"**{agent}**")
         lines.append("")
-        lines.append("```json")
         # d.findings_raw is typed Optional[str] only to let AgentRenderData.__post_init__
         # populate it lazily from findings_json — by the time any AgentRenderData instance
         # exists, __post_init__ has always run and this is never actually None.
@@ -847,8 +856,11 @@ def render_comment(head_sha: str, agents: list[str], agent_data: dict, repo_root
         # adversarial-review, round-4 finding: redacting AFTER jqjson.dumps() escaped the text
         # could desync from repo_root's own raw form the moment repo_root contained a JSON-
         # escapable character).
-        lines.append(_machine_tail_text(d.findings_raw, repo_root))
-        lines.append("```")
+        tail = _machine_tail_text(d.findings_raw, repo_root)
+        fence = _fence_for(tail)
+        lines.append(f"{fence}json")
+        lines.append(tail)
+        lines.append(fence)
         lines.append("")
     lines.append("</details>")
     lines.append("</details>")
